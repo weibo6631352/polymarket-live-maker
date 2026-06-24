@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=78"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polymarket-live-maker"
+version = "0.1.0"
+description = "Autonomous live liquidity-rewards market maker on the official polymarket-client SDK. WebSocket-driven, no LLM in the hot path, real-money go-live behind an explicit operator switch."
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "polymarket-client>=0.1",  # official unified SDK (AsyncSecureClient)
+    "httpx>=0.27",             # thin public-CLOB reader for pool discovery
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+live-maker = "live_maker.runner:main"
+
+[tool.setuptools.packages.find]
+include = ["live_maker*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["live: tests requiring network access to Polymarket (skipped by default)"]

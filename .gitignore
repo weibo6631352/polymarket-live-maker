@@ -1,0 +1,27 @@
+# --- secrets: NEVER commit the operator's private key ---
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# tooling
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# runtime state the bot writes (pools cache, kill-switch flag, logs)
+state/
+*.log
+safe_pools.json
+KILL
