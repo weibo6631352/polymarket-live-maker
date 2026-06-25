@@ -33,9 +33,12 @@ _TIMEOUT = httpx.Timeout(10.0)
 class PolymarketClient:
     """HTTP client for Polymarket public APIs."""
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, rate_limiter=None) -> None:
         self.db = db
         self._http = httpx.Client(timeout=_TIMEOUT)
+        # optional shared TokenBucket — paces CLOB GETs under the global req/s cap
+        # so the maker loop can poll fast without tripping 429s. None = unlimited.
+        self.rate_limiter = rate_limiter
 
     def close(self) -> None:
         self._http.close()
@@ -85,6 +88,8 @@ class PolymarketClient:
 
     def _clob_get(self, path: str, params: dict | None = None) -> dict | list:
         """Make a GET request to the CLOB API."""
+        if self.rate_limiter is not None:
+            self.rate_limiter.acquire()      # global req/s cap (shared bucket)
         url = f"{CLOB_BASE}{path}"
         try:
             resp = self._http.get(url, params=params)

@@ -179,13 +179,18 @@ def classify_jump_risk(
 class RewardsClient:
     """HTTP client for Polymarket CLOB reward-pool, book, and history endpoints."""
 
-    def __init__(self, http: httpx.Client | None = None) -> None:
+    def __init__(self, http: httpx.Client | None = None, rate_limiter=None) -> None:
         self._http = http if http is not None else httpx.Client(timeout=_TIMEOUT)
+        # shared TokenBucket (same instance as the engine's) so scan/book/history
+        # reads share the one global req/s budget. None = unlimited.
+        self.rate_limiter = rate_limiter
 
     def close(self) -> None:
         self._http.close()
 
     def _get(self, url: str, params: dict | None = None) -> list | dict:
+        if self.rate_limiter is not None:
+            self.rate_limiter.acquire()      # global req/s cap (shared bucket)
         try:
             resp = self._http.get(url, params=params)
             resp.raise_for_status()

@@ -32,6 +32,8 @@ dependencies = [
 # is in the unified `py-sdk` — so plan to migrate eventually, but 0.34.x is fine now.
 live = [
     "py-clob-client>=0.34",
+    "socksio>=1.0",            # httpx SOCKS proxy support (reaching the CLOB via proxy)
+    "websocket-client>=1.7",   # real-time WS market + user channels (ws.py)
 ]
 dev = [
     "pytest>=8.0",
