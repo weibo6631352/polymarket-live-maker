@@ -108,9 +108,13 @@ class RunnerConfig:
     # PAPER simulator (accrue_maker_rewards, maker_fill). live=True always wins.
     dry_live: bool = True
     capital: float = 200.0
-    max_pools: int = 3
+    max_pools: int = 12                 # cap on held pools (was 3 — too few; concentrates risk)
     min_daily: float = 80.0
-    scan_top: int = 60
+    # how many top-by-daily pools to actually fetch books + classify jump-risk for.
+    # This TRUNCATES the universe BEFORE SAFE filtering, so too-low starves the book of
+    # SAFE candidates (live: top=60 -> 9 SAFE -> 5 held; top=250 -> ~30 SAFE -> ~20).
+    # Off the hot loop, threadpooled + bucket-paced, every discovery_interval_s.
+    scan_top: int = 250
     half_spread_ticks: int = 1
     # use the volatility-aware optimal half-spread (engine.suggest_maker_half_spread)
     # per pool at selection instead of the fixed 1-tick offset. Off by default.
@@ -196,9 +200,10 @@ class RunnerConfig:
             live=os.environ.get("PM_TRADER_LIVE", "0").strip() == "1",
             dry_live=os.environ.get("LM_DRY_LIVE", "1").strip() != "0",
             capital=_f("LM_CAPITAL", 200.0),
-            max_pools=_i("LM_MAX_POOLS", 3),
+            max_pools=_i("LM_MAX_POOLS", 12),
             min_daily=_f("LM_MIN_DAILY", 80.0),
-            scan_top=_i("LM_SCAN_TOP", 60),
+            scan_top=_i("LM_SCAN_TOP", 250),
+            max_token_overlap=_i("LM_MAX_TOKEN_OVERLAP", 1),  # was unwired -> stuck at 1
             poll_seconds=_f("LM_POLL_SECONDS", 60.0),
             discovery_interval_s=_f("LM_DISCOVERY_INTERVAL_S", 600.0),
             cooldown_rounds=_i("LM_COOLDOWN_ROUNDS", 3),
