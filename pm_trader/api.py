@@ -35,7 +35,10 @@ class PolymarketClient:
 
     def __init__(self, db: Database, rate_limiter=None) -> None:
         self.db = db
-        self._http = httpx.Client(timeout=_TIMEOUT)
+        # keepalive_expiry well above the poll cadence so the read connection stays
+        # hot (reused TCP+TLS) — no cold handshake on the next reward_config/book GET.
+        self._http = httpx.Client(timeout=_TIMEOUT,
+                                  limits=httpx.Limits(keepalive_expiry=30.0))
         # optional shared TokenBucket — paces CLOB GETs under the global req/s cap
         # so the maker loop can poll fast without tripping 429s. None = unlimited.
         self.rate_limiter = rate_limiter

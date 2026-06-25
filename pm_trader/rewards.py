@@ -180,7 +180,9 @@ class RewardsClient:
     """HTTP client for Polymarket CLOB reward-pool, book, and history endpoints."""
 
     def __init__(self, http: httpx.Client | None = None, rate_limiter=None) -> None:
-        self._http = http if http is not None else httpx.Client(timeout=_TIMEOUT)
+        # keepalive_expiry > re-sync cadence so the /book connection stays hot
+        self._http = http if http is not None else httpx.Client(
+            timeout=_TIMEOUT, limits=httpx.Limits(keepalive_expiry=30.0))
         # shared TokenBucket (same instance as the engine's) so scan/book/history
         # reads share the one global req/s budget. None = unlimited.
         self.rate_limiter = rate_limiter

@@ -127,6 +127,10 @@ class RunnerConfig:
     # rolling data retention (days) for the event log + equity curve + rotated logs
     retention_days: int = 30
     events_enabled: bool = True        # append-only per-poll/discovery event log
+    # throttle the per-pool "poll" heartbeat event: at a 1s cadence the granular
+    # series would bloat, so write at most one poll event per pool per this many
+    # seconds. Decisions (place/exit/reflex/discovery) are ALWAYS logged.
+    event_poll_every_s: float = 10.0
     # global CLOB request cap (req/s), shared by reads + writes + discovery via one
     # TokenBucket. 149 = the order-book rate limit (matches the sports-trader-cpp
     # daemon, i.e. 1 below 150). The bucket is the hard ceiling; tune via env.
@@ -160,6 +164,7 @@ class RunnerConfig:
             max_loss=_f("LM_MAX_LOSS_PER_DAY", 20.0),
             retention_days=_i("LM_RETENTION_DAYS", 30),
             events_enabled=os.environ.get("LM_EVENTS", "1").strip() != "0",
+            event_poll_every_s=_f("LM_EVENT_POLL_EVERY_S", 10.0),
             max_req_per_sec=_f("LM_MAX_REQ_PER_SEC", 149.0),
             ws_enabled=os.environ.get("LM_WS", "1").strip() != "0",
             resync_hz=_f("LM_BOOK_RESYNC_HZ", 20.0),
@@ -220,6 +225,7 @@ class LiveRunner:
         self._market_ch: MarketChannel | None = None   # real-time book (WS)
         self._user_ch: UserChannel | None = None       # real-time fills (WS, live)
         self._resync_thread: threading.Thread | None = None  # REST /book re-sync
+        self._poll_evt_at: dict[str, float] = {}   # token -> last poll-event time (throttle)
         # WS reflex: cancel a held pool's orders the instant its mid moves beyond the
         # band (decoupled from accounting; the next poll reposts via force_recenter).
         self._reflex_refs: dict[str, tuple[float, float]] = {}  # token -> (mid, band)
@@ -764,11 +770,19 @@ class LiveRunner:
                 recenter_ticks=self.cfg.recenter_ticks, force_recenter=forced)
         else:
             rows = self.engine.accrue_maker_rewards()
+        now_m = time.monotonic()
         for row in rows:
-            if self._events is not None:        # granular per-pool series for review
-                q = row.get("quote") or {}
+            q = row.get("quote") or {}
+            tok = q.get("token_id")
+            # throttle the per-pool "poll" heartbeat (always log fills/reconcile/exit)
+            notable = bool(row.get("fills_applied") or row.get("reconciled")
+                           or row.get("exit_failed"))
+            due = (tok not in self._poll_evt_at
+                   or now_m - self._poll_evt_at[tok] >= self.cfg.event_poll_every_s)
+            if self._events is not None and (notable or due):
+                self._poll_evt_at[tok] = now_m
                 self._event("poll", cond=q.get("market_condition_id"),
-                            token=q.get("token_id"), mid=row.get("mid"),
+                            token=tok, mid=row.get("mid"),
                             reward=row.get("reward"), share=row.get("share"),
                             inventory=row.get("inventory"),
                             inv_pnl_delta=row.get("inventory_pnl_delta"),
@@ -895,6 +909,11 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=handlers,
     )
+    # CRITICAL at a fast cadence: httpx/httpcore log EVERY request at INFO. With a
+    # 1s poll + 20/s /book re-sync + reflex that is millions of lines/day → silence
+    # them to WARNING. websocket-client's per-frame logs likewise.
+    for noisy in ("httpx", "httpcore", "websocket", "hpack"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     LiveRunner(cfg).run()
 
 

@@ -1211,8 +1211,10 @@ class Engine:
                     realized_bleed=quote.realized_bleed + rd_bleed, fills=quote.fills + rn,
                     last_mid=quote.last_mid, last_accrued_at=now_dt.isoformat(),
                     inventory=0.0, inventory_pnl=quote.inventory_pnl + rd_pnl)
-                self._exit_maker_quote(final, quote.last_mid, "rewards_ended", results,
-                                       inventory_pnl_delta=rd_pnl)
+                self._exit_maker_quote(
+                    final, quote.last_mid, "rewards_ended", results,
+                    crossing_cost=self.maker_crossing_cost_c / 100.0 * abs(final_inv),
+                    inventory_pnl_delta=rd_pnl)
                 continue
             if not r.get("book_ok"):
                 continue  # transient book/mid read failure — retry next poll
@@ -1277,9 +1279,11 @@ class Engine:
                     realized_bleed=quote.realized_bleed + bleed, fills=quote.fills + n_fills,
                     last_mid=mid, last_accrued_at=now_dt.isoformat(), inventory=0.0,
                     inventory_pnl=quote.inventory_pnl + pnl_delta)
-                self._exit_maker_quote(final, mid, "drift_exit", results,
-                                       reward=reward, inventory_pnl_delta=pnl_delta,
-                                       share=share, seconds=seconds)
+                self._exit_maker_quote(
+                    final, mid, "drift_exit", results,
+                    crossing_cost=self.maker_crossing_cost_c / 100.0 * abs(new_inventory),
+                    reward=reward, inventory_pnl_delta=pnl_delta,
+                    share=share, seconds=seconds)
                 continue
 
             # 5. RE-CENTER — cancel + repost the inventory-skewed quote on a tick move.

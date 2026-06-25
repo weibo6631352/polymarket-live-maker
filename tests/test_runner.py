@@ -413,6 +413,42 @@ class TestReflex:
         assert r._reflex_cancelled == set()         # consumed
 
 
+class TestPollEventThrottle:
+    def _rows(self):
+        return [{"quote": {"market_condition_id": "0xa", "token_id": "tok"},
+                 "mid": 0.5, "reward": 0.01}]
+
+    def test_poll_heartbeat_throttled(self, tmp_path):
+        import json
+
+        from pm_trader.events import EventLog
+        eng = FakeEngine(accrue_rows=self._rows())
+        r = _runner(engine=eng, submitter=FakeSubmitter(), event_poll_every_s=1e9)
+        r._events = EventLog(tmp_path / "events", retention_days=30)
+        r.poll_once()
+        r.poll_once()                       # within the window -> throttled
+        r._events.close()
+        lines = [json.loads(l) for f in (tmp_path / "events").glob("events-*.jsonl")
+                 for l in f.read_text().splitlines()]
+        assert sum(1 for e in lines if e["kind"] == "poll") == 1
+
+    def test_notable_rows_always_logged(self, tmp_path):
+        import json
+
+        from pm_trader.events import EventLog
+        rows = [{"quote": {"market_condition_id": "0xa", "token_id": "tok"},
+                 "mid": 0.5, "fills_applied": 1}]            # a fill -> always logged
+        eng = FakeEngine(accrue_rows=rows)
+        r = _runner(engine=eng, submitter=FakeSubmitter(), event_poll_every_s=1e9)
+        r._events = EventLog(tmp_path / "events", retention_days=30)
+        r.poll_once()
+        r.poll_once()
+        r._events.close()
+        lines = [json.loads(l) for f in (tmp_path / "events").glob("events-*.jsonl")
+                 for l in f.read_text().splitlines()]
+        assert sum(1 for e in lines if e["kind"] == "poll") == 2   # both logged
+
+
 class TestBookResync:
     def test_resync_once_pulls_rest_and_applies_to_cache(self):
         applied = []

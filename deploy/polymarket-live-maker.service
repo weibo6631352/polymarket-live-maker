@@ -1,0 +1,24 @@
+[Unit]
+Description=Polymarket live liquidity-rewards maker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/polymarket-live-maker
+# reads .env from the working dir; state/ (ledger + event log + runner.log) is here
+ExecStart=/root/polymarket-live-maker/.venv/bin/python -m pm_trader.runner
+Restart=always
+RestartSec=5
+# graceful: SIGTERM -> the runner cancels ALL resting orders + flattens before exit
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# the bot keeps its own rolling state/runner.log; keep the journal lean
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=live-maker
+# light hardening (root, but limit blast radius)
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

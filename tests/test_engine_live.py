@@ -118,6 +118,17 @@ class TestAccrueLive:
         eng.place_maker_quote_live("0xabc", submitter=sub, half_spread_cents=1.0,
                                    max_inventory=max_inventory)
 
+    def test_live_exit_books_crossing_cost(self, eng):
+        eng.maker_crossing_cost_c = 2.0          # 2c estimated flatten slippage
+        sub = FakeSubmitter()
+        self._place(eng, sub, mid=0.50)
+        eng.api.get_midpoint = MagicMock(return_value=0.56)   # full-band move -> drift-exit
+        rows = eng.accrue_maker_rewards_live(
+            submitter=sub,
+            fills_by_token={"tok_yes": [{"side": "BUY", "size": 10, "price": 0.50}]})
+        row = next(r for r in rows if r.get("reconciled") == "drift_exit")
+        assert row["crossing_cost"] == round(0.02 * 10, 6)    # 2c x 10 shares booked
+
     def test_force_recenter_reposts_without_a_move(self, eng):
         sub = FakeSubmitter()
         self._place(eng, sub, mid=0.50)

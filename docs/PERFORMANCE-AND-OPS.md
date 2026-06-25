@@ -134,6 +134,10 @@ All behavior-preserving except where noted; the 933-test suite stayed green.
 | **Order-conn keep-warm** (`ConnectionWarmer` pings `get_server_time` every 3s) | `maker_live.py` | sporadic cancels never pay a cold TLS handshake (cancel ~34ms → ~16-19ms) |
 | **WS liveness gate** (engine trusts WS book only if a frame arrived <15s ago) | `ws.py`, `engine.py` | a stalled socket → REST fallback, never a stale book |
 | **REST `/book` re-sync** (`LM_BOOK_RESYNC_HZ`, round-robin, allocated within 149/s) | `ws.py`, `runner.py` | authoritative anti-drift snapshot over the WS-maintained book; reserves budget for cancels |
+| **Log hygiene at fast cadence** (httpx/websocket → WARNING; poll-event throttle `LM_EVENT_POLL_EVERY_S`) | `runner.py` | a 1s poll + 20/s re-sync no longer floods `runner.log` / `events/` |
+| **Live exit crossing-cost booked** (drift-exit + reconcile-exit apply `maker_crossing_cost_c`) | `engine.py` | live ledger no longer optimistic on exits — consistent with the paper sim |
+| **Read-conn keep-alive** (`keepalive_expiry=30s` on the REST clients) | `api.py`, `rewards.py` | reward_config / `/book` reads stay on a hot connection |
+| **systemd unit** (auto-restart, graceful SIGTERM stop) | `deploy/` | survives reboot/crash; stop cancels all orders |
 
 **Deliberately NOT done:** caching `get_reward_config` (it's a safety/exit signal —
 fetch it fresh; concurrency already removed its latency cost). Capping `poll_fills`
