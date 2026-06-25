@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pm_trader.engine import Engine
-from pm_trader.maker_live import build_clob_signer
+from pm_trader.maker_live import DryRunSubmitter, build_clob_signer
 from pm_trader.portfolio import select_pools
 from pm_trader.rewards import RewardsClient, scan
 
@@ -62,6 +62,10 @@ def _i(name: str, default: int) -> int:
 @dataclass
 class RunnerConfig:
     live: bool = False
+    # When not live: dry_live=True rehearses the LIVE code path (accrue_maker_rewards_live
+    # + a DryRunSubmitter that logs orders and sends nothing). dry_live=False uses the
+    # PAPER simulator (accrue_maker_rewards, maker_fill). live=True always wins.
+    dry_live: bool = True
     capital: float = 200.0
     max_pools: int = 3
     min_daily: float = 80.0
@@ -83,6 +87,7 @@ class RunnerConfig:
         load_dotenv()
         return cls(
             live=os.environ.get("PM_TRADER_LIVE", "0").strip() == "1",
+            dry_live=os.environ.get("LM_DRY_LIVE", "1").strip() != "0",
             capital=_f("LM_CAPITAL", 200.0),
             max_pools=_i("LM_MAX_POOLS", 3),
             min_daily=_f("LM_MIN_DAILY", 80.0),
@@ -94,7 +99,12 @@ class RunnerConfig:
         )
 
     def banner(self) -> str:
-        mode = "LIVE — REAL MONEY" if self.live else "DRY-RUN (no orders sent)"
+        if self.live:
+            mode = "LIVE — REAL MONEY"
+        elif self.dry_live:
+            mode = "DRY-LIVE (live code path, no orders sent)"
+        else:
+            mode = "PAPER (simulator)"
         return (f"live-maker | mode={mode} | capital=${self.capital:.0f} | "
                 f"max_pools={self.max_pools} | poll={self.poll_seconds:.0f}s | "
                 f"min_daily=${self.min_daily:.0f} | max_loss=${self.max_loss:.0f}")
@@ -127,9 +137,13 @@ class LiveRunner:
         if self.engine is None:
             self.engine = Engine(Path(self.cfg.state_dir))
             self.engine.init_account(self.cfg.capital)  # ledger cash = capital budget
-        if self.cfg.live and self.submitter is None:
-            self.submitter = build_clob_signer()  # hard-gated; raises unless opted in
+        if self.cfg.live:
+            if self.submitter is None:
+                self.submitter = build_clob_signer()  # hard-gated; raises unless opted in
             log.warning("LIVE submitter armed — real orders will be placed")
+        elif self.cfg.dry_live and self.submitter is None:
+            self.submitter = DryRunSubmitter()
+            log.info("DRY-LIVE: rehearsing the live code path (orders logged, not sent)")
 
         self.rediscover()
         self.reselect()
@@ -198,9 +212,13 @@ class LiveRunner:
                 log.warning("place failed for %s: %s", cond[:10], e)
         log.info("active book: %d pools (selected %d)", len(self.placed), len(self.selected))
 
+    def _use_live_path(self) -> bool:
+        """Drive the engine's *_live methods (real LIVE, or DRY-LIVE rehearsal)."""
+        return (self.cfg.live or self.cfg.dry_live) and self.submitter is not None
+
     def _place(self, condition_id: str, pool: dict) -> None:
         hs = pool["half_spread_c"]
-        if self.cfg.live:
+        if self._use_live_path():
             self.engine.place_maker_quote_live(
                 condition_id, submitter=self.submitter, half_spread_cents=hs)
         else:
@@ -215,8 +233,8 @@ class LiveRunner:
     # -- the poll (drives the engine maker loop) ---------------------------
 
     def poll_once(self) -> list[dict]:
-        if self.cfg.live and self.submitter is not None:
-            fills_by_token = self._poll_fills()
+        if self._use_live_path():
+            fills_by_token = self._poll_fills()   # DryRunSubmitter -> {} (no fills)
             rows = self.engine.accrue_maker_rewards_live(
                 submitter=self.submitter, fills_by_token=fills_by_token)
         else:
@@ -278,9 +296,10 @@ class LiveRunner:
         if self.engine is not None:
             try:
                 for q in self.engine.get_maker_quotes():
-                    if self.cfg.live and self.submitter is not None:
+                    if self._use_live_path():
                         self.submitter({"action": "CANCEL_ALL", "token_id": q["token_id"]})
-                        self.engine._flatten_live(self.submitter, q["token_id"], q["inventory"])
+                        if self.cfg.live:
+                            self.engine._flatten_live(self.submitter, q["token_id"], q["inventory"])
                     self.engine.cancel_maker_quote(q["id"])
             except Exception as e:  # noqa: BLE001
                 log.warning("shutdown cleanup error: %s", e)

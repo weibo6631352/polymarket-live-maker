@@ -18,6 +18,7 @@ SAFETY — real money is hard-gated:
 
 from __future__ import annotations
 
+import logging
 import os
 
 from pm_trader.models import ApiError, OrderBook
@@ -379,3 +380,27 @@ def build_clob_signer():  # pragma: no cover - requires external lib + live cred
     ``PM_TRADER_LIVE=1`` and ``POLYMARKET_PRIVATE_KEY`` are set.
     """
     return ClobSubmitter()
+
+
+class DryRunSubmitter:
+    """A submitter that LOGS every order it WOULD send and sends NOTHING.
+
+    Lets the runner rehearse the EXACT live code path (``accrue_maker_rewards_live``
+    — place / cancel / re-center / reconcile / drift-exit) without touching the
+    network or funds. ``poll_fills`` returns ``[]`` (no real fills in dry mode), so
+    inventory stays flat: the order-generation + exit logic are fully exercised;
+    inventory skew / flatten are not (those need real fills, i.e. going live).
+    """
+
+    def __init__(self, logger: logging.Logger | None = None) -> None:
+        self._log = logger or logging.getLogger("pm_trader.dryrun")
+        self.sent: list[dict] = []
+
+    def __call__(self, action: dict) -> dict:
+        self.sent.append(action)
+        rest = {k: v for k, v in action.items() if k != "action"}
+        self._log.info("DRY %s %s", action.get("action"), rest)
+        return {"status": "OK", "dry_run": True, **action}
+
+    def poll_fills(self) -> list[dict]:
+        return []

@@ -132,11 +132,21 @@ class TestSelection:
 
 
 class TestPoll:
-    def test_dry_run_calls_paper_accrue(self):
+    def test_paper_mode_uses_simulator(self):
         eng = FakeEngine(accrue_rows=[{"quote": {"market_condition_id": "0xa"}, "reward": 0.1}])
-        r = _runner(engine=eng)
+        r = _runner(engine=eng, dry_live=False)   # PAPER simulator
         rows = r.poll_once()
-        assert rows and eng.last_fills is None  # paper path, no fills polled
+        assert rows and eng.last_fills is None     # accrue_maker_rewards, no fills polled
+
+    def test_dry_live_rehearses_live_path(self):
+        from pm_trader.maker_live import DryRunSubmitter
+        eng = FakeEngine()
+        r = _runner(engine=eng, submitter=DryRunSubmitter(), dry_live=True, capital=10_000.0)
+        r.report = {"pools": [_scan_pool("a", "Alpha")]}
+        r.reselect()
+        assert eng.placed[0][2] is True            # placed via place_maker_quote_live
+        r.poll_once()
+        assert eng.last_fills == {}                # accrue_maker_rewards_live ran; no real fills
 
     def test_live_polls_fills_grouped_by_token(self):
         eng = FakeEngine()

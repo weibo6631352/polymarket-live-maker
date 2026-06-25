@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from pm_trader.maker_live import LiveMakerBot
+from pm_trader.maker_live import DryRunSubmitter, LiveMakerBot
 from pm_trader.models import OrderBook, OrderBookLevel
 
 
@@ -48,3 +48,15 @@ class TestExternalFillsSwitch:
         bot.step(_book(), 0.50)
         bot.step(_book(0.52, 0.54), 0.53)     # 3c move past our ask -> inferred sale
         assert bot.inventory == -50.0
+
+
+class TestDryRunSubmitter:
+    def test_logs_and_sends_nothing(self):
+        sub = DryRunSubmitter()
+        ack = sub({"action": "PLACE", "token_id": "t", "side": "BUY",
+                   "price": 0.49, "size": 50})
+        assert ack["dry_run"] is True and ack["status"] == "OK"
+        assert len(sub.sent) == 1 and sub.sent[0]["action"] == "PLACE"
+
+    def test_no_fills(self):
+        assert DryRunSubmitter().poll_fills() == []
