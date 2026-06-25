@@ -108,7 +108,11 @@ class RunnerConfig:
     # PAPER simulator (accrue_maker_rewards, maker_fill). live=True always wins.
     dry_live: bool = True
     capital: float = 200.0
-    max_pools: int = 12                 # cap on held pools (was 3 — too few; concentrates risk)
+    max_pools: int = 20                 # cap on held pools. Set to ~the supply of
+                                        # uncorrelated SAFE pools (~20-37 at scan_top=250)
+                                        # so it's NOT the binding cap; capital still gates
+                                        # funding and the reflex cancel is decoupled from
+                                        # poll-loop size, so this doesn't hurt cancel latency
     min_daily: float = 80.0
     # how many top-by-daily pools to actually fetch books + classify jump-risk for.
     # This TRUNCATES the universe BEFORE SAFE filtering, so too-low starves the book of
@@ -200,7 +204,7 @@ class RunnerConfig:
             live=os.environ.get("PM_TRADER_LIVE", "0").strip() == "1",
             dry_live=os.environ.get("LM_DRY_LIVE", "1").strip() != "0",
             capital=_f("LM_CAPITAL", 200.0),
-            max_pools=_i("LM_MAX_POOLS", 12),
+            max_pools=_i("LM_MAX_POOLS", 20),
             min_daily=_f("LM_MIN_DAILY", 80.0),
             scan_top=_i("LM_SCAN_TOP", 250),
             max_token_overlap=_i("LM_MAX_TOKEN_OVERLAP", 1),  # was unwired -> stuck at 1
