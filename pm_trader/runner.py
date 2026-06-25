@@ -463,7 +463,10 @@ class LiveRunner:
 
         def _loop() -> None:
             while not self._discovery_stop.is_set():
-                tokens = self._held_tokens()
+                # held tokens from the in-memory reflex map (lock-protected) — NOT the
+                # engine: sqlite is single-thread, so a bg thread must never touch it.
+                with self._reflex_lock:
+                    tokens = list(self._reflex_refs)
                 if not tokens:
                     if self._discovery_stop.wait(0.5):
                         break
