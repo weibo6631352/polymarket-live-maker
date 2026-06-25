@@ -23,14 +23,10 @@ MemoryMax=1500M
 # bound how many threads/processes the unit can spawn, so a thread/fork leak hits
 # this cgroup limit (EAGAIN) instead of exhausting the host's PIDs.
 TasksMax=400
-# HARD CPU cap (cgroup): this is a BURSTABLE instance (t3-class) — a busy-spin bug
-# (e.g. a tight retry loop when PM isn't reachable at boot) would burn all CPU
-# CREDITS and throttle the WHOLE box to a crawl, which credits do NOT reset on
-# reboot, so every boot re-wedges it and SSH becomes unreachable. Capping the bot at
-# 50% of one core keeps total CPU at/below the t3 baseline (so credits never deplete)
-# AND always leaves >1 core free for sshd, so the box stays reachable to intervene.
-CPUQuota=50%
-CPUWeight=50
+# NOTE: no CPUQuota on purpose — the bot needs to burst CPU (scan, fast cancel) and a
+# hard cap would throttle legitimate work. The fix for the CPU-credit burn is the
+# ROOT-CAUSE bug fix (no busy-spin), not a cap. StartLimit above still bounds a
+# crash-loop so the box self-recovers.
 # graceful: SIGTERM -> the runner cancels ALL resting orders + flattens before exit
 KillSignal=SIGTERM
 TimeoutStopSec=30
