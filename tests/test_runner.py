@@ -302,6 +302,15 @@ class TestReevaluateHeld:
         assert "0xb" in r.placed                              # better pool funded
         assert "0xa" not in r.cooldown                        # rank-out -> may return
 
+    def test_reselect_skips_low_share_pool(self):
+        eng = FakeEngine()
+        r = _runner(engine=eng, capital=10_000.0, max_pools=3, min_share=0.05)
+        r.report = {"pools": [_scan_pool("a", "Alpha", share=0.20),
+                              _scan_pool("b", "Beta", share=0.001)]}  # b too crowded
+        r.reselect()
+        assert "0xa" in r.placed          # good share -> entered
+        assert "0xb" not in r.placed      # depth-ahead too large (share 0.001) -> skipped
+
     def test_reselect_keeps_still_ideal_pool(self):
         eng = FakeEngine()
         eng.quotes = [{"id": 9, "market_condition_id": "0xa", "token_id": "tok_a",
@@ -359,6 +368,35 @@ class TestReevaluateHeld:
         r.reevaluate_held()
         assert any(c["action"] == "CANCEL_ALL" for c in sub.calls)
         assert 1 in eng.cancelled and r.cooldown.get("0xa") == r.cfg.cooldown_rounds
+
+    def test_exits_fast_book_on_high_velocity(self, monkeypatch):
+        import collections
+        import time as _t
+        eng = self._held_engine()
+        r = _runner(engine=eng, min_hold_s=0.0, max_mid_vel_cps=2.0)
+        r.placed = {"0xa": {"token": "tok_a"}}
+        r.placed_at = {"0xa": 0.0}
+        monkeypatch.setattr(r, "_rescore", lambda c, t, **kw: self._fresh())  # healthy
+        now = _t.monotonic()
+        r._mid_hist["tok_a"] = collections.deque(             # 10c swings in 1s = 10c/s
+            [(now, 0.50), (now + 0.5, 0.55), (now + 1.0, 0.50)], maxlen=120)
+        r.reevaluate_held()
+        assert 1 in eng.cancelled and "0xa" not in r.placed   # exited fast_book
+        assert r.cooldown.get("0xa") == r.cfg.cooldown_rounds  # benched
+
+    def test_calm_book_not_exited(self, monkeypatch):
+        import collections
+        import time as _t
+        eng = self._held_engine()
+        r = _runner(engine=eng, min_hold_s=0.0, max_mid_vel_cps=2.0)
+        r.placed = {"0xa": {"token": "tok_a"}}
+        r.placed_at = {"0xa": 0.0}
+        monkeypatch.setattr(r, "_rescore", lambda c, t, **kw: self._fresh())
+        now = _t.monotonic()
+        r._mid_hist["tok_a"] = collections.deque(             # flat -> ~0 c/s
+            [(now, 0.50), (now + 1.0, 0.50)], maxlen=120)
+        r.reevaluate_held()
+        assert eng.cancelled == [] and "0xa" in r.placed      # calm -> kept
 
     def test_disabled_noop(self, monkeypatch):
         eng = self._held_engine()

@@ -123,6 +123,9 @@ class RunnerConfig:
     reeval_enabled: bool = True
     reeval_interval_s: float = 300.0    # re-check held pools this often (cheap; held-only)
     min_share: float = 0.02            # leave if our est share collapses below this
+    # exit a held pool whose real-time mid velocity exceeds this (cents/sec) — a
+    # choppy book bleeds via small pick-offs the daily jump_verdict misses. 0 = off.
+    max_mid_vel_cps: float = 4.0
     min_hold_s: float = 600.0          # don't soft-exit a pool held less than this
     state_dir: str = "state"
     kill_file: str = "KILL"
@@ -182,6 +185,7 @@ class RunnerConfig:
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_share=_f("LM_MIN_SHARE", 0.02),
+            max_mid_vel_cps=_f("LM_MAX_MID_VEL_CPS", 4.0),
             min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
             min_wallet_usdc=_f("LM_MIN_WALLET_USDC", 0.0),
             use_optimal_spread=os.environ.get("LM_OPTIMAL_SPREAD", "0").strip() == "1",
@@ -521,6 +525,15 @@ class LiveRunner:
         self._stats_granted = (g, gl)
         self._log_pool_metrics()
 
+    def _mid_velocity(self, token: str) -> float:
+        """Recent mid velocity in cents/sec: sum |Δmid| over the per-poll history
+        window / its span. 0 if too few samples. A book-chop / pick-off-risk gauge."""
+        hist = self._mid_hist.get(token)
+        if not hist or len(hist) < 2 or hist[-1][0] <= hist[0][0]:
+            return 0.0
+        moves = sum(abs(hist[i][1] - hist[i - 1][1]) for i in range(1, len(hist)))
+        return moves / (hist[-1][0] - hist[0][0]) * 100.0
+
     def _log_pool_metrics(self) -> None:
         """Per held pool (main thread → sqlite ok): depth AHEAD of our quote (queue
         gauge) + book movement speed (WS updates/s + mid velocity). Logged + emitted
@@ -542,12 +555,7 @@ class LiveRunner:
             bid_px, ask_px = round(mid - hs, 4), round(mid + hs, 4)
             b_better, b_at = depth_ahead(book, bid_px, "bid")
             a_better, a_at = depth_ahead(book, ask_px, "ask")
-            # mid velocity (sum |Δmid| / span) in cents/s, and WS updates/s
-            hist = self._mid_hist.get(tok)
-            vel = 0.0
-            if hist and len(hist) >= 2 and hist[-1][0] > hist[0][0]:
-                moves = sum(abs(hist[i][1] - hist[i - 1][1]) for i in range(1, len(hist)))
-                vel = moves / (hist[-1][0] - hist[0][0]) * 100.0
+            vel = self._mid_velocity(tok)        # cents/s, and WS updates/s
             cnt = self._market_ch.updates(tok)
             prev = self._ws_upd_at.get(tok)
             upd_s = (cnt - prev[1]) / (now - prev[0]) if prev and now > prev[0] else 0.0
@@ -689,6 +697,8 @@ class LiveRunner:
         for cond, s in want.items():
             if cond in self.placed:
                 continue
+            if (s.get("share") or 0.0) < self.cfg.min_share:
+                continue   # depth-ahead too large -> share too small to be worth entering
             cap = s.get("committed_capital", 0.0)
             if committed + cap > self.cfg.capital + 1e-6:
                 continue   # would exceed the budget given what's already held
@@ -753,6 +763,14 @@ class LiveRunner:
             if fresh is None:
                 continue                        # transient read failure — try next round
             reason = self._degrade_reason(fresh)
+            # real-time chop guard: a fast-moving book bleeds via many small pick-offs
+            # that the daily jump_verdict misses — exit on sustained mid velocity.
+            if not reason and self.cfg.max_mid_vel_cps > 0:
+                vel = self._mid_velocity(q["token_id"])
+                if vel > self.cfg.max_mid_vel_cps:
+                    reason = "fast_book"
+                    log.info("re-eval %s mid velocity %.2fc/s > %.2f -> fast_book",
+                             cond[:10], vel, self.cfg.max_mid_vel_cps)
             if reason:
                 self._exit_held(cond, q, reason)
 
@@ -790,7 +808,7 @@ class LiveRunner:
     # reasons that bench a pool for a few rounds (it degraded, don't immediately
     # re-add it). "deselected" (a clean rank-out) is NOT benched.
     _COOLDOWN_REASONS = ("jump_risk_rose", "empty_band", "share_collapsed",
-                         "daily_cut", "one_sided")
+                         "daily_cut", "one_sided", "fast_book")
 
     def _degrade_reason(self, fresh: dict) -> str | None:
         """Decide whether a held pool degraded enough to exit. Returns a reason or
