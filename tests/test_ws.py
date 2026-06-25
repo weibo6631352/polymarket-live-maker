@@ -74,6 +74,22 @@ class TestMarketChannel:
         assert m == {"assets_ids": ["x", "y"], "type": "market",
                      "custom_feature_enabled": True}
 
+    def test_price_callback_fires_for_watched_token(self):
+        mc = MarketChannel()
+        mc.set_tokens(["t1"])
+        seen = []
+        mc.set_price_callback(lambda t, m: seen.append((t, m)))
+        mc.handle_message(_book_msg("t1", [(0.49, 10)], [(0.51, 10)]))
+        assert seen and seen[-1] == ("t1", 0.50)
+
+    def test_price_callback_skips_unwatched_token(self):
+        mc = MarketChannel()
+        mc.set_tokens(["t1"])
+        seen = []
+        mc.set_price_callback(lambda t, m: seen.append(t))
+        mc.handle_message(_book_msg("t2", [(0.4, 10)], [(0.6, 10)]))   # not subscribed
+        assert seen == []
+
 
 class TestUserChannel:
     def _creds(self):

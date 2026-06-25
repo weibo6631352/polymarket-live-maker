@@ -1150,6 +1150,7 @@ class Engine:
     def accrue_maker_rewards_live(
         self, *, submitter, fills_by_token: dict | None = None,
         now: datetime | None = None, recenter_ticks: int = 1,
+        force_recenter=None,
     ) -> list[dict]:
         """LIVE maker poll. Same decisions as :meth:`accrue_maker_rewards`, but:
           1. inventory comes from REAL fills (``fills_by_token``:
@@ -1288,7 +1289,11 @@ class Engine:
             submitted: list = []
             # hysteresis: only re-quote once the mid moves recenter_ticks ticks
             # (default 1 = every tick) to avoid cancel/replace churn on jitter.
-            if abs(mid - quote.last_mid) >= max(1, recenter_ticks) * quote.tick:
+            # force_recenter: tokens the WS reflex already cancelled — repost them
+            # unconditionally so a reflex-pulled pool is never left uncovered (even
+            # if the mid drifted back to centre before this poll).
+            forced = bool(force_recenter) and quote.token_id in force_recenter
+            if forced or abs(mid - quote.last_mid) >= max(1, recenter_ticks) * quote.tick:
                 submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
                 orders = compute_two_sided_quotes(
                     mid, half_spread_c=quote.half_spread_c, size=quote.size,

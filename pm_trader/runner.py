@@ -43,6 +43,29 @@ log = logging.getLogger("pm_trader.runner")
 REEVAL_WORKERS = 16
 
 
+class _LockingSubmitter:
+    """Serialize ALL submitter access across the poll thread and the WS reflex
+    thread (both cancel/place orders). The inner submitter does the real work; this
+    only adds one lock so the two threads never call py-clob-client concurrently."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self._lock = threading.Lock()
+
+    def __call__(self, action):
+        with self._lock:
+            return self._inner(action)
+
+    def __getattr__(self, name):           # forward poll_fills/api_creds/cancel_order/…
+        attr = getattr(self._inner, name)
+        if callable(attr):
+            def locked(*a, **k):
+                with self._lock:
+                    return attr(*a, **k)
+            return locked
+        return attr
+
+
 def load_dotenv(path: str | os.PathLike = ".env") -> None:
     """Minimal ``.env`` reader: ``KEY=VALUE`` -> os.environ (no override). No dep."""
     p = Path(path)
@@ -190,6 +213,11 @@ class LiveRunner:
         self._events: EventLog | None = None   # created in run(); None in unit tests
         self._market_ch: MarketChannel | None = None   # real-time book (WS)
         self._user_ch: UserChannel | None = None       # real-time fills (WS, live)
+        # WS reflex: cancel a held pool's orders the instant its mid moves beyond the
+        # band (decoupled from accounting; the next poll reposts via force_recenter).
+        self._reflex_refs: dict[str, tuple[float, float]] = {}  # token -> (mid, band)
+        self._reflex_cancelled: set[str] = set()       # reflex-pulled, awaiting repost
+        self._reflex_lock = threading.Lock()
 
     def _event(self, kind: str, **fields) -> None:
         """Append one review/iteration event (no-op until run() opens the log)."""
@@ -357,12 +385,16 @@ class LiveRunner:
         engine on REST (book_source unset / fills via the submitter)."""
         if not self.cfg.ws_enabled:
             return
+        # serialize submitter access: the WS reflex + the poll thread both cancel
+        if self.submitter is not None and not isinstance(self.submitter, _LockingSubmitter):
+            self.submitter = _LockingSubmitter(self.submitter)
         try:
             self._market_ch = MarketChannel()
+            self._market_ch.set_price_callback(self._on_ws_price)  # reflex cancel
             self._market_ch.start()
             if hasattr(self.engine, "book_source"):
                 self.engine.book_source = self._market_ch
-            log.info("WS market channel started (real-time book; REST fallback)")
+            log.info("WS market channel started (real-time book + reflex cancel)")
         except Exception as e:  # noqa: BLE001
             log.warning("WS market channel failed to start (using REST): %s", e)
             self._market_ch = None
@@ -388,11 +420,50 @@ class LiveRunner:
             return []
 
     def _sync_ws_subscriptions(self) -> None:
-        """Point the WS channels at the currently-held pools."""
+        """Point the WS channels at the currently-held pools + refresh reflex refs."""
         if self._market_ch is not None:
             self._market_ch.set_tokens(self._held_tokens())
         if self._user_ch is not None:
             self._user_ch.set_markets(list(self.placed.keys()))
+        self._refresh_reflex_refs()
+
+    def _refresh_reflex_refs(self) -> None:
+        """Rebuild the per-token (centred mid, band) the reflex compares against —
+        from the ledger's current quotes (their last_mid is where we're quoting)."""
+        refs: dict[str, tuple[float, float]] = {}
+        if self.engine is not None:
+            try:
+                for q in self.engine.get_maker_quotes():
+                    tick = q.get("tick", 0.01) or 0.01
+                    band = max(1, self.cfg.recenter_ticks) * tick
+                    refs[q["token_id"]] = (q.get("last_mid", 0.0), band)
+            except Exception:  # noqa: BLE001
+                return
+        with self._reflex_lock:
+            self._reflex_refs = refs
+
+    def _on_ws_price(self, token: str, mid: float) -> None:
+        """WS price callback (reader thread): the instant a held pool's mid moves
+        beyond its band, CANCEL its resting orders — pulling the stale quote before
+        it's picked off. No ledger/reward work here (decoupled); the next poll
+        reposts it via force_recenter so the pool is never left uncovered."""
+        with self._reflex_lock:
+            ref = self._reflex_refs.get(token)
+            if ref is None or token in self._reflex_cancelled:
+                return
+            ref_mid, band = ref
+            if abs(mid - ref_mid) < band:
+                return
+            self._reflex_cancelled.add(token)      # claim it before the slow I/O
+        try:
+            self.submitter({"action": "CANCEL_ALL", "token_id": token})
+            log.info("WS reflex CANCEL %s (mid %.4f moved >= %.3f from %.4f)",
+                     str(token)[:10], mid, band, ref_mid)
+            self._event("reflex_cancel", token=token, mid=mid, ref=ref_mid, band=band)
+        except Exception as e:  # noqa: BLE001 — let the next move/poll retry
+            log.warning("reflex cancel failed for %s: %s", str(token)[:10], e)
+            with self._reflex_lock:
+                self._reflex_cancelled.discard(token)
 
     # -- discovery / selection ---------------------------------------------
 
@@ -645,9 +716,12 @@ class LiveRunner:
     def poll_once(self) -> list[dict]:
         if self._use_live_path():
             fills_by_token = self._poll_fills()   # DryRunSubmitter -> {} (no fills)
+            with self._reflex_lock:               # reflex-pulled tokens -> force repost
+                forced = self._reflex_cancelled
+                self._reflex_cancelled = set()
             rows = self.engine.accrue_maker_rewards_live(
                 submitter=self.submitter, fills_by_token=fills_by_token,
-                recenter_ticks=self.cfg.recenter_ticks)
+                recenter_ticks=self.cfg.recenter_ticks, force_recenter=forced)
         else:
             rows = self.engine.accrue_maker_rewards()
         for row in rows:
@@ -676,6 +750,7 @@ class LiveRunner:
                 if reason != "rewards_ended":   # a jump/drift -> bench it a while
                     self.cooldown[cond] = self.cfg.cooldown_rounds
                 log.info("pool %s exited (%s)", cond[:10], reason)
+        self._refresh_reflex_refs()             # refs track the new last_mid / book
         return rows
 
     def _poll_fills(self) -> dict:

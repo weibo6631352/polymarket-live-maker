@@ -47,9 +47,11 @@ class FakeEngine:
     def accrue_maker_rewards(self):
         return self._rows
 
-    def accrue_maker_rewards_live(self, *, submitter, fills_by_token=None, recenter_ticks=1):
+    def accrue_maker_rewards_live(self, *, submitter, fills_by_token=None,
+                                  recenter_ticks=1, force_recenter=None):
         self.last_fills = fills_by_token
         self.last_recenter_ticks = recenter_ticks
+        self.last_force_recenter = force_recenter
         return self._rows
 
     def get_maker_summary(self):
@@ -367,6 +369,48 @@ class TestReevaluateHeld:
         monkeypatch.setattr(r, "_rescore", lambda c, t, **kw: called.__setitem__("n", 1))
         r.reevaluate_held()
         assert called["n"] == 0 and eng.cancelled == []
+
+
+class TestReflex:
+    def test_cancels_on_big_move(self):
+        sub = FakeSubmitter()
+        r = _runner(submitter=sub)
+        r._reflex_refs = {"tok": (0.50, 0.02)}
+        r._on_ws_price("tok", 0.55)            # 0.05 move >= 0.02 band
+        assert any(c["action"] == "CANCEL_ALL" and c["token_id"] == "tok"
+                   for c in sub.calls)
+        assert "tok" in r._reflex_cancelled
+
+    def test_ignores_small_move(self):
+        sub = FakeSubmitter()
+        r = _runner(submitter=sub)
+        r._reflex_refs = {"tok": (0.50, 0.02)}
+        r._on_ws_price("tok", 0.505)           # < band
+        assert sub.calls == [] and "tok" not in r._reflex_cancelled
+
+    def test_dedups_until_repost(self):
+        sub = FakeSubmitter()
+        r = _runner(submitter=sub)
+        r._reflex_refs = {"tok": (0.50, 0.02)}
+        r._on_ws_price("tok", 0.55)
+        r._on_ws_price("tok", 0.57)            # already pulled -> no second cancel
+        assert sum(1 for c in sub.calls if c["action"] == "CANCEL_ALL") == 1
+
+    def test_unknown_token_noop(self):
+        sub = FakeSubmitter()
+        r = _runner(submitter=sub)
+        r._on_ws_price("tok", 0.99)            # no ref -> nothing
+        assert sub.calls == []
+
+    def test_poll_passes_reflex_cancelled_as_force_recenter(self):
+        eng = FakeEngine()
+        eng.quotes = [{"id": 1, "market_condition_id": "0xa", "token_id": "tok",
+                       "inventory": 0.0, "tick": 0.01, "last_mid": 0.5}]
+        r = _runner(engine=eng, submitter=FakeSubmitter())
+        r._reflex_cancelled = {"tok"}
+        r.poll_once()
+        assert eng.last_force_recenter == {"tok"}   # forwarded to the engine
+        assert r._reflex_cancelled == set()         # consumed
 
 
 class TestRunLoop:

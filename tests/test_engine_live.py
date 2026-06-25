@@ -118,6 +118,21 @@ class TestAccrueLive:
         eng.place_maker_quote_live("0xabc", submitter=sub, half_spread_cents=1.0,
                                    max_inventory=max_inventory)
 
+    def test_force_recenter_reposts_without_a_move(self, eng):
+        sub = FakeSubmitter()
+        self._place(eng, sub, mid=0.50)
+        sub.calls.clear()                       # same mid -> normally no re-center
+        eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={},
+                                      force_recenter={"tok_yes"})
+        assert "CANCEL_ALL" in sub.actions() and "PLACE" in sub.actions()
+
+    def test_no_recenter_without_force_or_move(self, eng):
+        sub = FakeSubmitter()
+        self._place(eng, sub, mid=0.50)
+        sub.calls.clear()
+        eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={})
+        assert "CANCEL_ALL" not in sub.actions()   # no move, no force
+
     def test_reconcile_exit_when_rewards_end(self, eng):
         sub = FakeSubmitter()
         self._place(eng, sub)
