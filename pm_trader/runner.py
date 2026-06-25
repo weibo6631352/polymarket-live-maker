@@ -1,18 +1,18 @@
-"""Autonomous live-maker runner — the no-MCP driver.
+"""Autonomous live-maker runner — drives the ENGINE maker loop on a fixed cadence.
 
-Replaces the agent/MCP that used to call the maker poll by hand: a single SYNC
-process that polls on a fixed cadence (the same beat as before — REST ``/book``
-+ ``/midpoint`` every ``poll_seconds``, full reward-universe re-scan every
-``discovery_interval_s``), exactly like the paper engine's ``accrue_maker_rewards``
-was meant to be called. No WebSocket, no LLM in the loop.
+The no-MCP driver: a single SYNC process that, on the same beat as before, runs
+the engine's maker poll (``accrue_maker_rewards``) — inheriting ALL its historical
+optimizations: per-loop reconcile-exit (pool left the program), drift-exit (a
+full-band move from entry), reward accrual + capital ledger, inventory cap + skew.
 
-  rediscover (periodic scan) -> select_pools (budget+decorrelate+cooldown)
-    -> MakerPortfolio (dry-run, or LIVE with a real py-clob-client submitter)
-      -> each poll: pull books -> (live) apply REAL fills -> step each bot
-         (re-quote / cancel) -> retire+cooldown halted pools -> kill-switch
+  rediscover (periodic scan) -> select_pools -> engine.place_maker_quote(_live)
+    -> each poll: engine.accrue_maker_rewards(_live) -> handle exits (cooldown)
+       -> kill-switch
 
-Real-money submission flows ONLY when ``PM_TRADER_LIVE=1`` (the operator switch);
-otherwise the bots run dry-run and submit nothing.
+In LIVE (``PM_TRADER_LIVE=1``) it uses the engine's ``*_live`` methods: REAL
+orders via a py-clob-client submitter, inventory from REAL polled fills (not the
+maker_fill sim), plus fast-cancel re-centering. In DRY-RUN it uses the paper
+methods (simulated, no orders sent). No WebSocket, no LLM in the loop.
 """
 
 from __future__ import annotations
@@ -24,8 +24,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pm_trader.engine import Engine
 from pm_trader.maker_live import build_clob_signer
-from pm_trader.portfolio import MakerPortfolio, fetch_market_data, select_pools
+from pm_trader.portfolio import select_pools
 from pm_trader.rewards import RewardsClient, scan
 
 log = logging.getLogger("pm_trader.runner")
@@ -71,7 +72,7 @@ class RunnerConfig:
     poll_seconds: float = 60.0          # same beat as the paper maker poll
     discovery_interval_s: float = 1800.0
     cooldown_rounds: int = 3
-    max_loss: float = 20.0              # kill-switch: conservative book MTM floor
+    max_loss: float = 20.0              # kill-switch: maker inventory-PnL floor
     state_dir: str = "state"
     kill_file: str = "KILL"
 
@@ -96,24 +97,24 @@ class RunnerConfig:
         mode = "LIVE — REAL MONEY" if self.live else "DRY-RUN (no orders sent)"
         return (f"live-maker | mode={mode} | capital=${self.capital:.0f} | "
                 f"max_pools={self.max_pools} | poll={self.poll_seconds:.0f}s | "
-                f"min_daily=${self.min_daily:.0f} | max_loss/day=${self.max_loss:.0f}")
+                f"min_daily=${self.min_daily:.0f} | max_loss=${self.max_loss:.0f}")
 
 
 class LiveRunner:
-    """The autonomous polling loop. Inject ``client``/``submitter`` in tests."""
+    """The autonomous polling loop, driving the engine. Inject deps in tests."""
 
-    def __init__(self, config: RunnerConfig, *, client: RewardsClient | None = None,
-                 submitter=None, sleeper=time.sleep) -> None:
+    def __init__(self, config: RunnerConfig, *, engine: Engine | None = None,
+                 scanner_client: RewardsClient | None = None, submitter=None,
+                 sleeper=time.sleep) -> None:
         self.cfg = config
-        self.client = client or RewardsClient()
-        self.submitter = submitter  # set in run() for live, unless injected
+        self.engine = engine
+        self.scanner = scanner_client or RewardsClient()
+        self.submitter = submitter
         self._sleep_fn = sleeper
         self.report: dict = {"pools": []}
         self.selected: list[dict] = []
-        self.portfolio: MakerPortfolio | None = None
-        self.cooldown: dict[str, int] = {}     # token/condition_id -> rounds left
-        self.cash_flow: dict[str, float] = {}  # token -> sells$ - buys$ (real fills)
-        self.last_mid: dict[str, float] = {}
+        self.placed: dict[str, dict] = {}    # condition_id -> selected pool dict
+        self.cooldown: dict[str, int] = {}   # condition_id -> discovery rounds left
         self._stop = False
         self._kill_reason = ""
 
@@ -123,6 +124,9 @@ class LiveRunner:
         logging.getLogger("pm_trader").info(self.cfg.banner())
         os.makedirs(self.cfg.state_dir, exist_ok=True)
         self._install_signals()
+        if self.engine is None:
+            self.engine = Engine(Path(self.cfg.state_dir))
+            self.engine.init_account(self.cfg.capital)  # ledger cash = capital budget
         if self.cfg.live and self.submitter is None:
             self.submitter = build_clob_signer()  # hard-gated; raises unless opted in
             log.warning("LIVE submitter armed — real orders will be placed")
@@ -151,7 +155,7 @@ class LiveRunner:
             try:
                 signal.signal(sig, lambda *_s: self.trip_kill("signal"))
             except (ValueError, OSError):
-                pass  # not in main thread
+                pass
 
     def trip_kill(self, reason: str) -> None:
         if not self._stop:
@@ -163,14 +167,17 @@ class LiveRunner:
 
     def rediscover(self) -> None:
         try:
-            self.report = scan(self.client, min_daily=self.cfg.min_daily,
+            self.report = scan(self.scanner, min_daily=self.cfg.min_daily,
                                top=self.cfg.scan_top, with_jump_risk=True)
             log.info("discovery: %d safe of %d scored",
                      self.report.get("safe_count", 0), self.report.get("pools_scored", 0))
-        except Exception as e:  # noqa: BLE001 — keep the loop alive on a scan hiccup
+        except Exception as e:  # noqa: BLE001
             log.warning("discovery scan failed: %s", e)
 
     def reselect(self) -> None:
+        """Re-rank the universe and PLACE any newly selected pool. De-selected but
+        still-paying pools keep their resting quote (the engine retires a pool only
+        on reconcile/drift-exit) — selection only ADDS."""
         cd = {k for k, v in self.cooldown.items() if v > 0}
         self.selected = select_pools(
             self.report, capital=self.cfg.capital, max_pools=self.cfg.max_pools,
@@ -178,18 +185,26 @@ class LiveRunner:
             risk_tolerance_days=self.cfg.risk_tolerance_days,
             max_token_overlap=self.cfg.max_token_overlap, cooldown=cd,
         )
-        # cancel any orders on pools we are dropping before rebuilding the book
-        if self.portfolio is not None:
-            keep = {s["token"] for s in self.selected}
-            for token in list(self.portfolio.bots):
-                if token not in keep:
-                    self._cancel_token(token)
-        self.portfolio = MakerPortfolio(
-            self.selected, dry_run=not self.cfg.live, submitter=self.submitter)
-        log.info("active book: %d pools, est reward $%.2f/day, committed $%.0f",
-                 len(self.selected),
-                 sum(s["est_daily_reward"] for s in self.selected),
-                 sum(s["committed_capital"] for s in self.selected))
+        for s in self.selected:
+            cond = s["condition_id"]
+            if cond in self.placed or cond in cd:
+                continue
+            try:
+                self._place(cond, s)
+                self.placed[cond] = s
+                log.info("placed %s | %s | daily=$%.0f", cond[:10],
+                         s["question"][:48], s["daily"])
+            except Exception as e:  # noqa: BLE001 — one bad market mustn't sink the book
+                log.warning("place failed for %s: %s", cond[:10], e)
+        log.info("active book: %d pools (selected %d)", len(self.placed), len(self.selected))
+
+    def _place(self, condition_id: str, pool: dict) -> None:
+        hs = pool["half_spread_c"]
+        if self.cfg.live:
+            self.engine.place_maker_quote_live(
+                condition_id, submitter=self.submitter, half_spread_cents=hs)
+        else:
+            self.engine.place_maker_quote(condition_id, half_spread_cents=hs)
 
     def _tick_cooldowns(self) -> None:
         for k in list(self.cooldown):
@@ -197,99 +212,74 @@ class LiveRunner:
             if self.cooldown[k] <= 0:
                 del self.cooldown[k]
 
-    # -- the poll ----------------------------------------------------------
+    # -- the poll (drives the engine maker loop) ---------------------------
 
     def poll_once(self) -> list[dict]:
-        if self.portfolio is None or not self.selected:
-            return []
-        try:
-            market_data = fetch_market_data(self.client, self.selected)
-        except Exception as e:  # noqa: BLE001
-            log.warning("market-data fetch failed: %s", e)
-            return []
-        for token, (_book, mid) in market_data.items():
-            self.last_mid[token] = mid
-
         if self.cfg.live and self.submitter is not None:
-            self._apply_real_fills()
+            fills_by_token = self._poll_fills()
+            rows = self.engine.accrue_maker_rewards_live(
+                submitter=self.submitter, fills_by_token=fills_by_token)
+        else:
+            rows = self.engine.accrue_maker_rewards()
+        for row in rows:
+            reason = row.get("reconciled")
+            if reason:
+                cond = row["quote"]["market_condition_id"]
+                self.placed.pop(cond, None)
+                if reason != "rewards_ended":   # a jump/drift -> bench it a while
+                    self.cooldown[cond] = self.cfg.cooldown_rounds
+                log.info("pool %s exited (%s)", cond[:10], reason)
+        return rows
 
-        plans = self.portfolio.plan_all(market_data)
-        for plan in plans:
-            if plan.get("halted"):
-                self._retire(plan["token_id"], cooldown=True, reason="jump")
-        return plans
-
-    def _apply_real_fills(self) -> None:
-        """Poll the account's REAL trades and feed them to the bots (the operator's
-        chosen fill source). Only the live submitter exposes ``poll_fills``."""
+    def _poll_fills(self) -> dict:
+        """Group the account's REAL trades since last poll by token."""
         poll = getattr(self.submitter, "poll_fills", None)
         if poll is None:
-            return
+            return {}
         try:
             fills = poll()
         except Exception as e:  # noqa: BLE001
             log.warning("fill poll failed: %s", e)
-            return
+            return {}
+        out: dict = {}
         for f in fills:
-            token = f.get("token_id")
-            bot = self.portfolio.bots.get(token) if self.portfolio else None
-            if bot is not None:
-                bot.apply_real_fill(f["side"], f["size"])
-            signed = (1.0 if f["side"] == "SELL" else -1.0) * f["size"] * f["price"]
-            self.cash_flow[token] = self.cash_flow.get(token, 0.0) + signed
-            log.info("FILL %s %s %.2f @ %.4f", str(token)[:10], f["side"], f["size"], f["price"])
-
-    # -- pool retirement / cancel ------------------------------------------
-
-    def _retire(self, token: str, *, cooldown: bool, reason: str) -> None:
-        if self.portfolio is not None:
-            meta = self.portfolio.meta.get(token, {})
-            self.portfolio.bots.pop(token, None)
-            self.portfolio.meta.pop(token, None)
-            if cooldown:
-                self.cooldown[meta.get("condition_id", token)] = self.cfg.cooldown_rounds
-                self.cooldown[token] = self.cfg.cooldown_rounds
-        log.info("retired %s (%s)", str(token)[:10], reason)
-
-    def _cancel_token(self, token: str) -> None:
-        if self.submitter is not None:
-            try:
-                self.submitter({"action": "CANCEL_ALL", "token_id": token})
-            except Exception as e:  # noqa: BLE001
-                log.warning("cancel failed for %s: %s", str(token)[:10], e)
+            out.setdefault(f.get("token_id"), []).append(f)
+            log.info("FILL %s %s %.2f @ %.4f", str(f.get("token_id"))[:10],
+                     f.get("side"), f.get("size", 0), f.get("price", 0))
+        return out
 
     # -- kill-switch -------------------------------------------------------
-
-    def book_mtm(self) -> float:
-        """Conservative book P&L from REAL fills (excludes reward income, which PM
-        pays separately) — a lower bound for the loss kill-switch."""
-        total = sum(self.cash_flow.values())
-        inv = self.portfolio.bots if self.portfolio else {}
-        for token, bot in inv.items():
-            mid = self.last_mid.get(token)
-            if mid is not None:
-                total += bot.inventory * mid
-        return total
 
     def _kill_check(self) -> str | None:
         if os.path.exists(self.cfg.kill_file) or os.path.exists(
             os.path.join(self.cfg.state_dir, self.cfg.kill_file)
         ):
             return "kill-file"
-        mtm = self.book_mtm()
-        if mtm <= -self.cfg.max_loss:
-            return f"max-loss/day (book MTM ${mtm:.2f})"
+        if self.engine is not None:
+            try:
+                inv_pnl = self.engine.get_maker_summary().get("inventory_pnl", 0.0)
+            except Exception:  # noqa: BLE001
+                inv_pnl = 0.0
+            if inv_pnl <= -self.cfg.max_loss:
+                return f"max-loss (maker inventory P&L ${inv_pnl:.2f})"
         return None
 
     # -- shutdown ----------------------------------------------------------
 
     def _shutdown(self) -> None:
-        log.warning("shutdown (%s): cancelling all orders", self._kill_reason or "stop")
-        if self.portfolio is not None:
-            for token in list(self.portfolio.bots):
-                self._cancel_token(token)
+        log.warning("shutdown (%s): cancelling all maker quotes", self._kill_reason or "stop")
+        if self.engine is not None:
+            try:
+                for q in self.engine.get_maker_quotes():
+                    if self.cfg.live and self.submitter is not None:
+                        self.submitter({"action": "CANCEL_ALL", "token_id": q["token_id"]})
+                        self.engine._flatten_live(self.submitter, q["token_id"], q["inventory"])
+                    self.engine.cancel_maker_quote(q["id"])
+            except Exception as e:  # noqa: BLE001
+                log.warning("shutdown cleanup error: %s", e)
+            self.engine.close()
         try:
-            self.client.close()
+            self.scanner.close()
         except Exception:  # noqa: BLE001
             pass
         log.warning("live-maker stopped.")

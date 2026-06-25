@@ -43,6 +43,7 @@ from pm_trader.orders import (
     should_fill,
     update_maker_quote_accrual,
 )
+from pm_trader.maker_live import compute_two_sided_quotes
 from pm_trader.orderbook import (
     book_inband_qmin,
     committed_capital,
@@ -992,6 +993,144 @@ class Engine:
                "mid": mid}
         row.update({k: round(v, 6) for k, v in extra.items()})
         results.append(row)
+
+    # ------------------------------------------------------------------
+    # LIVE maker path — REAL orders via an injected submitter, REAL fills.
+    # Drives the SAME reconcile + drift-exit + reward-accrual + skew decisions
+    # as the paper accrue loop, plus the fast-cancel re-center it omits. The
+    # paper methods above are untouched (PM_TRADER_LIVE-gated submitter only).
+    # ------------------------------------------------------------------
+
+    def _flatten_live(self, submitter, token_id: str, inventory: float) -> None:
+        """Market-out a real net inventory to go flat (long -> SELL, short -> BUY)."""
+        if abs(inventory) < 1e-9:
+            return
+        side = "SELL" if inventory > 0 else "BUY"
+        submitter({"action": "FLATTEN", "token_id": token_id,
+                   "side": side, "size": abs(inventory)})
+
+    def place_maker_quote_live(
+        self, slug_or_id: str, *, submitter, outcome: str = "yes",
+        size: float | None = None, half_spread_cents: float | None = None,
+        max_inventory: float | None = None, skew_strength: float = MAKER_SKEW_STRENGTH,
+        now: datetime | None = None,
+    ) -> dict:
+        """LIVE counterpart of :meth:`place_maker_quote`: reserve the ledger quote
+        AND place the REAL two-sided resting orders through ``submitter`` (e.g.
+        :class:`maker_live.ClobSubmitter`)."""
+        q = self.place_maker_quote(
+            slug_or_id, outcome, size=size, half_spread_cents=half_spread_cents,
+            max_inventory=max_inventory, skew_strength=skew_strength, now=now)
+        mid = q["entry_mid"] or q["last_mid"]
+        orders = compute_two_sided_quotes(
+            mid, half_spread_c=q["half_spread_c"], size=q["size"],
+            tick=q["tick"], max_spread_c=q["max_spread_c"], skew_ticks=0.0)
+        q["submitted"] = [submitter({"action": "PLACE", "token_id": q["token_id"], **o})
+                          for o in orders]
+        return q
+
+    def accrue_maker_rewards_live(
+        self, *, submitter, fills_by_token: dict | None = None,
+        now: datetime | None = None,
+    ) -> list[dict]:
+        """LIVE maker poll. Same decisions as :meth:`accrue_maker_rewards`, but:
+          1. inventory comes from REAL fills (``fills_by_token``:
+             ``{token_id: [{side,size,price}, ...]}``), NOT the maker_fill sim;
+          2. order place/cancel/flatten go through ``submitter``;
+          3. the resting quote is RE-CENTERED (cancel+repost, inventory-skewed)
+             when the mid moves a tick — the fast-cancel re-quote the paper accrue
+             loop omits, so neither beneficial behaviour is dropped.
+        Reconcile-exit (pool left the program) and drift-exit (full-band move from
+        entry) are inherited verbatim. Returns the same-shaped rows (+ ``submitted``).
+        """
+        self._require_account()
+        fills_by_token = fills_by_token or {}
+        now_dt = _utcnow(now)
+        results: list[dict] = []
+        for quote in get_active_maker_quotes(self.db.conn):
+            try:
+                pool = self.api.get_reward_config(quote.market_condition_id)
+            except Exception:
+                continue  # transient — retry next poll
+            daily_rate = pool["daily"] if pool else 0.0
+            # 1. RECONCILE — pool left the program / resolved -> cancel + flatten + exit
+            if pool is None or daily_rate <= 0:
+                submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
+                self._flatten_live(submitter, quote.token_id, quote.inventory)
+                self._exit_maker_quote(quote, quote.last_mid, "rewards_ended", results)
+                continue
+            try:
+                book = self.api.get_order_book(quote.token_id)
+                mid = self.api.get_midpoint(quote.token_id)
+            except Exception:
+                continue
+            if not (0.0 < mid < 1.0):
+                continue
+            last_dt = datetime.fromisoformat(quote.last_accrued_at)
+            seconds = max(0.0, (now_dt - last_dt).total_seconds())
+
+            # 2. reward over the elapsed in-band time, at the CURRENT daily rate
+            existing_qmin = book_inband_qmin(book, mid, quote.max_spread_c)
+            share = maker_reward_share(
+                quote.size, quote.half_spread_c, quote.max_spread_c, existing_qmin)
+            reward = reward_accrual(share, daily_rate, seconds)
+
+            # 3. REAL fills -> inventory (replaces the maker_fill simulation)
+            cap = quote.max_inventory if quote.max_inventory > 0 else MAKER_CAP_MULT * quote.size
+            d_inv = 0.0
+            n_fills = 0
+            for f in fills_by_token.get(quote.token_id, []):
+                d_inv += (1.0 if str(f["side"]).upper() == "BUY" else -1.0) * float(f["size"])
+                n_fills += 1
+            new_inventory = max(-cap, min(cap, quote.inventory + d_inv))
+            held_mtm = quote.inventory * (mid - quote.last_mid)
+
+            # 4. DRIFT-EXIT — a full-band move from entry -> flatten + cancel + exit
+            entry_mid = quote.entry_mid if quote.entry_mid > 0 else mid
+            if abs(mid - entry_mid) >= quote.max_spread_c / 100.0:
+                submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
+                self._flatten_live(submitter, quote.token_id, new_inventory)
+                self._credit_maker(reward + held_mtm)
+                final = update_maker_quote_accrual(
+                    self.db.conn, quote.id,
+                    accrued_rewards=quote.accrued_rewards + reward,
+                    realized_bleed=quote.realized_bleed, fills=quote.fills + n_fills,
+                    last_mid=mid, last_accrued_at=now_dt.isoformat(), inventory=0.0,
+                    inventory_pnl=quote.inventory_pnl + held_mtm)
+                self._exit_maker_quote(final, mid, "drift_exit", results,
+                                       reward=reward, inventory_pnl_delta=held_mtm,
+                                       share=share, seconds=seconds)
+                continue
+
+            # 5. RE-CENTER — cancel + repost the inventory-skewed quote on a tick move
+            skew = (quote.skew_strength * max(-1.0, min(1.0, new_inventory / cap))
+                    if cap > 0 else 0.0)
+            submitted: list = []
+            if abs(mid - quote.last_mid) >= quote.tick:
+                submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
+                for o in compute_two_sided_quotes(
+                    mid, half_spread_c=quote.half_spread_c, size=quote.size,
+                    tick=quote.tick, max_spread_c=quote.max_spread_c, skew_ticks=skew):
+                    submitted.append(
+                        submitter({"action": "PLACE", "token_id": quote.token_id, **o}))
+
+            # 6. accrue to the ledger
+            self._credit_maker(reward + held_mtm)
+            updated = update_maker_quote_accrual(
+                self.db.conn, quote.id,
+                accrued_rewards=quote.accrued_rewards + reward,
+                realized_bleed=quote.realized_bleed, fills=quote.fills + n_fills,
+                last_mid=mid, last_accrued_at=now_dt.isoformat(),
+                inventory=new_inventory, inventory_pnl=quote.inventory_pnl + held_mtm)
+            results.append({
+                "quote": _maker_quote_to_dict(updated), "reward": round(reward, 6),
+                "inventory": round(new_inventory, 4),
+                "inventory_pnl_delta": round(held_mtm, 6), "share": round(share, 6),
+                "seconds": round(seconds, 2), "mid": mid, "submitted": submitted,
+                "fills_applied": n_fills,
+            })
+        self._record_equity()
+        return results
 
     def suggest_maker_half_spread(
         self,

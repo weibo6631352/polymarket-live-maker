@@ -293,6 +293,8 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
                 return self._place(token, action["side"], action["price"], action["size"])
             if kind == "CANCEL_ALL":
                 return self._cancel_all(token)
+            if kind == "FLATTEN":
+                return self._flatten(token, action["side"], action["size"])
         except Exception as e:  # noqa: BLE001 — surface, never crash the poll loop
             return {"status": "ERROR", "error": str(e), **action}
         return {"status": "IGNORED", **action}
@@ -317,6 +319,21 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         # the latency-sensitive op; cancel every resting order on this token
         resp = self._client.cancel_market_orders(asset_id=token_id)
         return {"status": "CANCELLED", "token_id": token_id, "resp": resp}
+
+    def _flatten(self, token_id, side, size) -> dict:
+        # market-out a net inventory to go flat (FAK so the remainder isn't rested)
+        from py_clob_client.clob_types import OrderType
+
+        resp = self._client.create_and_post_order(
+            token_id=token_id, side=str(side).upper(), size=float(size),
+            order_type=OrderType.FAK,
+        ) if hasattr(self._client, "create_and_post_order") else \
+            self._client.post_order(
+                self._client.create_market_order(token_id=token_id,
+                                                 side=str(side).upper(), size=float(size)),
+                OrderType.FAK)
+        return {"status": "FLATTENED", "token_id": token_id, "side": side,
+                "size": size, "resp": resp}
 
     def poll_fills(self) -> list[dict]:
         """Return REAL trades since the last poll (the operator's chosen fill source,
