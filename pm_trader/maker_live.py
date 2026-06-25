@@ -403,6 +403,18 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         resp = self._client.cancel(order_id)
         return {"status": "CANCELLED", "order_id": order_id, "resp": resp}
 
+    def usdc_balance(self) -> float | None:
+        """The wallet's free USDC collateral (an INDEPENDENT figure vs the engine's
+        self-reported ledger) for the wallet-floor kill-switch. USDC has 6 decimals."""
+        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        try:
+            ba = self._client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+            bal = ba.get("balance") if isinstance(ba, dict) else None
+            return float(bal) / 1_000_000.0 if bal is not None else None
+        except Exception:  # noqa: BLE001
+            return None
+
     def poll_fills(self) -> list[dict]:
         """Return REAL maker fills since the last poll. Each: ``{token_id, side,
         size, price, id}``. Fetches only trades where WE are the MAKER

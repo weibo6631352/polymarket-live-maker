@@ -1051,8 +1051,24 @@ class Engine:
         orders = compute_two_sided_quotes(
             mid, half_spread_c=q["half_spread_c"], size=q["size"],
             tick=q["tick"], max_spread_c=q["max_spread_c"], skew_ticks=0.0)
-        q["submitted"] = [submitter({"action": "PLACE", "token_id": q["token_id"], **o})
-                          for o in orders]
+        acks = []
+        ok = True
+        for o in orders:
+            try:
+                ack = submitter({"action": "PLACE", "token_id": q["token_id"], **o})
+            except Exception:  # noqa: BLE001
+                ack = {"status": "ERROR"}
+            acks.append(ack)
+            if not self._action_ok(ack):
+                ok = False
+        q["submitted"] = acks
+        if not ok:
+            # ROLL BACK: cancel any leg that did rest + free the ledger reservation,
+            # so a partial/failed placement never leaves a funded, untracked quote.
+            submitter({"action": "CANCEL_ALL", "token_id": q["token_id"]})
+            self.cancel_maker_quote(q["id"])
+            raise OrderRejectedError(
+                f"maker quote placement failed for {q['token_id'][:12]} (rolled back)")
         return q
 
     def accrue_maker_rewards_live(
@@ -1084,13 +1100,15 @@ class Engine:
                 # apply this poll's REAL fills (inventory + P&L marked at last_mid)
                 # BEFORE exiting, so their P&L isn't silently dropped from the
                 # ledger / kill-switch (the market is gone, so no fresh mid).
-                rd_inv = rd_pnl = 0.0
+                rd_inv = rd_pnl = rd_bleed = 0.0
                 rn = 0
                 for rf in fills_by_token.get(quote.token_id, []):
                     rsgn = 1.0 if str(rf["side"]).upper() == "BUY" else -1.0
                     rsz = float(rf["size"])
+                    rfp = rsgn * (quote.last_mid - float(rf.get("price", quote.last_mid))) * rsz
                     rd_inv += rsgn * rsz
-                    rd_pnl += rsgn * (quote.last_mid - float(rf.get("price", quote.last_mid))) * rsz
+                    rd_pnl += rfp
+                    rd_bleed += max(0.0, -rfp)
                     rn += 1
                 final_inv = quote.inventory + rd_inv
                 cancel_res = submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
@@ -1101,7 +1119,7 @@ class Engine:
                     # the position stays tracked + retried next poll.
                     update_maker_quote_accrual(
                         self.db.conn, quote.id, accrued_rewards=quote.accrued_rewards,
-                        realized_bleed=quote.realized_bleed, fills=quote.fills + rn,
+                        realized_bleed=quote.realized_bleed + rd_bleed, fills=quote.fills + rn,
                         last_mid=quote.last_mid, last_accrued_at=now_dt.isoformat(),
                         inventory=final_inv, inventory_pnl=quote.inventory_pnl + rd_pnl)
                     results.append({"quote": _maker_quote_to_dict(quote),
@@ -1109,7 +1127,7 @@ class Engine:
                     continue
                 final = update_maker_quote_accrual(
                     self.db.conn, quote.id, accrued_rewards=quote.accrued_rewards,
-                    realized_bleed=quote.realized_bleed, fills=quote.fills + rn,
+                    realized_bleed=quote.realized_bleed + rd_bleed, fills=quote.fills + rn,
                     last_mid=quote.last_mid, last_accrued_at=now_dt.isoformat(),
                     inventory=0.0, inventory_pnl=quote.inventory_pnl + rd_pnl)
                 self._exit_maker_quote(final, quote.last_mid, "rewards_ended", results,
@@ -1139,12 +1157,15 @@ class Engine:
             cap = quote.max_inventory if quote.max_inventory > 0 else MAKER_CAP_MULT * quote.size
             d_inv = 0.0
             fill_pnl = 0.0
+            bleed = 0.0
             n_fills = 0
             for f in fills_by_token.get(quote.token_id, []):
                 sgn = 1.0 if str(f["side"]).upper() == "BUY" else -1.0
                 sz = float(f["size"])
+                fp = sgn * (mid - float(f.get("price", mid))) * sz
                 d_inv += sgn * sz
-                fill_pnl += sgn * (mid - float(f.get("price", mid))) * sz
+                fill_pnl += fp
+                bleed += max(0.0, -fp)   # adverse-selection component (pick-off cost)
                 n_fills += 1
             new_inventory = quote.inventory + d_inv          # raw real position
             held_mtm = quote.inventory * (mid - quote.last_mid)
@@ -1163,7 +1184,7 @@ class Engine:
                     update_maker_quote_accrual(
                         self.db.conn, quote.id,
                         accrued_rewards=quote.accrued_rewards + reward,
-                        realized_bleed=quote.realized_bleed, fills=quote.fills + n_fills,
+                        realized_bleed=quote.realized_bleed + bleed, fills=quote.fills + n_fills,
                         last_mid=mid, last_accrued_at=now_dt.isoformat(),
                         inventory=new_inventory, inventory_pnl=quote.inventory_pnl + pnl_delta)
                     results.append({"quote": _maker_quote_to_dict(quote),
@@ -1173,7 +1194,7 @@ class Engine:
                 final = update_maker_quote_accrual(
                     self.db.conn, quote.id,
                     accrued_rewards=quote.accrued_rewards + reward,
-                    realized_bleed=quote.realized_bleed, fills=quote.fills + n_fills,
+                    realized_bleed=quote.realized_bleed + bleed, fills=quote.fills + n_fills,
                     last_mid=mid, last_accrued_at=now_dt.isoformat(), inventory=0.0,
                     inventory_pnl=quote.inventory_pnl + pnl_delta)
                 self._exit_maker_quote(final, mid, "drift_exit", results,
@@ -1206,7 +1227,7 @@ class Engine:
             updated = update_maker_quote_accrual(
                 self.db.conn, quote.id,
                 accrued_rewards=quote.accrued_rewards + reward,
-                realized_bleed=quote.realized_bleed, fills=quote.fills + n_fills,
+                realized_bleed=quote.realized_bleed + bleed, fills=quote.fills + n_fills,
                 last_mid=mid, last_accrued_at=now_dt.isoformat(),
                 inventory=new_inventory, inventory_pnl=quote.inventory_pnl + pnl_delta)
             results.append({

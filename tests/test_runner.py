@@ -100,9 +100,12 @@ class FakeSubmitter:
 
 
 def _runner(*, engine=None, submitter=None, **cfg):
-    return LiveRunner(RunnerConfig(**cfg), engine=engine or FakeEngine(),
-                      scanner_client=FakeScanner(), submitter=submitter,
-                      sleeper=lambda _s: None)
+    import time as _t
+    r = LiveRunner(RunnerConfig(**cfg), engine=engine or FakeEngine(),
+                   scanner_client=FakeScanner(), submitter=submitter,
+                   sleeper=lambda _s: None)
+    r._last_scan_ok = _t.monotonic()   # tests drive reselect() directly (not stale)
+    return r
 
 
 class TestSelection:
@@ -213,6 +216,34 @@ class TestKillSwitch:
         r.trip_kill("b")
         assert r._stop and r._kill_reason == "a"
 
+    def test_wallet_floor_trips_kill(self):
+        class BalSub(FakeSubmitter):
+            def usdc_balance(self):
+                return 5.0
+        eng = FakeEngine(summary={"inventory_pnl": 0.0})
+        r = _runner(engine=eng, submitter=BalSub(), live=True,
+                    min_wallet_usdc=10.0, max_loss=1e9)
+        assert "wallet-floor" in (r._kill_check() or "")
+
+    def test_wallet_floor_clean_above(self):
+        class BalSub(FakeSubmitter):
+            def usdc_balance(self):
+                return 100.0
+        eng = FakeEngine(summary={"inventory_pnl": 0.0})
+        r = _runner(engine=eng, submitter=BalSub(), live=True,
+                    min_wallet_usdc=10.0, max_loss=1e9)
+        assert r._kill_check() is None
+
+
+class TestStaleness:
+    def test_stale_report_skips_reselect(self):
+        eng = FakeEngine()
+        r = _runner(engine=eng, capital=10_000.0)
+        r._last_scan_ok = None            # never had a good scan
+        r.report = {"pools": [_scan_pool("a", "Alpha")]}
+        r.reselect()
+        assert eng.placed == []           # don't place into a stale/empty universe
+
 
 class TestCooldown:
     def test_tick_expires(self):
@@ -291,7 +322,7 @@ class TestReevaluateHeld:
         r = _runner(engine=eng, min_hold_s=0.0)
         r.placed = {"0xa": {"token": "tok_a"}}
         r.placed_at = {"0xa": 0.0}
-        monkeypatch.setattr(r, "_rescore", lambda c, t: self._fresh(daily=10.0))  # cut
+        monkeypatch.setattr(r, "_rescore", lambda c, t, **kw: self._fresh(daily=10.0))  # cut
         r.reevaluate_held()
         assert 1 in eng.cancelled and "0xa" not in r.placed
 
@@ -301,7 +332,7 @@ class TestReevaluateHeld:
         r = _runner(engine=eng, min_hold_s=1e9)
         r.placed = {"0xa": {"token": "tok_a"}}
         r.placed_at = {"0xa": _t.monotonic()}   # just placed
-        monkeypatch.setattr(r, "_rescore", lambda c, t: self._fresh(daily=10.0))
+        monkeypatch.setattr(r, "_rescore", lambda c, t, **kw: self._fresh(daily=10.0))
         r.reevaluate_held()
         assert eng.cancelled == [] and "0xa" in r.placed   # too young to soft-exit
 
@@ -310,7 +341,7 @@ class TestReevaluateHeld:
         r = _runner(engine=eng, min_hold_s=0.0)
         r.placed = {"0xa": {"token": "tok_a"}}
         r.placed_at = {"0xa": 0.0}
-        monkeypatch.setattr(r, "_rescore", lambda c, t: self._fresh())  # healthy
+        monkeypatch.setattr(r, "_rescore", lambda c, t, **kw: self._fresh())  # healthy
         r.reevaluate_held()
         assert eng.cancelled == [] and "0xa" in r.placed
 
@@ -321,7 +352,7 @@ class TestReevaluateHeld:
         r = _runner(engine=eng, submitter=sub, live=True, min_hold_s=0.0)
         r.placed = {"0xa": {"token": "tok_a"}}
         r.placed_at = {"0xa": 0.0}
-        monkeypatch.setattr(r, "_rescore", lambda c, t: self._fresh(verdict="KILL"))
+        monkeypatch.setattr(r, "_rescore", lambda c, t, **kw: self._fresh(verdict="KILL"))
         r.reevaluate_held()
         assert any(c["action"] == "CANCEL_ALL" for c in sub.calls)
         assert 1 in eng.cancelled and r.cooldown.get("0xa") == r.cfg.cooldown_rounds
@@ -332,7 +363,7 @@ class TestReevaluateHeld:
         r.placed = {"0xa": {"token": "tok_a"}}
         r.placed_at = {"0xa": 0.0}
         called = {"n": 0}
-        monkeypatch.setattr(r, "_rescore", lambda c, t: called.__setitem__("n", 1))
+        monkeypatch.setattr(r, "_rescore", lambda c, t, **kw: called.__setitem__("n", 1))
         r.reevaluate_held()
         assert called["n"] == 0 and eng.cancelled == []
 

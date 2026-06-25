@@ -286,6 +286,7 @@ def score_pool(pool: dict, book: dict, history: list[dict]) -> dict | None:
         "spread_c": round((best_ask - best_bid) * 100, 2),
         "inband_notional": round(bnot + anot),
         "share": round(share, 4),
+        "min_side_score": round(min(bscore, ascore), 4),  # competitors' binding Qmin
         "empty_band": empty_band,
         "reward_per_day": round(reward_per_day, 2),
         "gross_ann_pct": round(gross_ann),

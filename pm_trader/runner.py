@@ -28,7 +28,7 @@ from pm_trader.engine import Engine
 from pm_trader.maker_live import DryRunSubmitter, build_clob_signer
 from pm_trader.models import NotInitializedError
 from pm_trader.portfolio import select_pools
-from pm_trader.rewards import RewardsClient, scan, score_pool
+from pm_trader.rewards import RewardsClient, reward_share, scan, score_pool
 
 log = logging.getLogger("pm_trader.runner")
 
@@ -72,12 +72,16 @@ class RunnerConfig:
     min_daily: float = 80.0
     scan_top: int = 60
     half_spread_ticks: int = 1
+    # use the volatility-aware optimal half-spread (engine.suggest_maker_half_spread)
+    # per pool at selection instead of the fixed 1-tick offset. Off by default.
+    use_optimal_spread: bool = False
     risk_tolerance_days: float = 7.0
     max_token_overlap: int = 1
     poll_seconds: float = 60.0          # same beat as the paper maker poll
     discovery_interval_s: float = 600.0   # full reward-universe re-scan cadence (10 min)
     cooldown_rounds: int = 3
     max_loss: float = 20.0              # kill-switch: maker inventory-PnL floor
+    min_wallet_usdc: float = 0.0        # kill-switch: hard floor on REAL wallet USDC (0=off)
     # continuous re-evaluation of HELD pools (degradation exit + opportunity rotation)
     reeval_enabled: bool = True
     reeval_interval_s: float = 300.0    # re-check held pools this often (cheap; held-only)
@@ -106,6 +110,8 @@ class RunnerConfig:
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_share=_f("LM_MIN_SHARE", 0.02),
             min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
+            min_wallet_usdc=_f("LM_MIN_WALLET_USDC", 0.0),
+            use_optimal_spread=os.environ.get("LM_OPTIMAL_SPREAD", "0").strip() == "1",
         )
 
     def banner(self) -> str:
@@ -136,6 +142,7 @@ class LiveRunner:
         self.placed: dict[str, dict] = {}    # condition_id -> selected pool dict
         self.placed_at: dict[str, float] = {}  # condition_id -> monotonic placement time
         self.cooldown: dict[str, int] = {}   # condition_id -> discovery rounds left
+        self._last_scan_ok: float | None = None  # monotonic time of last good discovery
         self._stop = False
         self._kill_reason = ""
 
@@ -276,10 +283,18 @@ class LiveRunner:
         try:
             self.report = scan(self.scanner, min_daily=self.cfg.min_daily,
                                top=self.cfg.scan_top, with_jump_risk=True)
+            self._last_scan_ok = time.monotonic()
             log.info("discovery: %d safe of %d scored",
                      self.report.get("safe_count", 0), self.report.get("pools_scored", 0))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 — keep the LAST good report; staleness guard handles it
             log.warning("discovery scan failed: %s", e)
+
+    def _report_stale(self) -> bool:
+        """The universe scan hasn't succeeded recently -> don't add/rotate pools off
+        stale data (held pools are still managed via reevaluate_held + poll)."""
+        if self._last_scan_ok is None:
+            return True
+        return (time.monotonic() - self._last_scan_ok) > 2.0 * self.cfg.discovery_interval_s
 
     def reselect(self) -> None:
         """Converge the held book to the freshly-computed IDEAL selection — this IS
@@ -288,6 +303,10 @@ class LiveRunner:
           - DROP held pools no longer in the ideal set (cancel/flatten/retire),
           - ADD ideal pools not yet held.
         Stable when the universe is stable (held == ideal -> no churn)."""
+        if self._report_stale():
+            log.warning("discovery report stale -> skipping reselect (held pools "
+                        "still managed); waiting for a fresh scan")
+            return
         cd = {k for k, v in self.cooldown.items() if v > 0}
         self.selected = select_pools(
             self.report, capital=self.cfg.capital, max_pools=self.cfg.max_pools,
@@ -308,12 +327,18 @@ class LiveRunner:
                     else:
                         self.placed.pop(cond, None)
                         self.placed_at.pop(cond, None)
-        # ADD newly selected pools
+        # ADD newly selected pools, never exceeding the capital budget (the engine
+        # cash gate can drift with P&L, so enforce the budget here too).
+        committed = sum(m.get("committed_capital", 0.0) for m in self.placed.values())
         for cond, s in want.items():
             if cond in self.placed:
                 continue
+            cap = s.get("committed_capital", 0.0)
+            if committed + cap > self.cfg.capital + 1e-6:
+                continue   # would exceed the budget given what's already held
             try:
                 self._place(cond, s)
+                committed += cap
                 self.placed[cond] = s
                 self.placed_at[cond] = time.monotonic()
                 log.info("placed %s | %s | daily=$%.0f", cond[:10],
@@ -346,15 +371,21 @@ class LiveRunner:
                 continue
             if now - self.placed_at.get(cond, 0.0) < self.cfg.min_hold_s:
                 continue                        # anti-churn: respect the minimum hold
-            fresh = self._rescore(cond, q["token_id"])
+            fresh = self._rescore(cond, q["token_id"], own_size=q.get("size", 0.0),
+                                  own_half_spread_c=q.get("half_spread_c", 0.0))
             if fresh is None:
                 continue                        # transient read failure — try next round
             reason = self._degrade_reason(fresh)
             if reason:
                 self._exit_held(cond, q, reason)
 
-    def _rescore(self, condition_id: str, token_id: str) -> dict | None:
-        """Fresh score for one held pool from live data (current daily/share/jump)."""
+    def _rescore(self, condition_id: str, token_id: str, *, own_size: float = 0.0,
+                own_half_spread_c: float = 0.0) -> dict | None:
+        """Fresh score for one held pool from live data (current daily/share/jump).
+
+        The public book includes OUR OWN resting order, so score_pool's share is
+        understated; subtract our binding-side Qmin to recover the true competitor
+        share (otherwise re-eval spuriously flags share_collapsed in LIVE)."""
         try:
             cfg = self.engine.api.get_reward_config(condition_id)
         except Exception:  # noqa: BLE001
@@ -371,6 +402,12 @@ class LiveRunner:
             # book went one-sided/empty -> can't quote two-sided. This is a
             # degradation (exit), NOT a transient read failure (None).
             return {"one_sided": True}
+        c = scored.get("max_spread_c", 0.0)
+        if own_size > 0 and own_half_spread_c > 0 and c > 0:
+            own_q = own_size * ((c - own_half_spread_c) / c) ** 2
+            competitor = max(0.0, scored.get("min_side_score", 0.0) - own_q)
+            scored["share"] = round(reward_share(cfg["min_size"], cfg["tick"], c, competitor), 4)
+            scored["reward_per_day"] = round(scored["share"] * cfg["daily"], 2)
         return scored                           # share / reward_per_day / jump_verdict / empty_band
 
     # reasons that bench a pool for a few rounds (it degraded, don't immediately
@@ -417,6 +454,14 @@ class LiveRunner:
 
     def _place(self, condition_id: str, pool: dict) -> None:
         hs = pool["half_spread_c"]
+        if self.cfg.use_optimal_spread:
+            try:  # vol-aware net-optimal offset (reuses the tested engine model)
+                rec = self.engine.suggest_maker_half_spread(
+                    condition_id, poll_seconds=self.cfg.poll_seconds)
+                hs = rec.get("half_spread_c") or hs
+            except Exception as e:  # noqa: BLE001
+                log.warning("optimal-spread calc failed for %s: %s; using %.2fc",
+                            condition_id[:10], e, hs)
         if self._use_live_path():
             self.engine.place_maker_quote_live(
                 condition_id, submitter=self.submitter, half_spread_cents=hs)
@@ -487,6 +532,13 @@ class LiveRunner:
                 inv_pnl = 0.0
             if inv_pnl <= -self.cfg.max_loss:
                 return f"max-loss (maker inventory P&L ${inv_pnl:.2f})"
+        # INDEPENDENT wallet-balance floor: trips on the REAL USDC balance, immune to
+        # any ledger self-report drift (operator sets LM_MIN_WALLET_USDC).
+        if self.cfg.live and self.cfg.min_wallet_usdc > 0 and self.submitter is not None:
+            reader = getattr(self.submitter, "usdc_balance", None)
+            bal = reader() if reader is not None else None
+            if bal is not None and bal < self.cfg.min_wallet_usdc:
+                return f"wallet-floor (real USDC ${bal:.2f} < ${self.cfg.min_wallet_usdc:.2f})"
         return None
 
     # -- shutdown ----------------------------------------------------------
