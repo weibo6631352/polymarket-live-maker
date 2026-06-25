@@ -132,11 +132,12 @@ class RunnerConfig:
     # share-based: a small share of a high-daily pool still earns. 0 = off.
     min_pool_reward: float = 0.5
     # how hard selection penalises a CHOPPY (high daily_vol) book, 0..1. Continuous
-    # chop is cancellable, so with our ms-level reflex cancel + the real-time
-    # max_mid_vel_cps exit we needn't pre-avoid choppy pools as a slow poller would
-    # — 0.5 = half the naive penalty. (Jump-tail risk stays FULLY weighted: a
-    # discrete gap fills before any cancel, so speed can't buy that aggression.)
-    chop_aversion: float = 0.5
+    # chop IS cancellable, so a fast canceller can tolerate more than a slow poller.
+    # But our real cancel-efficiency is UNMEASURED until we have live fills, so the
+    # default gives only a SMALL speed credit (0.7 ≈ 30% off the naive full aversion);
+    # lower toward 0.3-0.5 once live data confirms we actually catch chop. (Jump-tail
+    # risk stays FULLY weighted: a discrete gap fills before any cancel.)
+    chop_aversion: float = 0.7
     # exit a held pool whose real-time mid velocity exceeds this (cents/sec) — a
     # choppy book bleeds via small pick-offs the daily jump_verdict misses. 0 = off.
     max_mid_vel_cps: float = 4.0
@@ -199,7 +200,7 @@ class RunnerConfig:
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_pool_reward=_f("LM_MIN_POOL_REWARD", 0.5),
-            chop_aversion=_f("LM_CHOP_AVERSION", 0.5),
+            chop_aversion=_f("LM_CHOP_AVERSION", 0.7),
             max_mid_vel_cps=_f("LM_MAX_MID_VEL_CPS", 4.0),
             min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
             min_wallet_usdc=_f("LM_MIN_WALLET_USDC", 0.0),
