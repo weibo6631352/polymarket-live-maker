@@ -316,17 +316,20 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         return {"status": "IGNORED", **action}
 
     def _place(self, token_id, side, price, size) -> dict:
-        from py_clob_client.clob_types import OrderArgs, OrderType
+        # RECOMMENDED one-step helper; posts GTC (a resting maker quote). create_order
+        # auto-resolves tick_size + neg_risk + fee and validates the price.
+        from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
 
-        args = OrderArgs(
+        resp = self._client.create_and_post_order(OrderArgs(
             token_id=token_id, price=float(price), size=float(size),
-            side=(BUY if str(side).upper() == "BUY" else SELL),
-        )
-        signed = self._client.create_order(args)
-        resp = self._client.post_order(signed, OrderType.GTC)
-        oid = (resp or {}).get("orderID") or (resp or {}).get("order_id")
-        ok = bool((resp or {}).get("success", oid is not None))
+            side=(BUY if str(side).upper() == "BUY" else SELL)))
+        r = resp or {}
+        oid = r.get("orderID") or r.get("order_id")
+        status = str(r.get("status", "")).strip().lower()
+        # a GTC place succeeds if it rests (live) or matches immediately
+        # (matched/delayed); only 'unmatched' / no-success is a reject.
+        ok = bool(r.get("success", oid is not None)) and status != "unmatched"
         return {"status": "PLACED" if ok else "REJECTED", "order_id": oid,
                 "token_id": token_id, "side": side, "price": price, "size": size,
                 "resp": resp}
@@ -337,22 +340,30 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         return {"status": "CANCELLED", "token_id": token_id, "resp": resp}
 
     def _flatten(self, token_id, side, size) -> dict:
-        """Go flat with a MARKETABLE LIMIT order, FOK (all-or-nothing).
+        """Go flat with the RECOMMENDED market-order helper, FOK (all-or-nothing).
 
-        py-clob-client 0.17 has no usable market helper and no FAK; a marketable
-        limit avoids the market-order USDC-denomination pitfall (limit ``size`` is
-        in SHARES for both sides). FAIL CLOSED: if it doesn't fully fill, return
-        ERROR so the engine keeps the position tracked (never zeroes a live
-        position). NEEDS A LIVE SMOKE-TEST to calibrate the fill-confirm parsing.
+        Per the docs, market orders use create_market_order(MarketOrderArgs) where
+        ``amount`` is SHARES to sell (SELL) or USDC to spend (BUY) — so a short
+        cover sizes the USDC as shares*marketable-ask via get_price. create_market_order
+        auto-resolves tick_size/neg_risk and the marketable price. FAIL CLOSED: if it
+        doesn't fill, return ERROR so the engine keeps the position (never zeroes a
+        live position). Confirm the fill-status parsing on the smoke-test.
         """
-        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY, SELL
 
         s = str(side).upper()
-        price = 0.01 if s == "SELL" else 0.99   # aggressive marketable price
-        args = OrderArgs(token_id=token_id, price=price, size=float(size),
-                         side=(SELL if s == "SELL" else BUY))
-        signed = self._client.create_order(args)
+        if s == "SELL":
+            args = MarketOrderArgs(token_id=token_id, amount=float(size),
+                                   side=SELL, order_type=OrderType.FOK)
+        else:
+            try:  # BUY cover: amount is USDC ~= shares * marketable ask
+                px = float((self._client.get_price(token_id, "BUY") or {}).get("price", 0)) or 0.99
+            except Exception:  # noqa: BLE001
+                px = 0.99
+            args = MarketOrderArgs(token_id=token_id, amount=float(size) * px,
+                                   side=BUY, order_type=OrderType.FOK)
+        signed = self._client.create_market_order(args)
         resp = self._client.post_order(signed, OrderType.FOK)
         if not self._order_filled(resp):
             # FOK killed (book couldn't fully absorb) -> position SURVIVES; fail closed.
@@ -368,14 +379,14 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
 
     @staticmethod
     def _order_filled(resp) -> bool:
-        """FOK fill confirmation. Polymarket order status is matched/live/delayed/
-        unmatched; a FOK either fully fills (matched) or is killed (unmatched).
-        Check status EXACTLY == 'matched' (note: 'unmatched' contains 'match', so a
-        substring test is wrong). Fail closed otherwise."""
+        """Filled per the documented order statuses: 'matched' (matched immediately)
+        or 'delayed' (accepted into async matching) count as filled; 'live' (resting)
+        and 'unmatched' (marketable but failed) do NOT. Compare EXACTLY (note:
+        'unmatched' contains the substring 'match'). Fail closed otherwise."""
         if not isinstance(resp, dict):
             return False
         status = str(resp.get("status", "")).strip().lower()
-        if status == "matched":
+        if status in ("matched", "delayed"):
             return True
         for k in ("size_matched", "sizeMatched"):
             v = resp.get(k)

@@ -26,11 +26,12 @@ dependencies = [
 [project.optional-dependencies]
 # the real-order path (signing + posting via the public CLOB REST API).
 # Not needed for dry-run or the test suite (imported lazily, behind PM_TRADER_LIVE).
-# NOTE: py-clob-client is ARCHIVED/unmaintained upstream (Polymarket now ships the
-# unified `py-sdk`). The pinned 0.17.x still works against the live CLOB; revisit
-# migrating the execution layer to py-sdk before relying on it long-term.
+# NOTE: the execution layer follows py-clob-client's RECOMMENDED usage (create_and_post_order
+# GTC for resting quotes; create_market_order FOK for flatten). Latest published is 0.34.x
+# (current, works against the live CLOB). The GitHub repo is archived — future development
+# is in the unified `py-sdk` — so plan to migrate eventually, but 0.34.x is fine now.
 live = [
-    "py-clob-client>=0.17",
+    "py-clob-client>=0.34",
 ]
 dev = [
     "pytest>=8.0",

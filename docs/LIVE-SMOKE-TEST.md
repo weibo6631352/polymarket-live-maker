@@ -6,9 +6,11 @@ that genuinely cannot be verified offline (the live CLOB response shapes and the
 fill-side perspective). Everything else was verified against the py-clob-client
 0.17.x source and the official docs.
 
-> **Reminder:** the execution library `py-clob-client` is archived upstream
-> (Polymarket now ships the unified `py-sdk`). The pinned 0.17.x still works against
-> the live CLOB; this checklist also tells you if/when it stops working.
+> **Reminder:** the execution layer uses py-clob-client's RECOMMENDED helpers
+> (`create_and_post_order` GTC for resting quotes; `create_market_order` FOK for
+> flatten). Latest published is 0.34.x and works against the live CLOB; its GitHub
+> repo is archived (future dev is in the unified `py-sdk`), so plan to migrate
+> eventually. This checklist confirms the live response shapes either way.
 
 ## 0. Setup
 ```bash
