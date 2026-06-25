@@ -123,9 +123,9 @@ All behavior-preserving except where noted; the 933-test suite stayed green.
 | **Background discovery thread** (heavy scan off the hot loop; atomic report swap; Event-stopped, joined on shutdown) | `runner.py` | poll/cancel loop never blocks on the scan |
 | **`PRAGMA synchronous=NORMAL`** (durable under WAL) | `db.py` | drops per-commit fsync on the per-pool hot writes |
 | **`DryRunSubmitter.sent` → bounded deque (5000)** | `maker_live.py` | no memory growth over long dry-live soaks |
-| **`equity_curve` rolling prune** (time-based, last `LM_RETENTION_DAYS`=10) | `db.py` | bounds the one unbounded series |
-| **Event log** (`state/events/*.jsonl`, daily files, 10-day retention, thread-safe) | `events.py`, `runner.py` | granular per-poll/discovery/decision series for review |
-| **Rotating runner log** (`state/runner.log`, daily, 10-day) | `runner.py` | durable human-readable log (stdout alone is ephemeral) |
+| **`equity_curve` rolling prune** (time-based, last `LM_RETENTION_DAYS`=30) | `db.py` | bounds the one unbounded series |
+| **Event log** (`state/events/*.jsonl`, daily files, 30-day retention, thread-safe) | `events.py`, `runner.py` | granular per-poll/discovery/decision series for review |
+| **Rotating runner log** (`state/runner.log`, daily, 30-day) | `runner.py` | durable human-readable log (stdout alone is ephemeral) |
 | **Review + reward reconciliation tool** (`python -m pm_trader.review [days]`) | `review.py` | estimate-vs-ACTUAL reward, per-pool P&L, decisions |
 
 **Deliberately NOT done:** caching `get_reward_config` (it's a safety/exit signal —
@@ -194,7 +194,7 @@ on-chain orders on restart. Keep `state/` on the persistent instance disk.
 ## 8. Review & iteration data (复盘)
 
 Everything needed to review a run and iterate, on a rolling `LM_RETENTION_DAYS`
-(default 10) window. All under `state/` (gitignored):
+(default 30, ~1 month) window. All under `state/` (gitignored):
 
 - **`state/events/events-YYYYMMDD.jsonl`** — append-only, one JSON object per line:
   `poll` (per-pool share/mid/reward/inventory each cycle), `discovery` (universe
@@ -214,7 +214,8 @@ reward/bleed/net, and the decision/discovery summary. **This is the key 复盘 s
 the bot's reward is a book-snapshot estimate; Polymarket pays a time-weighted daily
 settlement, so the ratio reveals how far the share estimate is off.
 
-**Honest limits of a 10-day window:** good for tactical review + tuning, but it
-won't capture the rare resolution-jump tail (a single jump can wipe many days of
-reward) that ultimately decides whether the edge survives — judging that needs
-weeks/months. Reconciliation also needs a LIVE run (dry-run has no real payouts).
+**Honest limits of a ~1-month window:** good for tactical review, tuning, and
+catching some resolution-jump events — but a single month still may not contain
+enough of the rare jump tail (one jump can wipe many days of reward) to fully judge
+whether the edge survives; high confidence on tail risk needs multiple months.
+Reconciliation also needs a LIVE run (dry-run has no real payouts).

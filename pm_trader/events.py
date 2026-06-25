@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 class EventLog:
-    def __init__(self, directory, retention_days: int = 10) -> None:
+    def __init__(self, directory, retention_days: int = 30) -> None:
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.retention_days = max(1, int(retention_days))

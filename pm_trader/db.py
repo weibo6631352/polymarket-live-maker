@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS equity_curve (
 # unbounded it grows forever. Keep a rolling time window (the operator only needs
 # recent history for review); prune amortized (not every insert) so the hot path
 # stays a single INSERT.
-EQUITY_RETENTION_DAYS = 10
+EQUITY_RETENTION_DAYS = 30
 _EQUITY_PRUNE_EVERY = 1_000
 
 

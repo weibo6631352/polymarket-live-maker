@@ -100,7 +100,7 @@ class RunnerConfig:
     state_dir: str = "state"
     kill_file: str = "KILL"
     # rolling data retention (days) for the event log + equity curve + rotated logs
-    retention_days: int = 10
+    retention_days: int = 30
     events_enabled: bool = True        # append-only per-poll/discovery event log
 
     extra: dict = field(default_factory=dict)
@@ -119,7 +119,7 @@ class RunnerConfig:
             discovery_interval_s=_f("LM_DISCOVERY_INTERVAL_S", 600.0),
             cooldown_rounds=_i("LM_COOLDOWN_ROUNDS", 3),
             max_loss=_f("LM_MAX_LOSS_PER_DAY", 20.0),
-            retention_days=_i("LM_RETENTION_DAYS", 10),
+            retention_days=_i("LM_RETENTION_DAYS", 30),
             events_enabled=os.environ.get("LM_EVENTS", "1").strip() != "0",
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
