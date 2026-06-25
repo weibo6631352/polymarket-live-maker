@@ -264,7 +264,10 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
     in the environment. Excluded from coverage — it touches real funds.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, rate_limiter=None) -> None:
+        # shared TokenBucket so order ops + fill polls share the global req/s budget
+        # with the read path. None = unlimited.
+        self.rate_limiter = rate_limiter
         if os.environ.get("PM_TRADER_LIVE") != "1":
             raise ApiError("Refusing live signer: set PM_TRADER_LIVE=1 to opt in")
         pk = os.environ.get("POLYMARKET_PRIVATE_KEY")
@@ -322,6 +325,7 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
 
+        self._throttle()
         resp = self._client.create_and_post_order(OrderArgs(
             token_id=token_id, price=float(price), size=float(size),
             side=(BUY if str(side).upper() == "BUY" else SELL)))
@@ -335,8 +339,19 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
                 "token_id": token_id, "side": side, "price": price, "size": size,
                 "resp": resp}
 
+    def _throttle(self) -> None:
+        if self.rate_limiter is not None:
+            self.rate_limiter.acquire()      # share the global req/s budget
+
+    def api_creds(self) -> dict:  # pragma: no cover - requires live creds
+        """L2 creds for the WS user channel (derived from the key, same as REST)."""
+        c = self._client.creds
+        return {"apiKey": c.api_key, "secret": c.api_secret,
+                "passphrase": c.api_passphrase}
+
     def _cancel_all(self, token_id) -> dict:
         # the latency-sensitive op; cancel every resting order on this token
+        self._throttle()
         resp = self._client.cancel_market_orders(asset_id=token_id)
         return {"status": "CANCELLED", "token_id": token_id, "resp": resp}
 
@@ -353,6 +368,7 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         from py_clob_client.clob_types import MarketOrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY, SELL
 
+        self._throttle()
         s = str(side).upper()
         if s == "SELL":
             args = MarketOrderArgs(token_id=token_id, amount=float(size),
@@ -435,6 +451,7 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         needs a one-line smoke-test confirm (POLYMARKET_FILL_SIDE_INVERT corrects it)."""
         from py_clob_client.clob_types import TradeParams
         params = TradeParams(maker_address=self._own_address) if self._own_address else None
+        self._throttle()
         trades = self._client.get_trades(params) or []
         out: list[dict] = []
         seen_new = False
@@ -460,14 +477,15 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         return out
 
 
-def build_clob_signer():  # pragma: no cover - requires external lib + live creds
+def build_clob_signer(rate_limiter=None):  # pragma: no cover - requires lib + live creds
     """Build a real ``py-clob-client`` submitter. Hard-gated; never used in dry-run.
 
     Returns a :class:`ClobSubmitter` (callable like the old echo submitter, but it
     actually posts/cancels orders and can poll real fills). Refuses unless
-    ``PM_TRADER_LIVE=1`` and ``POLYMARKET_PRIVATE_KEY`` are set.
+    ``PM_TRADER_LIVE=1`` and ``POLYMARKET_PRIVATE_KEY`` are set. ``rate_limiter`` is
+    the shared TokenBucket so order ops share the global req/s budget.
     """
-    return ClobSubmitter()
+    return ClobSubmitter(rate_limiter=rate_limiter)
 
 
 class DryRunSubmitter:

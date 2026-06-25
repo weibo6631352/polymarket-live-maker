@@ -31,7 +31,9 @@ from pm_trader.events import EventLog
 from pm_trader.maker_live import DryRunSubmitter, build_clob_signer
 from pm_trader.models import NotInitializedError
 from pm_trader.portfolio import select_pools
+from pm_trader.ratelimit import TokenBucket
 from pm_trader.rewards import RewardsClient, reward_share, scan, score_pool
+from pm_trader.ws import MarketChannel, UserChannel
 
 log = logging.getLogger("pm_trader.runner")
 
@@ -102,6 +104,15 @@ class RunnerConfig:
     # rolling data retention (days) for the event log + equity curve + rotated logs
     retention_days: int = 30
     events_enabled: bool = True        # append-only per-poll/discovery event log
+    # global CLOB request cap (req/s), shared by reads + writes + discovery via one
+    # TokenBucket. 149 = the order-book rate limit (matches the sports-trader-cpp
+    # daemon, i.e. 1 below 150). The bucket is the hard ceiling; tune via env.
+    max_req_per_sec: float = 149.0
+    # real-time WS market data: book/mid pushed (~ms) instead of REST-polled, and
+    # real fills via the user channel. Dataclass default False keeps unit tests
+    # network-free; from_env turns it ON. Falls back to REST per-token if the WS
+    # cache isn't fresh, so it degrades gracefully.
+    ws_enabled: bool = False
 
     extra: dict = field(default_factory=dict)
 
@@ -121,6 +132,8 @@ class RunnerConfig:
             max_loss=_f("LM_MAX_LOSS_PER_DAY", 20.0),
             retention_days=_i("LM_RETENTION_DAYS", 30),
             events_enabled=os.environ.get("LM_EVENTS", "1").strip() != "0",
+            max_req_per_sec=_f("LM_MAX_REQ_PER_SEC", 149.0),
+            ws_enabled=os.environ.get("LM_WS", "1").strip() != "0",
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_share=_f("LM_MIN_SHARE", 0.02),
@@ -151,7 +164,16 @@ class LiveRunner:
                  sleeper=time.sleep) -> None:
         self.cfg = config
         self.engine = engine
-        self.scanner = scanner_client or RewardsClient()
+        # ONE shared token bucket = the global CLOB req/s budget, shared (FIFO) by
+        # every request source: the fast hot-poll reads, reeval, the background
+        # discovery scan, and live order ops. Keeps total req/s under the cap so
+        # the loop can poll sub-second without 429s.
+        self.rate_limiter = (TokenBucket(config.max_req_per_sec)
+                             if config.max_req_per_sec and config.max_req_per_sec > 0
+                             else None)
+        self.scanner = scanner_client or RewardsClient(rate_limiter=self.rate_limiter)
+        if self.rate_limiter is not None and hasattr(self.scanner, "rate_limiter"):
+            self.scanner.rate_limiter = self.rate_limiter   # injected scanners too
         self.submitter = submitter
         self._sleep_fn = sleeper
         self.report: dict = {"pools": []}
@@ -166,6 +188,8 @@ class LiveRunner:
         self._discovery_thread: threading.Thread | None = None
         self._discovery_stop = threading.Event()
         self._events: EventLog | None = None   # created in run(); None in unit tests
+        self._market_ch: MarketChannel | None = None   # real-time book (WS)
+        self._user_ch: UserChannel | None = None       # real-time fills (WS, live)
 
     def _event(self, kind: str, **fields) -> None:
         """Append one review/iteration event (no-op until run() opens the log)."""
@@ -183,14 +207,18 @@ class LiveRunner:
         self._install_signals()
         self._ensure_engine()
         self.engine.maker_crossing_cost_c = self.cfg.crossing_cost_c  # PAPER-sim realism
+        if self.rate_limiter is not None and getattr(self.engine, "api", None) is not None:
+            self.engine.api.rate_limiter = self.rate_limiter   # pace the engine's reads
         if self.cfg.live:
             if self.submitter is None:
-                self.submitter = build_clob_signer()  # hard-gated; raises unless opted in
+                # hard-gated; raises unless opted in. Shares the global req/s budget.
+                self.submitter = build_clob_signer(rate_limiter=self.rate_limiter)
             log.warning("LIVE submitter armed — real orders will be placed")
         elif self.cfg.dry_live and self.submitter is None:
             self.submitter = DryRunSubmitter()
             log.info("DRY-LIVE: rehearsing the live code path (orders logged, not sent)")
 
+        self._start_ws()               # real-time book (any mode) + fills (live)
         self._rehydrate()              # adopt maker quotes that survived a prior run
         self._reconcile_broker_orders()  # LIVE: cancel orphaned on-chain orders
         try:
@@ -321,6 +349,51 @@ class LiveRunner:
             self._stop = True
             log.warning("KILL-SWITCH: %s — cancelling all + standing down", reason)
 
+    # -- real-time WS channels ---------------------------------------------
+
+    def _start_ws(self) -> None:
+        """Start the WS channels: market (book/mid, ANY mode → engine.book_source)
+        and user (real fills, LIVE only). Best-effort — a WS failure just leaves the
+        engine on REST (book_source unset / fills via the submitter)."""
+        if not self.cfg.ws_enabled:
+            return
+        try:
+            self._market_ch = MarketChannel()
+            self._market_ch.start()
+            if hasattr(self.engine, "book_source"):
+                self.engine.book_source = self._market_ch
+            log.info("WS market channel started (real-time book; REST fallback)")
+        except Exception as e:  # noqa: BLE001
+            log.warning("WS market channel failed to start (using REST): %s", e)
+            self._market_ch = None
+        if self.cfg.live and self.submitter is not None:
+            get_creds = getattr(self.submitter, "api_creds", None)
+            if callable(get_creds):
+                try:
+                    self._user_ch = UserChannel(
+                        get_creds(),
+                        invert_side=getattr(self.submitter, "_invert_side", False))
+                    self._user_ch.start()
+                    log.info("WS user channel started (real-time fills)")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("WS user channel failed (REST fills): %s", e)
+                    self._user_ch = None
+
+    def _held_tokens(self) -> list[str]:
+        if self.engine is None:
+            return []
+        try:
+            return [q["token_id"] for q in self.engine.get_maker_quotes()]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _sync_ws_subscriptions(self) -> None:
+        """Point the WS channels at the currently-held pools."""
+        if self._market_ch is not None:
+            self._market_ch.set_tokens(self._held_tokens())
+        if self._user_ch is not None:
+            self._user_ch.set_markets(list(self.placed.keys()))
+
     # -- discovery / selection ---------------------------------------------
 
     def _start_discovery_thread(self) -> None:
@@ -420,6 +493,7 @@ class LiveRunner:
             except Exception as e:  # noqa: BLE001 — one bad market mustn't sink the book
                 log.warning("place failed for %s: %s", cond[:10], e)
         log.info("active book: %d pools (selected %d)", len(self.placed), len(self.selected))
+        self._sync_ws_subscriptions()   # point WS at the new held set
 
     # -- continuous re-evaluation of held pools ----------------------------
 
@@ -605,8 +679,12 @@ class LiveRunner:
         return rows
 
     def _poll_fills(self) -> dict:
-        """Group the account's REAL trades since last poll by token."""
-        poll = getattr(self.submitter, "poll_fills", None)
+        """Group the account's REAL fills since last poll by token. Prefers the WS
+        user channel (real-time push); falls back to the submitter's REST poll."""
+        if self._user_ch is not None:
+            poll = self._user_ch.poll_fills
+        else:
+            poll = getattr(self.submitter, "poll_fills", None)
         if poll is None:
             return {}
         try:
@@ -651,6 +729,12 @@ class LiveRunner:
         self._discovery_stop.set()
         if self._discovery_thread is not None:
             self._discovery_thread.join(timeout=5.0)
+        for ch in (self._market_ch, self._user_ch):   # close WS channels (no state)
+            if ch is not None:
+                try:
+                    ch.stop()
+                except Exception:  # noqa: BLE001
+                    pass
         if self._events is not None:
             self._events.close()
         log.warning("shutdown (%s): cancelling all maker quotes", self._kill_reason or "stop")

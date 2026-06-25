@@ -92,6 +92,10 @@ class Engine:
         self.db.init_schema()
         init_orders_schema(self.db.conn)
         self.api = PolymarketClient(self.db)
+        # Optional real-time book source (a ws.MarketChannel). When set and fresh,
+        # the maker poll reads book/mid from it instead of REST — ~ms latency + frees
+        # the REST budget. Falls back to REST per-token when the cache isn't ready.
+        self.book_source = None
         # PAPER-only: simulated taker crossing cost (cents) charged when an exit
         # flattens inventory (0 = current behaviour; the runner sets it from config).
         self.maker_crossing_cost_c = 0.0
@@ -921,8 +925,17 @@ class Engine:
             if pool is None or (pool.get("daily", 0.0) or 0.0) <= 0:
                 return out  # reconcile/exit path needs no book or mid
             try:
-                out["book"] = self.api.get_order_book(quote.token_id)
-                out["mid"] = self.api.get_midpoint(quote.token_id)
+                book = mid = None
+                src = self.book_source
+                if src is not None:                  # prefer the real-time WS cache
+                    b = src.get_book(quote.token_id)
+                    m = src.get_midpoint(quote.token_id)
+                    if b is not None and 0.0 < m < 1.0:
+                        book, mid = b, m
+                if book is None:                     # REST fallback (paced, freshly)
+                    book = self.api.get_order_book(quote.token_id)
+                    mid = self.api.get_midpoint(quote.token_id)
+                out["book"], out["mid"] = book, mid
                 out["book_ok"] = True
             except Exception:
                 pass  # transient — caller skips this pool this poll

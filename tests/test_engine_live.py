@@ -77,6 +77,41 @@ class TestPlaceLive:
         assert len(eng.get_maker_quotes()) == 1
 
 
+class _FakeBookSource:
+    def __init__(self, book, mid):
+        self._book, self._mid = book, mid
+    def get_book(self, token_id):
+        return self._book
+    def get_midpoint(self, token_id):
+        return self._mid
+
+
+class TestBookSource:
+    """The WS book source is used for book/mid when fresh; REST is the fallback."""
+
+    def test_uses_book_source_not_rest_when_fresh(self, eng):
+        sub = FakeSubmitter()
+        _mock_api(eng, mid=0.50)
+        eng.place_maker_quote_live("0xabc", submitter=sub, half_spread_cents=1.0)
+        eng.book_source = _FakeBookSource(_book(bid=0.50, ask=0.52), 0.51)
+        # any REST book/mid read now is a failure — must come from the WS source
+        eng.api.get_order_book = MagicMock(side_effect=AssertionError("used REST book"))
+        eng.api.get_midpoint = MagicMock(side_effect=AssertionError("used REST mid"))
+        rows = eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={})
+        assert rows and rows[0]["mid"] == 0.51            # came from book_source
+
+    def test_falls_back_to_rest_when_source_empty(self, eng):
+        sub = FakeSubmitter()
+        _mock_api(eng, mid=0.50)
+        eng.place_maker_quote_live("0xabc", submitter=sub, half_spread_cents=1.0)
+        eng.book_source = _FakeBookSource(None, 0.0)        # not fresh -> REST
+        eng.api.get_order_book = MagicMock(return_value=_book())
+        eng.api.get_midpoint = MagicMock(return_value=0.50)
+        rows = eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={})
+        assert rows and rows[0]["mid"] == 0.50
+        eng.api.get_order_book.assert_called()             # REST fallback fired
+
+
 class TestAccrueLive:
     def _place(self, eng, sub, mid=0.50, max_inventory=None):
         _mock_api(eng, mid=mid)
