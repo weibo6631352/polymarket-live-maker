@@ -86,6 +86,9 @@ class Engine:
         self.db.init_schema()
         init_orders_schema(self.db.conn)
         self.api = PolymarketClient(self.db)
+        # PAPER-only: simulated taker crossing cost (cents) charged when an exit
+        # flattens inventory (0 = current behaviour; the runner sets it from config).
+        self.maker_crossing_cost_c = 0.0
 
     def close(self) -> None:
         self.api.close()
@@ -909,7 +912,9 @@ class Engine:
             daily_rate = pool["daily"] if pool else 0.0
             if pool is None or daily_rate <= 0:
                 # rewards ended / market resolved → flatten, free capital, stop
-                self._exit_maker_quote(quote, quote.last_mid, "rewards_ended", results)
+                self._exit_maker_quote(
+                    quote, quote.last_mid, "rewards_ended", results,
+                    crossing_cost=self.maker_crossing_cost_c / 100.0 * abs(quote.inventory))
                 continue
             try:
                 book = self.api.get_order_book(quote.token_id)
@@ -958,6 +963,7 @@ class Engine:
                     inventory_pnl=quote.inventory_pnl + inv_pnl_delta,
                 )
                 self._exit_maker_quote(final, mid, "drift_exit", results,
+                                       crossing_cost=self.maker_crossing_cost_c / 100.0 * abs(new_inventory),
                                        reward=reward, fill_loss=fill_loss,
                                        inventory_pnl_delta=inv_pnl_delta,
                                        share=share, seconds=seconds)
@@ -993,18 +999,23 @@ class Engine:
         self.db.update_cash(self.get_account().cash + amount)
 
     def _exit_maker_quote(
-        self, quote, mid: float, reason: str, results: list[dict], **extra,
+        self, quote, mid: float, reason: str, results: list[dict],
+        *, crossing_cost: float = 0.0, **extra,
     ) -> None:
         """Flatten a quote's inventory at *mid*, free its capital, and cancel it.
 
-        ``quote.inventory_pnl`` is already marked at *mid*, so flattening realises
-        it at no extra cost; we just release the reserved capital and book a
-        crossing cost would go here for a true taker exit (paper: flatten at mid).
+        ``quote.inventory_pnl`` is already marked at *mid*. ``crossing_cost`` (>=0) is
+        the simulated taker cost of crossing the spread to flatten — the PAPER path
+        passes it (default 0); the LIVE path pays the real cost via a market order
+        and passes 0 here (no double-charge).
         """
-        self.db.update_cash(self.get_account().cash + quote.committed_capital)
+        self.db.update_cash(
+            self.get_account().cash + quote.committed_capital - max(0.0, crossing_cost))
         cancelled = _cancel_maker_quote(self.db.conn, quote.id)
         row = {"quote": _maker_quote_to_dict(cancelled), "reconciled": reason,
                "mid": mid}
+        if crossing_cost:
+            row["crossing_cost"] = round(crossing_cost, 6)
         row.update({k: round(v, 6) for k, v in extra.items()})
         results.append(row)
 
@@ -1073,7 +1084,7 @@ class Engine:
 
     def accrue_maker_rewards_live(
         self, *, submitter, fills_by_token: dict | None = None,
-        now: datetime | None = None,
+        now: datetime | None = None, recenter_ticks: int = 1,
     ) -> list[dict]:
         """LIVE maker poll. Same decisions as :meth:`accrue_maker_rewards`, but:
           1. inventory comes from REAL fills (``fills_by_token``:
@@ -1209,7 +1220,9 @@ class Engine:
             max_skew = max(0.0, quote.half_spread_c / (quote.tick * 100.0) - 1.0)
             skew = max(-max_skew, min(max_skew, quote.skew_strength * skew_ratio))
             submitted: list = []
-            if abs(mid - quote.last_mid) >= quote.tick:
+            # hysteresis: only re-quote once the mid moves recenter_ticks ticks
+            # (default 1 = every tick) to avoid cancel/replace churn on jitter.
+            if abs(mid - quote.last_mid) >= max(1, recenter_ticks) * quote.tick:
                 submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
                 orders = compute_two_sided_quotes(
                     mid, half_spread_c=quote.half_spread_c, size=quote.size,

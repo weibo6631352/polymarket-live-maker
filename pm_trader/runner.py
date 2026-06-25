@@ -75,6 +75,8 @@ class RunnerConfig:
     # use the volatility-aware optimal half-spread (engine.suggest_maker_half_spread)
     # per pool at selection instead of the fixed 1-tick offset. Off by default.
     use_optimal_spread: bool = False
+    recenter_ticks: int = 1            # re-quote only after the mid moves this many ticks
+    crossing_cost_c: float = 0.0       # PAPER sim: taker cost (cents) charged on exit-flatten
     risk_tolerance_days: float = 7.0
     max_token_overlap: int = 1
     poll_seconds: float = 60.0          # same beat as the paper maker poll
@@ -112,6 +114,8 @@ class RunnerConfig:
             min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
             min_wallet_usdc=_f("LM_MIN_WALLET_USDC", 0.0),
             use_optimal_spread=os.environ.get("LM_OPTIMAL_SPREAD", "0").strip() == "1",
+            recenter_ticks=_i("LM_RECENTER_TICKS", 1),
+            crossing_cost_c=_f("LM_CROSSING_COST_C", 0.0),
         )
 
     def banner(self) -> str:
@@ -153,6 +157,7 @@ class LiveRunner:
         os.makedirs(self.cfg.state_dir, exist_ok=True)
         self._install_signals()
         self._ensure_engine()
+        self.engine.maker_crossing_cost_c = self.cfg.crossing_cost_c  # PAPER-sim realism
         if self.cfg.live:
             if self.submitter is None:
                 self.submitter = build_clob_signer()  # hard-gated; raises unless opted in
@@ -480,7 +485,8 @@ class LiveRunner:
         if self._use_live_path():
             fills_by_token = self._poll_fills()   # DryRunSubmitter -> {} (no fills)
             rows = self.engine.accrue_maker_rewards_live(
-                submitter=self.submitter, fills_by_token=fills_by_token)
+                submitter=self.submitter, fills_by_token=fills_by_token,
+                recenter_ticks=self.cfg.recenter_ticks)
         else:
             rows = self.engine.accrue_maker_rewards()
         for row in rows:

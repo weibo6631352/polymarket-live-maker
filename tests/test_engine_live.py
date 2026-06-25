@@ -191,6 +191,33 @@ class TestAccrueLive:
         rows = eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={})
         assert rows[0]["seconds"] == 600.0   # clamped to MAX_ACCRUAL_SECONDS, not ~days
 
+    def test_crossing_cost_debited_on_exit(self, eng):
+        from pm_trader.orders import get_active_maker_quotes
+        self._place(eng, FakeSubmitter())
+        quote_obj = get_active_maker_quotes(eng.db.conn)[0]
+        cash_before = eng.get_account().cash
+        results = []
+        eng._exit_maker_quote(quote_obj, 0.50, "test", results, crossing_cost=5.0)
+        cash_after = eng.get_account().cash
+        assert cash_after == pytest.approx(cash_before + quote_obj.committed_capital - 5.0)
+        assert results[0]["crossing_cost"] == 5.0
+
+    def test_recenter_hysteresis_holds(self, eng):
+        sub = FakeSubmitter()
+        self._place(eng, sub)                 # entry 0.50
+        sub.calls.clear()
+        eng.api.get_midpoint = MagicMock(return_value=0.52)   # 2-tick move
+        eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={}, recenter_ticks=3)
+        assert sub.calls == []                # 2 ticks < hysteresis 3 -> no churn
+
+    def test_recenter_hysteresis_fires(self, eng):
+        sub = FakeSubmitter()
+        self._place(eng, sub)
+        sub.calls.clear()
+        eng.api.get_midpoint = MagicMock(return_value=0.53)   # 3-tick move
+        eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={}, recenter_ticks=3)
+        assert any(c["action"] == "CANCEL_ALL" for c in sub.calls)   # fires at 3 ticks
+
     def test_one_sided_quote_at_cap(self, eng):
         sub = FakeSubmitter()
         self._place(eng, sub, max_inventory=50.0)

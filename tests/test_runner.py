@@ -47,8 +47,9 @@ class FakeEngine:
     def accrue_maker_rewards(self):
         return self._rows
 
-    def accrue_maker_rewards_live(self, *, submitter, fills_by_token=None):
+    def accrue_maker_rewards_live(self, *, submitter, fills_by_token=None, recenter_ticks=1):
         self.last_fills = fills_by_token
+        self.last_recenter_ticks = recenter_ticks
         return self._rows
 
     def get_maker_summary(self):
