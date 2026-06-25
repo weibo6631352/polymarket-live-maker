@@ -36,12 +36,14 @@ class FakeEngine:
             raise NotInitializedError()
         return object()
 
-    def place_maker_quote(self, cond, *, half_spread_cents=None):
+    def place_maker_quote(self, cond, *, half_spread_cents=None, size=None):
         self.placed.append((cond, half_spread_cents, False))
+        self.placed_size = size
         return {"token_id": "tok_" + cond}
 
-    def place_maker_quote_live(self, cond, *, submitter, half_spread_cents=None):
+    def place_maker_quote_live(self, cond, *, submitter, half_spread_cents=None, size=None):
         self.placed.append((cond, half_spread_cents, True))
+        self.placed_size = size
         return {"token_id": "tok_" + cond}
 
     def accrue_maker_rewards(self):

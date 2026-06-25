@@ -283,3 +283,36 @@ class TestChopAwareRanking:
         from pm_trader.portfolio import _risk_adjusted_score
         p = {"reward_per_day": 10.0, "days_wiped": 0.0, "max_spread_c": 4.5}
         assert _risk_adjusted_score(p, 7.0) == 10.0   # no daily_vol_c -> unchanged
+
+
+class TestCapitalAwareSizing:
+    def _pool(self, cid, *, daily=600.0, min_size=50.0, comp=2000.0, max_jump_c=5.0):
+        return {"condition_id": cid, "token": cid, "question": f"Q {cid}",
+                "daily": daily, "share": 0.02, "min_size": min_size, "tick": 0.01,
+                "max_spread_c": 4.5, "jump_verdict": "SAFE", "empty_band": False,
+                "days_wiped": 5.0, "reward_per_day": 12.0, "daily_vol_c": 1.0,
+                "min_side_score": comp, "max_jump_c": max_jump_c}
+
+    def test_off_keeps_min_size(self):
+        from pm_trader.portfolio import select_pools
+        sel = select_pools({"pools": [self._pool("a")]}, capital=3000.0, max_pools=6)
+        assert sel[0]["size"] == 50.0                       # default: min_size
+
+    def test_on_sizes_up_within_capital(self):
+        from pm_trader.portfolio import select_pools
+        sel = select_pools({"pools": [self._pool("a")]}, capital=3000.0, max_pools=6,
+                           deploy_capital=True, loss_budget=100.0)
+        s = sel[0]
+        assert s["size"] > 50.0                             # sized up beyond min_size
+        assert s["est_daily_reward"] > 12.0                 # more size -> more reward
+        # share cap respected (<= 0.33 + rounding)
+        assert s["share"] <= 0.34
+
+    def test_jump_risk_caps_size(self):
+        from pm_trader.portfolio import select_pools
+        # a jumpy pool (max_jump 40c) with a tiny loss budget must NOT size up much:
+        # size <= (loss_budget/slots) / 0.40
+        sel = select_pools({"pools": [self._pool("a", max_jump_c=40.0)]},
+                           capital=3000.0, max_pools=6, deploy_capital=True, loss_budget=60.0)
+        # risk_per_pool = 60/6 = 10 ; cap_risk = 10/0.40 = 25 -> but >= min_size 50 floor
+        assert sel[0]["size"] == 50.0                       # risk floor pins it at min_size

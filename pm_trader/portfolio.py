@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 
 from pm_trader.maker_live import LiveMakerBot
-from pm_trader.orderbook import committed_capital
+from pm_trader.orderbook import committed_capital, maker_quote_score, maker_reward_share
 from pm_trader.rewards import RewardsClient, scan
 
 DEFAULT_CAPITAL = 1000.0
@@ -92,6 +92,28 @@ def _risk_adjusted_score(p: dict, risk_tolerance_days: float,
     return reward / (jump_disc * chop_disc)
 
 
+def _deploy_size(p: dict, half_spread_c: float, *, target_cap: float,
+                 share_cap: float, loss_budget: float) -> float:
+    """Capital-aware order size for a pool, >= min_size, capped by THREE limits so
+    sizing up never quietly blows risk:
+      - capital: don't lock more than ``target_cap`` (the per-pool capital slice).
+      - reward-share: keep our est share <= ``share_cap`` — reward is ~linear in size
+        only while our share is small; past that we'd dominate the pool, the reward
+        saturates, and we become the adverse-selection target.
+      - jump risk: a single worst-case historical jump (``max_jump_c``) on this size
+        must not exceed ``loss_budget`` — so a gap we CAN'T cancel stays survivable.
+    """
+    min_size = p["min_size"]
+    per_share = committed_capital(min_size, half_spread_c) / min_size  # capital lock / share
+    cap_capital = (target_cap / per_share) if per_share > 0 else min_size
+    w = maker_quote_score(1.0, half_spread_c, p.get("max_spread_c") or 0.0)  # in-band weight
+    comp = p.get("min_side_score") or 0.0                                    # competitors' Qmin
+    cap_share = (share_cap / (1.0 - share_cap) * comp / w) if (w > 0 and 0 < share_cap < 1) else cap_capital
+    mj = (p.get("max_jump_c") or 0.0) / 100.0
+    cap_risk = (loss_budget / mj) if mj > 0 else cap_capital
+    return max(min_size, min(cap_capital, cap_share, cap_risk))
+
+
 def select_pools(
     scan_report: dict,
     *,
@@ -102,6 +124,9 @@ def select_pools(
     risk_tolerance_days: float = 7.0,
     chop_aversion: float = 1.0,
     max_token_overlap: int = 1,
+    deploy_capital: bool = False,
+    size_share_cap: float = 0.33,
+    loss_budget: float = 0.0,
     cooldown: set | None = None,
 ) -> list[dict]:
     """Pick a fundable, diversified book by RISK-ADJUSTED yield within a budget.
@@ -132,9 +157,22 @@ def select_pools(
     chosen_tokens: list[set[str]] = []
     chosen_clusters: set[str] = set()
     spent = 0.0
+    # per-pool budgets for capital-aware sizing (spread evenly; risk split so even a
+    # simultaneous jump across the book stays within the loss budget)
+    slots = max(1, max_pools)
+    target_cap = capital / slots
+    risk_per_pool = (loss_budget / slots) if loss_budget > 0 else 0.0
     for p in cands:
         half_spread_c = p["tick"] * 100.0 * half_spread_ticks
-        cap = committed_capital(p["min_size"], half_spread_c)
+        if deploy_capital:
+            size = _deploy_size(p, half_spread_c, target_cap=target_cap,
+                                share_cap=size_share_cap, loss_budget=risk_per_pool)
+            share = maker_reward_share(size, half_spread_c, p["max_spread_c"],
+                                       p.get("min_side_score") or 0.0)
+        else:
+            size = p["min_size"]
+            share = p["share"]
+        cap = committed_capital(size, half_spread_c)
         if cap <= 0 or spent + cap > capital:
             continue
         cluster = _cluster_key(p["question"])
@@ -148,13 +186,14 @@ def select_pools(
             "condition_id": p["condition_id"],
             "token": p["token"],
             "daily": p["daily"],
-            "share": p["share"],
+            "share": round(share, 4),
             "min_size": p["min_size"],
+            "size": round(size, 2),
             "tick": p["tick"],
             "max_spread_c": p["max_spread_c"],
             "half_spread_c": half_spread_c,
             "committed_capital": round(cap, 2),
-            "est_daily_reward": round(p["share"] * p["daily"], 4),
+            "est_daily_reward": round(share * p["daily"], 4),
             "risk_adj_score": round(
                 _risk_adjusted_score(p, risk_tolerance_days, chop_aversion), 4),
         })
@@ -183,7 +222,7 @@ class MakerPortfolio:
             self.meta[s["token"]] = s
             self.bots[s["token"]] = LiveMakerBot(
                 token_id=s["token"], max_spread_c=s["max_spread_c"],
-                min_size=s["min_size"], tick=s["tick"],
+                min_size=s.get("size") or s["min_size"], tick=s["tick"],
                 half_spread_c=s["half_spread_c"], dry_run=dry_run,
                 submitter=submitter, external_fills=not dry_run,
             )

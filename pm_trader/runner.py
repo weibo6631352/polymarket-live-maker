@@ -131,6 +131,15 @@ class RunnerConfig:
     # $/day (share x daily) to be worth the ~$50 capital lock. Reward-based, NOT
     # share-based: a small share of a high-daily pool still earns. 0 = off.
     min_pool_reward: float = 0.5
+    # capital-aware sizing: by default we quote each pool's min_size (more capital just
+    # funds more pools, saturating at ~the # of uncorrelated SAFE pools). Turn this on
+    # to instead SIZE UP each pool toward an even capital slice — reward is ~linear in
+    # size while our share stays small (the productive zone), so this is how $1k/$3k
+    # actually earn more than $200. Risk scales with size (a jump fills size x gap), so
+    # it is capped by size_share_cap AND the daily loss budget. OFF by default — sizing
+    # up is a conscious risk choice; the safe default stays min_size.
+    deploy_capital: bool = False
+    size_share_cap: float = 0.33       # cap est per-pool share when sizing up (stay productive)
     # how hard selection penalises a CHOPPY (high daily_vol) book, 0..1. Continuous
     # chop IS cancellable, so a fast canceller can tolerate more than a slow poller.
     # But our real cancel-efficiency is UNMEASURED until we have live fills, so the
@@ -201,6 +210,8 @@ class RunnerConfig:
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_pool_reward=_f("LM_MIN_POOL_REWARD", 0.5),
             chop_aversion=_f("LM_CHOP_AVERSION", 0.7),
+            deploy_capital=os.environ.get("LM_DEPLOY_CAPITAL", "0").strip() == "1",
+            size_share_cap=_f("LM_SIZE_SHARE_CAP", 0.33),
             max_mid_vel_cps=_f("LM_MAX_MID_VEL_CPS", 4.0),
             min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
             min_wallet_usdc=_f("LM_MIN_WALLET_USDC", 0.0),
@@ -729,6 +740,9 @@ class LiveRunner:
             half_spread_ticks=self.cfg.half_spread_ticks,
             risk_tolerance_days=self.cfg.risk_tolerance_days,
             chop_aversion=self.cfg.chop_aversion,
+            deploy_capital=self.cfg.deploy_capital,
+            size_share_cap=self.cfg.size_share_cap,
+            loss_budget=self.cfg.max_loss,
             max_token_overlap=self.cfg.max_token_overlap, cooldown=cd,
         )
         want = {s["condition_id"]: s for s in self.selected}
@@ -919,11 +933,12 @@ class LiveRunner:
             except Exception as e:  # noqa: BLE001
                 log.warning("optimal-spread calc failed for %s: %s; using %.2fc",
                             condition_id[:10], e, hs)
+        size = pool.get("size")            # capital-aware size (None -> engine min_size)
         if self._use_live_path():
             self.engine.place_maker_quote_live(
-                condition_id, submitter=self.submitter, half_spread_cents=hs)
+                condition_id, submitter=self.submitter, half_spread_cents=hs, size=size)
         else:
-            self.engine.place_maker_quote(condition_id, half_spread_cents=hs)
+            self.engine.place_maker_quote(condition_id, half_spread_cents=hs, size=size)
 
     def _tick_cooldowns(self) -> None:
         for k in list(self.cooldown):
