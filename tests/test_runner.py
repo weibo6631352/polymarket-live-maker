@@ -265,7 +265,7 @@ class TestReevaluateHeld:
 
     # -- pure degradation policy --------------------------------------------
     def test_keeps_a_healthy_pool(self):
-        r = _runner(min_daily=80.0, min_share=0.02)
+        r = _runner(min_daily=80.0)
         assert r._degrade_reason(self._fresh()) is None
 
     def test_exits_on_daily_cut(self):
@@ -280,9 +280,16 @@ class TestReevaluateHeld:
         r = _runner()
         assert r._degrade_reason(self._fresh(verdict="WATCH")) == "jump_risk_rose"
 
-    def test_exits_on_share_collapse(self):
-        r = _runner(min_share=0.05)
-        assert r._degrade_reason(self._fresh(share=0.01)) == "share_collapsed"
+    def test_exits_on_reward_collapse(self):
+        r = _runner(min_pool_reward=1.0)
+        # 0.2% share of a $300 pool = $0.60/day < $1 floor -> exit
+        assert r._degrade_reason(self._fresh(share=0.002, daily=300.0)) == "reward_collapsed"
+
+    def test_keeps_small_share_of_big_pool(self):
+        r = _runner(min_pool_reward=1.0)
+        # 1.1% share of a $618 pool = $6.80/day -> KEEP despite tiny share
+        # (the old 2%-share floor would have wrongly churned this profitable pool)
+        assert r._degrade_reason(self._fresh(share=0.011, daily=618.0)) is None
 
     def test_exits_on_empty_band(self):
         r = _runner()

@@ -65,16 +65,19 @@ def _cluster_key(question: str) -> str | None:
     return None
 
 
-def _risk_adjusted_score(p: dict, risk_tolerance_days: float) -> float:
+def _risk_adjusted_score(p: dict, risk_tolerance_days: float,
+                         chop_aversion: float = 1.0) -> float:
     """Reward per day, discounted by BOTH jump-tail AND steady-chop exposure.
 
     ``reward_per_day`` is the steady income. Two risk dimensions shrink it:
       - jump tail: ``days_wiped`` = days of income one historical MAX jump erases.
-      - steady chop: ``daily_vol_c`` = std of typical daily mid moves (cents). A
-        pool can have no big jump (days_wiped low → looks safe) yet bleed via many
-        small pick-offs from a choppy book; normalising vol by the band
-        (``max_spread_c``) penalises that. Ranking thus favours pools that are
-        high-yield AND jump-safe AND calm — the low-vol mid-tail the edge lives in.
+        FULLY weighted — a discrete gap fills before any cancel, so reaction speed
+        cannot make jumpy pools safe.
+      - steady chop: ``daily_vol_c`` = std of typical daily mid moves (cents),
+        normalised by the band (``max_spread_c``). Continuous chop IS cancellable,
+        so ``chop_aversion`` (0..1) scales this penalty down for a fast canceller
+        (1.0 = a slow poller's full aversion; 0.5 = half). Ranking thus favours
+        high-yield AND jump-safe pools, with chop-tolerance tuned to our latency.
     """
     reward = p.get("reward_per_day")
     if reward is None:
@@ -85,7 +88,7 @@ def _risk_adjusted_score(p: dict, risk_tolerance_days: float) -> float:
     jump_disc = 1.0 + days_wiped / risk_tolerance_days
     vol = p.get("daily_vol_c") or 0.0           # 0/None (no history) -> no chop penalty
     band = p.get("max_spread_c") or 0.0
-    chop_disc = 1.0 + (vol / band if band > 0 else 0.0)
+    chop_disc = 1.0 + chop_aversion * (vol / band if band > 0 else 0.0)
     return reward / (jump_disc * chop_disc)
 
 
@@ -97,6 +100,7 @@ def select_pools(
     require_safe: bool = True,
     half_spread_ticks: int = 1,
     risk_tolerance_days: float = 7.0,
+    chop_aversion: float = 1.0,
     max_token_overlap: int = 1,
     cooldown: set | None = None,
 ) -> list[dict]:
@@ -122,7 +126,7 @@ def select_pools(
         if p.get("condition_id") not in cd and p.get("token") not in cd
         and (not require_safe or (p.get("jump_verdict") == "SAFE" and not p.get("empty_band")))
     ]
-    cands.sort(key=lambda p: -_risk_adjusted_score(p, risk_tolerance_days))
+    cands.sort(key=lambda p: -_risk_adjusted_score(p, risk_tolerance_days, chop_aversion))
 
     selected: list[dict] = []
     chosen_tokens: list[set[str]] = []
@@ -151,7 +155,8 @@ def select_pools(
             "half_spread_c": half_spread_c,
             "committed_capital": round(cap, 2),
             "est_daily_reward": round(p["share"] * p["daily"], 4),
-            "risk_adj_score": round(_risk_adjusted_score(p, risk_tolerance_days), 4),
+            "risk_adj_score": round(
+                _risk_adjusted_score(p, risk_tolerance_days, chop_aversion), 4),
         })
         spent += cap
         chosen_tokens.append(toks)

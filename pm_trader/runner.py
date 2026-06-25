@@ -127,11 +127,16 @@ class RunnerConfig:
     # continuous re-evaluation of HELD pools (degradation exit + opportunity rotation)
     reeval_enabled: bool = True
     reeval_interval_s: float = 300.0    # re-check held pools this often (cheap; held-only)
-    min_share: float = 0.02            # reeval: leave if our est share collapses below this
-    # entry floor: skip a candidate whose estimated reward (share x daily) is below
-    # this $/day — not worth the ~$50 capital lock. (Reward-based, NOT share-based:
-    # a small share of a high-daily pool still earns.) 0 = off.
+    # entry floor AND reeval exit: a candidate/held pool must earn at least this
+    # $/day (share x daily) to be worth the ~$50 capital lock. Reward-based, NOT
+    # share-based: a small share of a high-daily pool still earns. 0 = off.
     min_pool_reward: float = 0.5
+    # how hard selection penalises a CHOPPY (high daily_vol) book, 0..1. Continuous
+    # chop is cancellable, so with our ms-level reflex cancel + the real-time
+    # max_mid_vel_cps exit we needn't pre-avoid choppy pools as a slow poller would
+    # — 0.5 = half the naive penalty. (Jump-tail risk stays FULLY weighted: a
+    # discrete gap fills before any cancel, so speed can't buy that aggression.)
+    chop_aversion: float = 0.5
     # exit a held pool whose real-time mid velocity exceeds this (cents/sec) — a
     # choppy book bleeds via small pick-offs the daily jump_verdict misses. 0 = off.
     max_mid_vel_cps: float = 4.0
@@ -193,8 +198,8 @@ class RunnerConfig:
             resync_workers=_i("LM_BOOK_RESYNC_WORKERS", 8),
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
-            min_share=_f("LM_MIN_SHARE", 0.02),
             min_pool_reward=_f("LM_MIN_POOL_REWARD", 0.5),
+            chop_aversion=_f("LM_CHOP_AVERSION", 0.5),
             max_mid_vel_cps=_f("LM_MAX_MID_VEL_CPS", 4.0),
             min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
             min_wallet_usdc=_f("LM_MIN_WALLET_USDC", 0.0),
@@ -722,6 +727,7 @@ class LiveRunner:
             self.report, capital=self.cfg.capital, max_pools=self.cfg.max_pools,
             half_spread_ticks=self.cfg.half_spread_ticks,
             risk_tolerance_days=self.cfg.risk_tolerance_days,
+            chop_aversion=self.cfg.chop_aversion,
             max_token_overlap=self.cfg.max_token_overlap, cooldown=cd,
         )
         want = {s["condition_id"]: s for s in self.selected}
@@ -854,7 +860,7 @@ class LiveRunner:
 
     # reasons that bench a pool for a few rounds (it degraded, don't immediately
     # re-add it). "deselected" (a clean rank-out) is NOT benched.
-    _COOLDOWN_REASONS = ("jump_risk_rose", "empty_band", "share_collapsed",
+    _COOLDOWN_REASONS = ("jump_risk_rose", "empty_band", "reward_collapsed",
                          "daily_cut", "one_sided", "fast_book")
 
     def _degrade_reason(self, fresh: dict) -> str | None:
@@ -872,8 +878,15 @@ class LiveRunner:
             return "jump_risk_rose"
         if fresh.get("empty_band"):
             return "empty_band"
-        if fresh.get("share", 1.0) < self.cfg.min_share:
-            return "share_collapsed"
+        # Exit on REWARD collapse, not share: we observe live shares of 0.3-1.8% on
+        # normal crowded mid-tail pools, so a 2%-share floor would churn out pools
+        # still earning real money. Consistent with the reward-based ENTRY filter —
+        # keep a pool while reward (share x daily) >= the floor, exit when it isn't.
+        reward = fresh.get("reward_per_day")
+        if reward is None:
+            reward = (fresh.get("share", 1.0) or 0.0) * daily
+        if reward < self.cfg.min_pool_reward:
+            return "reward_collapsed"
         return None
 
     def _exit_held(self, cond: str, quote: dict, reason: str) -> None:
