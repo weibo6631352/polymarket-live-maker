@@ -263,3 +263,23 @@ def test_run_builds_and_closes(monkeypatch):
     out = pf.run(capital=200.0)
     assert out["summary"]["pools"] >= 1
     assert fake.closed is True
+
+
+class TestChopAwareRanking:
+    def _pool(self, cid, vol_c, *, share=0.2, daily=400.0, days_wiped=2.0):
+        return {"condition_id": cid, "token": cid, "question": f"Q {cid}",
+                "daily": daily, "share": share, "min_size": 50.0, "tick": 0.01,
+                "max_spread_c": 4.5, "jump_verdict": "SAFE", "empty_band": False,
+                "days_wiped": days_wiped, "reward_per_day": share * daily,
+                "daily_vol_c": vol_c}
+
+    def test_calm_pool_ranks_above_choppy_equal_reward(self):
+        from pm_trader.portfolio import select_pools
+        rep = {"pools": [self._pool("calm", 0.5), self._pool("choppy", 9.0)]}
+        sel = select_pools(rep, capital=10_000.0, max_pools=2)
+        assert [s["condition_id"] for s in sel] == ["calm", "choppy"]  # calm first
+
+    def test_missing_vol_no_penalty(self):
+        from pm_trader.portfolio import _risk_adjusted_score
+        p = {"reward_per_day": 10.0, "days_wiped": 0.0, "max_spread_c": 4.5}
+        assert _risk_adjusted_score(p, 7.0) == 10.0   # no daily_vol_c -> unchanged

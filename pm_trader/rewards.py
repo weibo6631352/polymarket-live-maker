@@ -309,6 +309,7 @@ def score_pool(pool: dict, book: dict, history: list[dict]) -> dict | None:
         "gross_ann_pct": round(gross_ann),
         "jump_verdict": jump.get("verdict"),
         "max_jump_c": jump.get("max_jump_c"),
+        "daily_vol_c": jump.get("daily_vol_c"),   # steady chop (std of daily moves)
         "days_wiped": jump.get("days_wiped"),
     }
 

@@ -66,13 +66,15 @@ def _cluster_key(question: str) -> str | None:
 
 
 def _risk_adjusted_score(p: dict, risk_tolerance_days: float) -> float:
-    """Reward per day, discounted by jump-tail exposure.
+    """Reward per day, discounted by BOTH jump-tail AND steady-chop exposure.
 
-    ``reward_per_day`` is the steady income; ``days_wiped`` is how many days of it
-    one historical max jump erases (bigger = jumpier).  The score gives full credit
-    when a jump costs little relative to income and shrinks it as jump exposure
-    grows — so ranking favours pools that are BOTH high-yield AND jump-safe, not
-    just cheap (old min_size sort) or just high gross yield.
+    ``reward_per_day`` is the steady income. Two risk dimensions shrink it:
+      - jump tail: ``days_wiped`` = days of income one historical MAX jump erases.
+      - steady chop: ``daily_vol_c`` = std of typical daily mid moves (cents). A
+        pool can have no big jump (days_wiped low → looks safe) yet bleed via many
+        small pick-offs from a choppy book; normalising vol by the band
+        (``max_spread_c``) penalises that. Ranking thus favours pools that are
+        high-yield AND jump-safe AND calm — the low-vol mid-tail the edge lives in.
     """
     reward = p.get("reward_per_day")
     if reward is None:
@@ -80,7 +82,11 @@ def _risk_adjusted_score(p: dict, risk_tolerance_days: float) -> float:
     days_wiped = p.get("days_wiped")
     if days_wiped is None:
         days_wiped = 9_999.0
-    return reward / (1.0 + days_wiped / risk_tolerance_days)
+    jump_disc = 1.0 + days_wiped / risk_tolerance_days
+    vol = p.get("daily_vol_c") or 0.0           # 0/None (no history) -> no chop penalty
+    band = p.get("max_spread_c") or 0.0
+    chop_disc = 1.0 + (vol / band if band > 0 else 0.0)
+    return reward / (jump_disc * chop_disc)
 
 
 def select_pools(
