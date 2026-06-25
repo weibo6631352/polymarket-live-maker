@@ -127,6 +127,8 @@ def select_pools(
     deploy_capital: bool = False,
     size_share_cap: float = 0.33,
     loss_budget: float = 0.0,
+    quality_floor_frac: float = 0.10,
+    max_pool_frac: float = 0.25,
     cooldown: set | None = None,
 ) -> list[dict]:
     """Pick a fundable, diversified book by RISK-ADJUSTED yield within a budget.
@@ -151,22 +153,32 @@ def select_pools(
         if p.get("condition_id") not in cd and p.get("token") not in cd
         and (not require_safe or (p.get("jump_verdict") == "SAFE" and not p.get("empty_band")))
     ]
-    cands.sort(key=lambda p: -_risk_adjusted_score(p, risk_tolerance_days, chop_aversion))
+    scored = [(p, _risk_adjusted_score(p, risk_tolerance_days, chop_aversion)) for p in cands]
+    scored.sort(key=lambda ps: -ps[1])
+    # DYNAMIC quality floor (not a hard pool count): keep funding pools while they're
+    # worth at least `quality_floor_frac` of the BEST pool's risk-adjusted score. A
+    # clear quality gap -> fund only the few good ones; a flat field of good pools ->
+    # fund many. This drops the junk tail so capital isn't tied up in weak pools.
+    best = scored[0][1] if scored else 0.0
+    cutoff = quality_floor_frac * best if quality_floor_frac > 0 else 0.0
+    elig = [(p, s) for p, s in scored if s >= cutoff]
+    total_score = sum(s for _, s in elig) or 1.0
 
     selected: list[dict] = []
     chosen_tokens: list[set[str]] = []
     chosen_clusters: set[str] = set()
     spent = 0.0
-    # per-pool budgets for capital-aware sizing (spread evenly; risk split so even a
-    # simultaneous jump across the book stays within the loss budget)
-    slots = max(1, max_pools)
-    target_cap = capital / slots
-    risk_per_pool = (loss_budget / slots) if loss_budget > 0 else 0.0
-    for p in cands:
+    for p, score in elig:
         half_spread_c = p["tick"] * 100.0 * half_spread_ticks
         if deploy_capital:
-            size = _deploy_size(p, half_spread_c, target_cap=target_cap,
-                                share_cap=size_share_cap, loss_budget=risk_per_pool)
+            # YIELD-WEIGHTED allocation: capital flows to quality (size ∝ score), with a
+            # per-pool diversification cap (max_pool_frac) so no pool dominates, plus the
+            # share/jump caps in _deploy_size. Risk budget scales with the allocation.
+            weight = score / total_score
+            target = min(max_pool_frac * capital, capital * weight)
+            rp = loss_budget * weight if loss_budget > 0 else 0.0
+            size = _deploy_size(p, half_spread_c, target_cap=target,
+                                share_cap=size_share_cap, loss_budget=rp)
             share = maker_reward_share(size, half_spread_c, p["max_spread_c"],
                                        p.get("min_side_score") or 0.0)
         else:
@@ -194,8 +206,7 @@ def select_pools(
             "half_spread_c": half_spread_c,
             "committed_capital": round(cap, 2),
             "est_daily_reward": round(share * p["daily"], 4),
-            "risk_adj_score": round(
-                _risk_adjusted_score(p, risk_tolerance_days, chop_aversion), 4),
+            "risk_adj_score": round(score, 4),
         })
         spent += cap
         chosen_tokens.append(toks)

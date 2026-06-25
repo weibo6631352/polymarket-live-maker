@@ -151,6 +151,12 @@ class RunnerConfig:
     # up is a conscious risk choice; the safe default stays min_size.
     deploy_capital: bool = False
     size_share_cap: float = 0.33       # cap est per-pool share when sizing up (stay productive)
+    # dynamic allocation plan (no hard pool count): fund a pool only while its risk-adjusted
+    # score is >= this fraction of the BEST pool's (drops the junk tail), and with
+    # deploy_capital ON, size each pool proportional to its score (capital flows to quality)
+    # capped at max_pool_frac of capital (diversification). Balances profit vs concentration.
+    quality_floor_frac: float = 0.10
+    max_pool_frac: float = 0.25
     # GTD dead-man's switch (seconds). >0: live orders auto-expire after this long, so a
     # process/server outage can't leave un-cancellable resting orders to be picked off
     # while we're dark. The poll loop re-places at half this interval so online pools
@@ -229,6 +235,8 @@ class RunnerConfig:
             chop_aversion=_f("LM_CHOP_AVERSION", 0.7),
             deploy_capital=os.environ.get("LM_DEPLOY_CAPITAL", "0").strip() == "1",
             size_share_cap=_f("LM_SIZE_SHARE_CAP", 0.33),
+            quality_floor_frac=_f("LM_QUALITY_FLOOR_FRAC", 0.10),
+            max_pool_frac=_f("LM_MAX_POOL_FRAC", 0.25),
             order_expiry_s=_f("LM_ORDER_EXPIRY_S", 0.0),
             max_mid_vel_cps=_f("LM_MAX_MID_VEL_CPS", 4.0),
             min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
@@ -762,6 +770,8 @@ class LiveRunner:
             deploy_capital=self.cfg.deploy_capital,
             size_share_cap=self.cfg.size_share_cap,
             loss_budget=self.cfg.max_loss,
+            quality_floor_frac=self.cfg.quality_floor_frac,
+            max_pool_frac=self.cfg.max_pool_frac,
             max_token_overlap=self.cfg.max_token_overlap, cooldown=cd,
         )
         want = {s["condition_id"]: s for s in self.selected}

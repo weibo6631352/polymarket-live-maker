@@ -315,7 +315,10 @@ class TestReevaluateHeld:
 
     def test_reselect_skips_dead_reward_pool_but_keeps_small_share_big_pool(self):
         eng = FakeEngine()
-        r = _runner(engine=eng, capital=10_000.0, max_pools=3, min_pool_reward=0.5)
+        # quality_floor_frac=0 isolates the reward filter (else Beta is also below the
+        # relative quality floor vs Alpha); the dynamic floor is tested in test_portfolio.
+        r = _runner(engine=eng, capital=10_000.0, max_pools=3, min_pool_reward=0.5,
+                    quality_floor_frac=0.0)
         r.report = {"pools": [
             _scan_pool("a", "Alpha", daily=400.0, share=0.20),    # $80/day -> keep
             _scan_pool("b", "Beta", daily=300.0, share=0.018),    # crowded but $5.4/day -> KEEP

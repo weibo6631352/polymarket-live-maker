@@ -310,9 +310,30 @@ class TestCapitalAwareSizing:
 
     def test_jump_risk_caps_size(self):
         from pm_trader.portfolio import select_pools
-        # a jumpy pool (max_jump 40c) with a tiny loss budget must NOT size up much:
-        # size <= (loss_budget/slots) / 0.40
+        # a jumpy pool (max_jump 40c) with a tiny loss budget must NOT size up:
+        # cap_risk = loss_budget(12) / 0.40 = 30 < min_size 50 -> pinned at min_size
         sel = select_pools({"pools": [self._pool("a", max_jump_c=40.0)]},
-                           capital=3000.0, max_pools=6, deploy_capital=True, loss_budget=60.0)
-        # risk_per_pool = 60/6 = 10 ; cap_risk = 10/0.40 = 25 -> but >= min_size 50 floor
-        assert sel[0]["size"] == 50.0                       # risk floor pins it at min_size
+                           capital=3000.0, deploy_capital=True, loss_budget=12.0)
+        assert sel[0]["size"] == 50.0                       # risk caps below min_size -> floored
+
+
+class TestQualityFloor:
+    def _p(self, cid, daily, comp):
+        return {"condition_id": cid, "token": cid, "question": f"unique{cid}entity",
+                "daily": daily, "share": 0.02, "min_size": 50.0, "tick": 0.01,
+                "max_spread_c": 4.5, "jump_verdict": "SAFE", "empty_band": False,
+                "days_wiped": 3.0, "reward_per_day": daily * 0.02, "daily_vol_c": 1.0,
+                "min_side_score": comp, "max_jump_c": 3.0}
+
+    def test_drops_pools_far_below_best(self):
+        from pm_trader.portfolio import select_pools
+        pools = [self._p("good", 600.0, 1000.0), self._p("junk", 10.0, 1000.0)]
+        sel = select_pools({"pools": pools}, capital=10_000.0, quality_floor_frac=0.10)
+        ids = {s["condition_id"] for s in sel}
+        assert "good" in ids and "junk" not in ids        # junk < 10% of best -> dropped
+
+    def test_floor_zero_keeps_all(self):
+        from pm_trader.portfolio import select_pools
+        pools = [self._p("good", 600.0, 1000.0), self._p("junk", 10.0, 1000.0)]
+        sel = select_pools({"pools": pools}, capital=10_000.0, quality_floor_frac=0.0)
+        assert len({s["condition_id"] for s in sel}) == 2  # no floor -> both funded
