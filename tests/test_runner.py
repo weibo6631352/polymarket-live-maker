@@ -215,6 +215,121 @@ class TestCooldown:
         assert "x" not in r.cooldown
 
 
+class TestReevaluateHeld:
+    """Continuous re-evaluation: degradation exit + opportunity rotation."""
+
+    def _fresh(self, *, daily=400.0, share=0.2, verdict="SAFE", empty=False, rpd=None):
+        return {"daily": daily, "share": share, "jump_verdict": verdict,
+                "empty_band": empty, "reward_per_day": rpd if rpd is not None else share * daily}
+
+    # -- pure degradation policy --------------------------------------------
+    def test_keeps_a_healthy_pool(self):
+        r = _runner(min_daily=80.0, min_share=0.02)
+        assert r._degrade_reason(self._fresh()) is None
+
+    def test_exits_on_daily_cut(self):
+        r = _runner(min_daily=80.0)
+        assert r._degrade_reason(self._fresh(daily=50.0)) == "daily_cut"
+
+    def test_exits_on_rewards_ended(self):
+        r = _runner()
+        assert r._degrade_reason({"daily": 0.0}) == "rewards_ended"
+
+    def test_exits_on_jump_risk_rise(self):
+        r = _runner()
+        assert r._degrade_reason(self._fresh(verdict="WATCH")) == "jump_risk_rose"
+
+    def test_exits_on_share_collapse(self):
+        r = _runner(min_share=0.05)
+        assert r._degrade_reason(self._fresh(share=0.01)) == "share_collapsed"
+
+    def test_exits_on_empty_band(self):
+        r = _runner()
+        assert r._degrade_reason(self._fresh(empty=True)) == "empty_band"
+
+    # -- rotation is handled by reselect converging to the ideal selection ---
+    def test_reselect_drops_pool_no_longer_ideal(self):
+        eng = FakeEngine()
+        eng.quotes = [{"id": 9, "market_condition_id": "0xa", "token_id": "tok_a",
+                       "inventory": 0.0}]
+        r = _runner(engine=eng, capital=10_000.0, max_pools=3)
+        r.placed = {"0xa": {"token": "tok_a"}}
+        r.placed_at = {"0xa": 0.0}
+        r.report = {"pools": [_scan_pool("b", "Bravo")]}   # 0xa no longer ideal
+        r.reselect()
+        assert "0xa" not in r.placed and 9 in eng.cancelled   # dropped + cancelled
+        assert "0xb" in r.placed                              # better pool funded
+        assert "0xa" not in r.cooldown                        # rank-out -> may return
+
+    def test_reselect_keeps_still_ideal_pool(self):
+        eng = FakeEngine()
+        eng.quotes = [{"id": 9, "market_condition_id": "0xa", "token_id": "tok_a",
+                       "inventory": 0.0}]
+        r = _runner(engine=eng, capital=10_000.0, max_pools=3)
+        r.placed = {"0xa": {"token": "tok_a"}}
+        r.placed_at = {"0xa": 0.0}
+        r.report = {"pools": [_scan_pool("a", "Alpha")]}   # still ideal
+        r.reselect()
+        assert "0xa" in r.placed and eng.cancelled == []   # no churn
+
+    # -- orchestration (engine-driven, all modes) ----------------------------
+    def _held_engine(self):
+        eng = FakeEngine()
+        eng.quotes = [{"id": 1, "market_condition_id": "0xa", "token_id": "tok_a",
+                       "inventory": 0.0}]
+        return eng
+
+    def test_exits_degraded_held_pool(self, monkeypatch):
+        eng = self._held_engine()
+        r = _runner(engine=eng, min_hold_s=0.0)
+        r.placed = {"0xa": {"token": "tok_a"}}
+        r.placed_at = {"0xa": 0.0}
+        monkeypatch.setattr(r, "_rescore", lambda c, t: self._fresh(daily=10.0))  # cut
+        r.reevaluate_held()
+        assert 1 in eng.cancelled and "0xa" not in r.placed
+
+    def test_respects_min_hold(self, monkeypatch):
+        import time as _t
+        eng = self._held_engine()
+        r = _runner(engine=eng, min_hold_s=1e9)
+        r.placed = {"0xa": {"token": "tok_a"}}
+        r.placed_at = {"0xa": _t.monotonic()}   # just placed
+        monkeypatch.setattr(r, "_rescore", lambda c, t: self._fresh(daily=10.0))
+        r.reevaluate_held()
+        assert eng.cancelled == [] and "0xa" in r.placed   # too young to soft-exit
+
+    def test_keeps_healthy_held_pool(self, monkeypatch):
+        eng = self._held_engine()
+        r = _runner(engine=eng, min_hold_s=0.0)
+        r.placed = {"0xa": {"token": "tok_a"}}
+        r.placed_at = {"0xa": 0.0}
+        monkeypatch.setattr(r, "_rescore", lambda c, t: self._fresh())  # healthy
+        r.reevaluate_held()
+        assert eng.cancelled == [] and "0xa" in r.placed
+
+    def test_live_exit_cancels_and_flattens(self, monkeypatch):
+        eng = self._held_engine()
+        eng.quotes[0]["inventory"] = 30.0
+        sub = FakeSubmitter()
+        r = _runner(engine=eng, submitter=sub, live=True, min_hold_s=0.0)
+        r.placed = {"0xa": {"token": "tok_a"}}
+        r.placed_at = {"0xa": 0.0}
+        monkeypatch.setattr(r, "_rescore", lambda c, t: self._fresh(verdict="KILL"))
+        r.reevaluate_held()
+        assert any(c["action"] == "CANCEL_ALL" for c in sub.calls)
+        assert 1 in eng.cancelled and r.cooldown.get("0xa") == r.cfg.cooldown_rounds
+
+    def test_disabled_noop(self, monkeypatch):
+        eng = self._held_engine()
+        r = _runner(engine=eng, reeval_enabled=False)
+        r.placed = {"0xa": {"token": "tok_a"}}
+        r.placed_at = {"0xa": 0.0}
+        called = {"n": 0}
+        monkeypatch.setattr(r, "_rescore", lambda c, t: called.__setitem__("n", 1))
+        r.reevaluate_held()
+        assert called["n"] == 0 and eng.cancelled == []
+
+
 class TestRunLoop:
     def test_run_stops_on_kill(self):
         eng = FakeEngine()

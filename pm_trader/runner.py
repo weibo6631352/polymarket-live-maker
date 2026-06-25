@@ -27,7 +27,7 @@ from pathlib import Path
 from pm_trader.engine import Engine
 from pm_trader.maker_live import DryRunSubmitter, build_clob_signer
 from pm_trader.portfolio import select_pools
-from pm_trader.rewards import RewardsClient, scan
+from pm_trader.rewards import RewardsClient, scan, score_pool
 
 log = logging.getLogger("pm_trader.runner")
 
@@ -77,6 +77,11 @@ class RunnerConfig:
     discovery_interval_s: float = 1800.0
     cooldown_rounds: int = 3
     max_loss: float = 20.0              # kill-switch: maker inventory-PnL floor
+    # continuous re-evaluation of HELD pools (degradation exit + opportunity rotation)
+    reeval_enabled: bool = True
+    reeval_interval_s: float = 300.0    # re-check held pools this often (cheap; held-only)
+    min_share: float = 0.02            # leave if our est share collapses below this
+    min_hold_s: float = 600.0          # don't soft-exit a pool held less than this
     state_dir: str = "state"
     kill_file: str = "KILL"
 
@@ -96,6 +101,10 @@ class RunnerConfig:
             discovery_interval_s=_f("LM_DISCOVERY_INTERVAL_S", 1800.0),
             cooldown_rounds=_i("LM_COOLDOWN_ROUNDS", 3),
             max_loss=_f("LM_MAX_LOSS_PER_DAY", 20.0),
+            reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
+            reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
+            min_share=_f("LM_MIN_SHARE", 0.02),
+            min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
         )
 
     def banner(self) -> str:
@@ -124,6 +133,7 @@ class LiveRunner:
         self.report: dict = {"pools": []}
         self.selected: list[dict] = []
         self.placed: dict[str, dict] = {}    # condition_id -> selected pool dict
+        self.placed_at: dict[str, float] = {}  # condition_id -> monotonic placement time
         self.cooldown: dict[str, int] = {}   # condition_id -> discovery rounds left
         self._stop = False
         self._kill_reason = ""
@@ -147,18 +157,26 @@ class LiveRunner:
 
         self.rediscover()
         self.reselect()
-        last_discovery = time.monotonic()
+        last_discovery = last_reeval = time.monotonic()
 
         while not self._stop:
             reason = self._kill_check()
             if reason:
                 self.trip_kill(reason)
                 break
-            if time.monotonic() - last_discovery >= self.cfg.discovery_interval_s:
+            now = time.monotonic()
+            refreshed = False
+            if now - last_discovery >= self.cfg.discovery_interval_s:
                 self._tick_cooldowns()
-                self.rediscover()
+                self.rediscover()           # full universe re-scan
+                last_discovery = now
+                refreshed = True
+            if refreshed or (now - last_reeval >= self.cfg.reeval_interval_s):
+                # re-evaluate HELD pools (degradation exit + opportunity rotation),
+                # then redeploy any freed capital into the current best picks.
+                self.reevaluate_held()
                 self.reselect()
-                last_discovery = time.monotonic()
+                last_reeval = now
             self.poll_once()
             self._sleep_fn(self.cfg.poll_seconds)
 
@@ -189,9 +207,12 @@ class LiveRunner:
             log.warning("discovery scan failed: %s", e)
 
     def reselect(self) -> None:
-        """Re-rank the universe and PLACE any newly selected pool. De-selected but
-        still-paying pools keep their resting quote (the engine retires a pool only
-        on reconcile/drift-exit) — selection only ADDS."""
+        """Converge the held book to the freshly-computed IDEAL selection — this IS
+        opportunity-cost rotation, done correctly (select_pools already ranks by
+        risk-adjusted yield and respects capital + correlation + cooldown):
+          - DROP held pools no longer in the ideal set (cancel/flatten/retire),
+          - ADD ideal pools not yet held.
+        Stable when the universe is stable (held == ideal -> no churn)."""
         cd = {k for k, v in self.cooldown.items() if v > 0}
         self.selected = select_pools(
             self.report, capital=self.cfg.capital, max_pools=self.cfg.max_pools,
@@ -199,18 +220,113 @@ class LiveRunner:
             risk_tolerance_days=self.cfg.risk_tolerance_days,
             max_token_overlap=self.cfg.max_token_overlap, cooldown=cd,
         )
-        for s in self.selected:
-            cond = s["condition_id"]
-            if cond in self.placed or cond in cd:
+        want = {s["condition_id"]: s for s in self.selected}
+        # DROP held pools that fell out of the ideal selection (rank-out rotation)
+        if self.engine is not None:
+            quotes_by_cond = {q["market_condition_id"]: q
+                              for q in self.engine.get_maker_quotes()}
+            for cond in list(self.placed):
+                if cond not in want:
+                    q = quotes_by_cond.get(cond)
+                    if q is not None:
+                        self._exit_held(cond, q, "deselected")  # no cooldown: may return
+                    else:
+                        self.placed.pop(cond, None)
+                        self.placed_at.pop(cond, None)
+        # ADD newly selected pools
+        for cond, s in want.items():
+            if cond in self.placed:
                 continue
             try:
                 self._place(cond, s)
                 self.placed[cond] = s
+                self.placed_at[cond] = time.monotonic()
                 log.info("placed %s | %s | daily=$%.0f", cond[:10],
                          s["question"][:48], s["daily"])
             except Exception as e:  # noqa: BLE001 — one bad market mustn't sink the book
                 log.warning("place failed for %s: %s", cond[:10], e)
         log.info("active book: %d pools (selected %d)", len(self.placed), len(self.selected))
+
+    # -- continuous re-evaluation of held pools ----------------------------
+
+    def reevaluate_held(self) -> None:
+        """Re-score every HELD pool against CURRENT conditions and exit the ones
+        that degraded (rewards cut, competition flooded our share, jump-risk rose,
+        book went one-sided) or that a clearly better pool should replace
+        (opportunity-cost rotation). Freed capital is redeployed by reselect().
+
+        Runs in ALL modes (paper / dry-live / live): paper just retires the ledger
+        quote; dry-live logs the cancel; live cancels + flattens for real.
+        """
+        if not self.cfg.reeval_enabled or not self.placed or self.engine is None:
+            return
+        quotes_by_cond = {q["market_condition_id"]: q
+                          for q in self.engine.get_maker_quotes()}
+        now = time.monotonic()
+        for cond, pool in list(self.placed.items()):
+            q = quotes_by_cond.get(cond)
+            if q is None:                       # engine already exited it (reconcile/drift)
+                self.placed.pop(cond, None)
+                self.placed_at.pop(cond, None)
+                continue
+            if now - self.placed_at.get(cond, 0.0) < self.cfg.min_hold_s:
+                continue                        # anti-churn: respect the minimum hold
+            fresh = self._rescore(cond, q["token_id"])
+            if fresh is None:
+                continue                        # transient read failure — try next round
+            reason = self._degrade_reason(fresh)
+            if reason:
+                self._exit_held(cond, q, reason)
+
+    def _rescore(self, condition_id: str, token_id: str) -> dict | None:
+        """Fresh score for one held pool from live data (current daily/share/jump)."""
+        try:
+            cfg = self.engine.api.get_reward_config(condition_id)
+        except Exception:  # noqa: BLE001
+            return None
+        if not cfg or cfg.get("daily", 0) <= 0:
+            return {"daily": 0.0}               # left the program -> exit
+        try:
+            book = self.scanner.book(token_id)
+            history = self.scanner.prices_history(token_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return score_pool(cfg, book, history)   # share / reward_per_day / jump_verdict / empty_band
+
+    # reasons that bench a pool for a few discovery rounds (it degraded, don't
+    # immediately re-add it). "deselected" (a clean rank-out) is NOT benched.
+    _COOLDOWN_REASONS = ("jump_risk_rose", "empty_band", "share_collapsed", "daily_cut")
+
+    def _degrade_reason(self, fresh: dict) -> str | None:
+        """Decide whether a held pool degraded enough to exit. Returns a reason or
+        None. Rotation (a better pool appeared) is handled by reselect converging to
+        the ideal selection — NOT here — so this only judges THIS pool on its own."""
+        daily = fresh.get("daily", 0.0) or 0.0
+        if daily <= 0:
+            return "rewards_ended"
+        if daily < self.cfg.min_daily:
+            return "daily_cut"
+        if fresh.get("jump_verdict") in ("WATCH", "KILL"):
+            return "jump_risk_rose"
+        if fresh.get("empty_band"):
+            return "empty_band"
+        if fresh.get("share", 1.0) < self.cfg.min_share:
+            return "share_collapsed"
+        return None
+
+    def _exit_held(self, cond: str, quote: dict, reason: str) -> None:
+        """Cancel + (live) flatten + retire a held pool, in any mode."""
+        token, qid, inv = quote["token_id"], quote["id"], quote.get("inventory", 0.0)
+        if self._use_live_path() and self.submitter is not None:
+            self.submitter({"action": "CANCEL_ALL", "token_id": token})
+            if self.cfg.live:
+                self.engine._flatten_live(self.submitter, token, inv)
+        self.engine.cancel_maker_quote(qid)     # cancels DB quote + frees committed capital
+        self.placed.pop(cond, None)
+        self.placed_at.pop(cond, None)
+        if reason in self._COOLDOWN_REASONS:    # degraded -> bench a few rounds
+            self.cooldown[cond] = self.cfg.cooldown_rounds
+        log.info("re-eval EXIT %s (%s)", cond[:10], reason)
 
     def _use_live_path(self) -> bool:
         """Drive the engine's *_live methods (real LIVE, or DRY-LIVE rehearsal)."""
@@ -251,6 +367,7 @@ class LiveRunner:
             if reason:
                 cond = row["quote"]["market_condition_id"]
                 self.placed.pop(cond, None)
+                self.placed_at.pop(cond, None)
                 if reason != "rewards_ended":   # a jump/drift -> bench it a while
                     self.cooldown[cond] = self.cfg.cooldown_rounds
                 log.info("pool %s exited (%s)", cond[:10], reason)
