@@ -92,7 +92,8 @@ class PolymarketClient:
     def _clob_get(self, path: str, params: dict | None = None) -> dict | list:
         """Make a GET request to the CLOB API."""
         if self.rate_limiter is not None:
-            self.rate_limiter.acquire()      # global req/s cap (shared bucket)
+            # reads are low-priority: leave the reserve for latency-critical cancels
+            self.rate_limiter.acquire(low_priority=True)
         url = f"{CLOB_BASE}{path}"
         try:
             resp = self._http.get(url, params=params)

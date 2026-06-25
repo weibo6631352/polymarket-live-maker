@@ -353,7 +353,8 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         self._warmer.start()
 
     def _warm_ping(self) -> None:
-        self._throttle()                 # counts against the global budget (~1 req/3s)
+        if self.rate_limiter is not None:    # keep-warm is low priority (not a write)
+            self.rate_limiter.acquire(low_priority=True)
         self._client.get_server_time()
 
     def close(self) -> None:

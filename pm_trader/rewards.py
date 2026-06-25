@@ -192,7 +192,8 @@ class RewardsClient:
 
     def _get(self, url: str, params: dict | None = None) -> list | dict:
         if self.rate_limiter is not None:
-            self.rate_limiter.acquire()      # global req/s cap (shared bucket)
+            # reads (scan/book/history/re-sync) are low-priority: reserve is for cancels
+            self.rate_limiter.acquire(low_priority=True)
         try:
             resp = self._http.get(url, params=params)
             resp.raise_for_status()

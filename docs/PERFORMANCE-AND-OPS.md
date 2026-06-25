@@ -133,7 +133,9 @@ All behavior-preserving except where noted; the 933-test suite stayed green.
 | **WS reflex cancel** (price callback → instant `CANCEL_ALL` on a >band move) | `ws.py`, `runner.py` | ~ms stale-order pull, decoupled from accounting; next poll reposts via `force_recenter`. Submitter lock-wrapped for thread safety |
 | **Order-conn keep-warm** (`ConnectionWarmer` pings `get_server_time` every 3s) | `maker_live.py` | sporadic cancels never pay a cold TLS handshake (cancel ~34ms → ~16-19ms) |
 | **WS liveness gate** (engine trusts WS book only if a frame arrived <15s ago) | `ws.py`, `engine.py` | a stalled socket → REST fallback, never a stale book |
-| **REST `/book` re-sync** (`LM_BOOK_RESYNC_HZ`, round-robin, allocated within 149/s) | `ws.py`, `runner.py` | authoritative anti-drift snapshot over the WS-maintained book; reserves budget for cancels |
+| **Priority request budget** (`TokenBucket` reserve: cancels high-priority, reads low) | `ratelimit.py` | cancels hold a reserved lane (`LM_WRITE_RESERVE`) → never queue behind reads → fire instantly |
+| **REST `/book` re-sync** (concurrent low-priority workers `LM_BOOK_RESYNC_WORKERS`) | `ws.py`, `runner.py` | soak the leftover 149 budget for an authoritative anti-drift book; bucket-paced, can't starve cancels |
+| **Rate/load stats** (`LM_STATS_EVERY_S`: req/s read+write split + load avg) | `runner.py` | periodic throughput + CPU-load gauge |
 | **Log hygiene at fast cadence** (httpx/websocket → WARNING; poll-event throttle `LM_EVENT_POLL_EVERY_S`) | `runner.py` | a 1s poll + 20/s re-sync no longer floods `runner.log` / `events/` |
 | **Live exit crossing-cost booked** (drift-exit + reconcile-exit apply `maker_crossing_cost_c`) | `engine.py` | live ledger no longer optimistic on exits — consistent with the paper sim |
 | **Read-conn keep-alive** (`keepalive_expiry=30s` on the REST clients) | `api.py`, `rewards.py` | reward_config / `/book` reads stay on a hot connection |

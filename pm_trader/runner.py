@@ -131,20 +131,27 @@ class RunnerConfig:
     # series would bloat, so write at most one poll event per pool per this many
     # seconds. Decisions (place/exit/reflex/discovery) are ALWAYS logged.
     event_poll_every_s: float = 10.0
+    # periodically log achieved request rate (read/write) + load average — a side
+    # gauge of throughput AND CPU load. 0 = off.
+    stats_every_s: float = 60.0
     # global CLOB request cap (req/s), shared by reads + writes + discovery via one
     # TokenBucket. 149 = the order-book rate limit (matches the sports-trader-cpp
     # daemon, i.e. 1 below 150). The bucket is the hard ceiling; tune via env.
     max_req_per_sec: float = 149.0
+    # tokens reserved for HIGH-priority order ops (cancels/places). Reads (book
+    # re-sync etc.) are low-priority and leave this headroom, so a cancel never
+    # queues behind a flood of reads — it fires immediately.
+    write_reserve: float = 20.0
     # real-time WS market data: book/mid pushed (~ms) instead of REST-polled, and
     # real fills via the user channel. Dataclass default False keeps unit tests
     # network-free; from_env turns it ON. Falls back to REST per-token if the WS
     # cache isn't fresh, so it degrades gracefully.
     ws_enabled: bool = False
-    # periodic REST /book re-sync: round-robin authoritative /book snapshots over the
-    # held tokens to correct any WS drift. Allocates up to this many /book GETs per
-    # second OUT OF the global LM_MAX_REQ_PER_SEC budget — keep it well below 149 so
-    # the latency-critical cancels keep their headroom. 0 = off.
-    resync_hz: float = 20.0
+    # REST /book re-sync workers: this many threads continuously round-robin
+    # authoritative /book snapshots over the held tokens (low-priority reads), SOAKING
+    # the leftover budget (149 − writes − reserve) to keep the WS book authoritative.
+    # Bucket-paced, so they self-limit and never starve cancels. 0 = off.
+    resync_workers: int = 8
 
     extra: dict = field(default_factory=dict)
 
@@ -165,9 +172,11 @@ class RunnerConfig:
             retention_days=_i("LM_RETENTION_DAYS", 30),
             events_enabled=os.environ.get("LM_EVENTS", "1").strip() != "0",
             event_poll_every_s=_f("LM_EVENT_POLL_EVERY_S", 10.0),
+            stats_every_s=_f("LM_STATS_EVERY_S", 60.0),
             max_req_per_sec=_f("LM_MAX_REQ_PER_SEC", 149.0),
+            write_reserve=_f("LM_WRITE_RESERVE", 20.0),
             ws_enabled=os.environ.get("LM_WS", "1").strip() != "0",
-            resync_hz=_f("LM_BOOK_RESYNC_HZ", 20.0),
+            resync_workers=_i("LM_BOOK_RESYNC_WORKERS", 8),
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_share=_f("LM_MIN_SHARE", 0.02),
@@ -202,7 +211,8 @@ class LiveRunner:
         # every request source: the fast hot-poll reads, reeval, the background
         # discovery scan, and live order ops. Keeps total req/s under the cap so
         # the loop can poll sub-second without 429s.
-        self.rate_limiter = (TokenBucket(config.max_req_per_sec)
+        self.rate_limiter = (TokenBucket(config.max_req_per_sec,
+                                         reserve=config.write_reserve)
                              if config.max_req_per_sec and config.max_req_per_sec > 0
                              else None)
         self.scanner = scanner_client or RewardsClient(rate_limiter=self.rate_limiter)
@@ -225,7 +235,10 @@ class LiveRunner:
         self._market_ch: MarketChannel | None = None   # real-time book (WS)
         self._user_ch: UserChannel | None = None       # real-time fills (WS, live)
         self._resync_thread: threading.Thread | None = None  # REST /book re-sync
+        self._resync_pool: ThreadPoolExecutor | None = None  # concurrent /book workers
         self._poll_evt_at: dict[str, float] = {}   # token -> last poll-event time (throttle)
+        self._stats_at: float | None = None        # last stats log (monotonic)
+        self._stats_granted: tuple[float, float] = (0.0, 0.0)  # (granted, granted_low)
         # WS reflex: cancel a held pool's orders the instant its mid moves beyond the
         # band (decoupled from accounting; the next poll reposts via force_recenter).
         self._reflex_refs: dict[str, tuple[float, float]] = {}  # token -> (mid, band)
@@ -271,7 +284,7 @@ class LiveRunner:
             self.rediscover()                  # initial SYNC scan so reselect has data
             self.reselect()
             self._start_discovery_thread()     # subsequent scans run OFF the hot loop
-            last_reeval = time.monotonic()
+            last_reeval = last_stats = time.monotonic()
             next_poll = time.monotonic()
 
             while not self._stop:
@@ -280,6 +293,9 @@ class LiveRunner:
                     self.trip_kill(reason)
                     break
                 now = time.monotonic()
+                if self.cfg.stats_every_s > 0 and now - last_stats >= self.cfg.stats_every_s:
+                    self._log_stats()           # req/s + load average (throughput/CPU)
+                    last_stats = now
                 # Discovery now runs on a background thread (keeps self.report +
                 # _last_scan_ok fresh); the loop only does reeval/reselect on their
                 # own beat and the fast poll. reselect reads the latest bg scan.
@@ -434,23 +450,32 @@ class LiveRunner:
             return []
 
     def _start_book_resync(self) -> None:
-        """Round-robin authoritative REST /book snapshots over the held tokens to
-        correct WS drift. Each GET goes through the shared token bucket (so it's
-        inside the global 149/s cap); the loop self-paces to ~resync_hz, leaving the
-        rest of the budget for the latency-critical cancels."""
-        if (self._market_ch is None or self.cfg.resync_hz <= 0
+        """Continuously re-pull authoritative REST /book for every held token to keep
+        the WS book correct. ``resync_workers`` threads fetch concurrently; each GET
+        is a LOW-priority bucket read, so they SOAK the leftover budget
+        (149 − writes − reserve) yet self-limit and never starve cancels (which hold
+        the reserved lane). No fixed rate — the bucket + network latency pace it."""
+        if (self._market_ch is None or self.cfg.resync_workers <= 0
                 or self.rate_limiter is None):
             return
-        interval = 1.0 / self.cfg.resync_hz
+        self._resync_pool = ThreadPoolExecutor(max_workers=self.cfg.resync_workers,
+                                               thread_name_prefix="resync")
 
         def _loop() -> None:
-            idx = 0
-            while not self._discovery_stop.wait(interval):
+            while not self._discovery_stop.is_set():
                 tokens = self._held_tokens()
                 if not tokens:
+                    if self._discovery_stop.wait(0.5):
+                        break
                     continue
-                self._resync_once(tokens[idx % len(tokens)])  # round-robin
-                idx += 1
+                # one /book per held token per round, concurrently; each blocks on the
+                # low-priority bucket, so the round (and thus the loop) is bucket-paced.
+                futs = [self._resync_pool.submit(self._resync_once, t) for t in tokens]
+                for f in futs:
+                    try:
+                        f.result()
+                    except Exception:  # noqa: BLE001
+                        pass
 
         self._resync_thread = threading.Thread(target=_loop, name="book-resync",
                                                daemon=True)
@@ -464,6 +489,29 @@ class LiveRunner:
                 self._market_ch.apply_rest_snapshot(token, book)
         except Exception as e:  # noqa: BLE001
             log.debug("book resync failed for %s: %s", str(token)[:10], e)
+
+    def _log_stats(self) -> None:
+        """Log achieved request rate (read/write split) + load average — a side gauge
+        of throughput and CPU load. Rate = grants since the last call / elapsed."""
+        rl = self.rate_limiter
+        if rl is None:
+            return
+        now = time.monotonic()
+        g, gl = rl.granted, rl.granted_low
+        if self._stats_at is not None and now > self._stats_at:
+            dt = now - self._stats_at
+            dg = (g - self._stats_granted[0]) / dt
+            dgl = (gl - self._stats_granted[1]) / dt
+            try:
+                load1 = os.getloadavg()[0]
+            except (OSError, AttributeError):
+                load1 = -1.0
+            log.info("stats: %.1f req/s (read %.1f / write %.1f, cap %.0f) | "
+                     "load %.2f | pools %d | threads %d",
+                     dg, dgl, dg - dgl, self.cfg.max_req_per_sec,
+                     load1, len(self.placed), threading.active_count())
+        self._stats_at = now
+        self._stats_granted = (g, gl)
 
     def _sync_ws_subscriptions(self) -> None:
         """Point the WS channels at the currently-held pools + refresh reflex refs."""
@@ -859,6 +907,8 @@ class LiveRunner:
         for t in (self._discovery_thread, self._resync_thread):
             if t is not None:
                 t.join(timeout=5.0)
+        if self._resync_pool is not None:
+            self._resync_pool.shutdown(wait=False)   # drop in-flight /book fetches
         for ch in (self._market_ch, self._user_ch):   # close WS channels (no state)
             if ch is not None:
                 try:

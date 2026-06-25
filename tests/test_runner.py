@@ -449,6 +449,18 @@ class TestPollEventThrottle:
         assert sum(1 for e in lines if e["kind"] == "poll") == 2   # both logged
 
 
+class TestStats:
+    def test_log_stats_emits_rate(self, caplog):
+        import logging
+        r = _runner(submitter=FakeSubmitter())
+        r.rate_limiter.granted, r.rate_limiter.granted_low = 100, 70
+        r._log_stats()                                  # baseline, no emit
+        r.rate_limiter.granted, r.rate_limiter.granted_low = 220, 150
+        with caplog.at_level(logging.INFO, logger="pm_trader.runner"):
+            r._log_stats()
+        assert any("stats:" in m and "req/s" in m for m in caplog.messages)
+
+
 class TestBookResync:
     def test_resync_once_pulls_rest_and_applies_to_cache(self):
         applied = []

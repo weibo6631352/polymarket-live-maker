@@ -17,12 +17,26 @@ import time
 class TokenBucket:
     """Refills at ``rate`` tokens/sec up to ``burst`` capacity. Thread-safe."""
 
-    def __init__(self, rate: float, burst: float | None = None) -> None:
+    def __init__(self, rate: float, burst: float | None = None,
+                 reserve: float = 0.0) -> None:
         self.rate = float(rate)
         self.capacity = float(burst) if burst is not None else max(1.0, float(rate))
+        # tokens kept back from LOW-priority callers (reads) so HIGH-priority callers
+        # (order cancels/places) always find a token immediately — no FIFO queueing
+        # behind a flood of book reads. Low-priority callers only take a token when
+        # availability is above this floor.
+        self.reserve = float(reserve)
         self._tokens = self.capacity
         self._last = time.monotonic()
         self._lock = threading.Lock()
+        # lifetime grant counters (for the periodic req/s metric)
+        self.granted = 0          # total tokens granted
+        self.granted_low = 0      # of which low-priority (reads)
+
+    def _count(self, n: float, low_priority: bool) -> None:  # called under the lock
+        self.granted += n
+        if low_priority:
+            self.granted_low += n
 
     def _refill_locked(self) -> None:
         now = time.monotonic()
@@ -31,29 +45,36 @@ class TokenBucket:
             self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
             self._last = now
 
-    def try_acquire(self, n: float = 1.0) -> bool:
-        """Take ``n`` tokens if available right now; never blocks."""
+    def try_acquire(self, n: float = 1.0, low_priority: bool = False) -> bool:
+        """Take ``n`` tokens if available right now; never blocks. Low-priority
+        callers (reads) leave ``reserve`` tokens for high-priority writes."""
+        floor = self.reserve if low_priority else 0.0
         with self._lock:
             self._refill_locked()
-            if self._tokens >= n:
+            if self._tokens >= n + floor:
                 self._tokens -= n
+                self._count(n, low_priority)
                 return True
             return False
 
-    def acquire(self, n: float = 1.0, timeout: float | None = None) -> bool:
+    def acquire(self, n: float = 1.0, timeout: float | None = None,
+                low_priority: bool = False) -> bool:
         """Block until ``n`` tokens are taken, or ``timeout`` elapses (then False).
 
-        Cooperative: sleeps in small slices so many threads share the bucket fairly
-        enough for rate-capping (this is a safety throttle, not a fairness scheduler).
+        High-priority (default) takes any available token → cancels never queue.
+        ``low_priority=True`` (reads) only takes when availability is above
+        ``reserve``, so the reserved headroom is always there for writes.
         """
+        floor = self.reserve if low_priority else 0.0
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             with self._lock:
                 self._refill_locked()
-                if self._tokens >= n:
+                if self._tokens >= n + floor:
                     self._tokens -= n
+                    self._count(n, low_priority)
                     return True
-                deficit = n - self._tokens
+                deficit = n + floor - self._tokens
                 wait = deficit / self.rate if self.rate > 0 else 0.05
             if deadline is not None:
                 remaining = deadline - time.monotonic()

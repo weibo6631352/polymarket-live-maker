@@ -39,6 +39,25 @@ class TestAcquireBlocking:
         assert b.acquire(1, timeout=0.05) is False
 
 
+class TestPriorityReserve:
+    def test_low_priority_leaves_reserve(self):
+        b = TokenBucket(rate=10_000, burst=10, reserve=4)
+        got = sum(1 for _ in range(20) if b.try_acquire(low_priority=True))
+        assert got == 6                         # reads drain only down to the reserve (10-4)
+        assert sum(1 for _ in range(20) if b.try_acquire()) == 4  # writes take the reserved 4
+        assert not b.try_acquire()              # now truly empty
+
+    def test_high_priority_uses_full_capacity(self):
+        b = TokenBucket(rate=10_000, burst=10, reserve=4)
+        assert sum(1 for _ in range(20) if b.try_acquire()) == 10  # writes ignore the reserve
+
+    def test_blocking_write_beats_reserve_floor(self):
+        b = TokenBucket(rate=10_000, burst=5, reserve=5)
+        # reads can't take (would breach reserve), a write still can
+        assert b.try_acquire(low_priority=True) is False
+        assert b.acquire(1, timeout=0.1) is True
+
+
 class TestRateCap:
     def test_concurrent_threads_capped_to_rate(self):
         # 8 threads hammering acquire() must not exceed ~rate over the window
