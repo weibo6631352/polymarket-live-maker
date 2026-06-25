@@ -289,6 +289,10 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         # BUY fill labelled SELL), set POLYMARKET_FILL_SIDE_INVERT=1 to correct it.
         self._invert_side = os.environ.get("POLYMARKET_FILL_SIDE_INVERT", "0") == "1"
         self._own_taker_ids: set = set()  # our flatten (taker) order ids -> exclude from fills
+        try:
+            self._own_address = self._client.get_address()  # to fetch only OUR maker fills
+        except Exception:  # noqa: BLE001
+            self._own_address = None
         # Prime the trade cursor to the NEWEST existing trade so the first poll_fills
         # returns only trades AFTER startup (never replays the account's history).
         try:
@@ -364,14 +368,16 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
 
     @staticmethod
     def _order_filled(resp) -> bool:
-        """CONSERVATIVE FOK fill check: only True on EXPLICIT confirmation, else
-        False (fail closed). Calibrate against the real response on a smoke-test."""
-        if not isinstance(resp, dict) or resp.get("success") is False:
+        """FOK fill confirmation. Polymarket order status is matched/live/delayed/
+        unmatched; a FOK either fully fills (matched) or is killed (unmatched).
+        Check status EXACTLY == 'matched' (note: 'unmatched' contains 'match', so a
+        substring test is wrong). Fail closed otherwise."""
+        if not isinstance(resp, dict):
             return False
-        status = str(resp.get("status", "")).lower()
-        if any(k in status for k in ("match", "fill", "complete")):
+        status = str(resp.get("status", "")).strip().lower()
+        if status == "matched":
             return True
-        for k in ("size_matched", "sizeMatched", "matched"):
+        for k in ("size_matched", "sizeMatched"):
             v = resp.get(k)
             try:
                 if v is not None and float(v) > 0:
@@ -388,12 +394,24 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
                 return True
         return False
 
+    def list_open_orders(self) -> list[dict]:
+        """All resting orders for this API key (for restart broker-reconciliation)."""
+        from py_clob_client.clob_types import OpenOrderParams
+        return self._client.get_orders(OpenOrderParams()) or []
+
+    def cancel_order(self, order_id) -> dict:
+        resp = self._client.cancel(order_id)
+        return {"status": "CANCELLED", "order_id": order_id, "resp": resp}
+
     def poll_fills(self) -> list[dict]:
-        """Return REAL maker fills since the last poll (the operator's chosen fill
-        source). Each: ``{token_id, side, size, price, id}``. Our own flatten/taker
-        legs are excluded. NEEDS A LIVE SMOKE-TEST: get_trades() field names, the
-        maker/taker side perspective (POLYMARKET_FILL_SIDE_INVERT), and pagination."""
-        trades = self._client.get_trades() or []
+        """Return REAL maker fills since the last poll. Each: ``{token_id, side,
+        size, price, id}``. Fetches only trades where WE are the MAKER
+        (maker_address filter) — this excludes our own taker/flatten legs and pins
+        the side to our maker perspective. The trade 'side' field perspective still
+        needs a one-line smoke-test confirm (POLYMARKET_FILL_SIDE_INVERT corrects it)."""
+        from py_clob_client.clob_types import TradeParams
+        params = TradeParams(maker_address=self._own_address) if self._own_address else None
+        trades = self._client.get_trades(params) or []
         out: list[dict] = []
         seen_new = False
         for t in trades:  # newest-first per CLOB convention

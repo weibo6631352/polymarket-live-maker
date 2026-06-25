@@ -391,6 +391,28 @@ class TestRestartSafety:
         r.engine.close()
 
 
+def test_reconcile_broker_cancels_orphans():
+    class OOSubmitter(FakeSubmitter):
+        def __init__(self, orders):
+            super().__init__()
+            self.orders = orders
+            self.cancelled = []
+
+        def list_open_orders(self):
+            return self.orders
+
+        def cancel_order(self, oid):
+            self.cancelled.append(oid)
+            return {"status": "CANCELLED"}
+
+    sub = OOSubmitter([{"id": "o1", "asset_id": "tok_held"},
+                       {"id": "o2", "asset_id": "tok_orphan"}])
+    r = _runner(submitter=sub, live=True)
+    r.placed = {"0xa": {"token": "tok_held"}}
+    r._reconcile_broker_orders()
+    assert sub.cancelled == ["o2"]   # only the orphaned order is cancelled
+
+
 def test_shutdown_runs_on_exception():
     eng = FakeEngine()
     r = LiveRunner(RunnerConfig(discovery_interval_s=1e9, dry_live=False),

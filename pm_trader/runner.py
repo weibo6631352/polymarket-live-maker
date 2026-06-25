@@ -154,7 +154,8 @@ class LiveRunner:
             self.submitter = DryRunSubmitter()
             log.info("DRY-LIVE: rehearsing the live code path (orders logged, not sent)")
 
-        self._rehydrate()   # adopt maker quotes that survived a prior run / crash
+        self._rehydrate()              # adopt maker quotes that survived a prior run
+        self._reconcile_broker_orders()  # LIVE: cancel orphaned on-chain orders
         try:
             # a standing KILL must block ALL placement on (re)start
             reason = self._kill_check()
@@ -227,6 +228,34 @@ class LiveRunner:
             adopted += 1
         if adopted:
             log.warning("rehydrated %d maker quote(s) from a prior run", adopted)
+
+    def _reconcile_broker_orders(self) -> None:
+        """LIVE restart safety: cancel any REAL resting order with no adopted quote
+        (truly orphaned from a prior run) so the broker state matches the ledger
+        before the loop starts placing again. Orders on adopted tokens are left for
+        the loop to re-center/manage."""
+        if not self.cfg.live or self.submitter is None:
+            return
+        lister = getattr(self.submitter, "list_open_orders", None)
+        canceller = getattr(self.submitter, "cancel_order", None)
+        if lister is None or canceller is None:
+            return
+        held_tokens = {m.get("token") for m in self.placed.values()}
+        try:
+            open_orders = lister()
+        except Exception as e:  # noqa: BLE001
+            log.warning("open-order reconcile failed (leaving orders as-is): %s", e)
+            return
+        for o in open_orders:
+            token = o.get("asset_id") or o.get("token_id")
+            oid = o.get("id") or o.get("orderID") or o.get("order_id")
+            if oid and token not in held_tokens:
+                log.warning("cancelling ORPHANED resting order %s on %s",
+                            oid, str(token)[:10])
+                try:
+                    canceller(oid)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("cancel orphan failed: %s", e)
 
     def _install_signals(self) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
