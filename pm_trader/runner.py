@@ -74,7 +74,7 @@ class RunnerConfig:
     risk_tolerance_days: float = 7.0
     max_token_overlap: int = 1
     poll_seconds: float = 60.0          # same beat as the paper maker poll
-    discovery_interval_s: float = 1800.0
+    discovery_interval_s: float = 600.0   # full reward-universe re-scan cadence (10 min)
     cooldown_rounds: int = 3
     max_loss: float = 20.0              # kill-switch: maker inventory-PnL floor
     # continuous re-evaluation of HELD pools (degradation exit + opportunity rotation)
@@ -98,7 +98,7 @@ class RunnerConfig:
             min_daily=_f("LM_MIN_DAILY", 80.0),
             scan_top=_i("LM_SCAN_TOP", 60),
             poll_seconds=_f("LM_POLL_SECONDS", 60.0),
-            discovery_interval_s=_f("LM_DISCOVERY_INTERVAL_S", 1800.0),
+            discovery_interval_s=_f("LM_DISCOVERY_INTERVAL_S", 600.0),
             cooldown_rounds=_i("LM_COOLDOWN_ROUNDS", 3),
             max_loss=_f("LM_MAX_LOSS_PER_DAY", 20.0),
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
