@@ -1,80 +1,84 @@
-"""Shared test fixtures/fakes. No network, no SDK required."""
+"""Shared fixtures for pm-trader tests."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from live_maker.models import OrderBook, OrderBookLevel
-
-
-def book(bid=0.49, ask=0.51, size=1000.0) -> OrderBook:
-    return OrderBook(
-        bids=[OrderBookLevel(price=bid, size=size)],
-        asks=[OrderBookLevel(price=ask, size=size)],
-    )
-
-
-def raw_book(bid=0.49, ask=0.51, size=1000.0) -> dict:
-    return {"bids": [{"price": bid, "size": size}],
-            "asks": [{"price": ask, "size": size}]}
-
-
-def market(token, daily=400.0, min_size=50.0, tick=0.01, max_spread=4.5, question=None):
-    return {
-        "rewards": {"rates": [{"rewards_daily_rate": daily}],
-                    "max_spread": max_spread, "min_size": min_size},
-        "minimum_tick_size": tick,
-        "tokens": [{"token_id": token}],
-        "question": question or f"Will {token} happen?",
-        "condition_id": "0x" + token,
-    }
-
-
-def flat_hist(n=15, p=0.5):
-    return [{"t": i * 3600, "p": p} for i in range(n)]
-
-
-class FakeExecution:
-    """Records the place/cancel/flatten calls a Decision would trigger, and serves
-    canned books for the REST failsafe — stands in for the SDK-backed Execution."""
-
-    def __init__(self, books: dict | None = None, live: bool = False):
-        self.live = live
-        self.books = books or {}
-        self.client = object()
-        self.calls: list[tuple] = []
-        self.closed = False
-
-    async def get_book(self, token_id):
-        return self.books.get(token_id, OrderBook())
-
-    async def get_midpoint(self, token_id):
-        b = self.books.get(token_id)
-        return b.midpoint() if b else None
-
-    async def place_quote(self, token_id, side, price, size):
-        self.calls.append(("place", token_id, side, price, size))
-        return {"ok": True, "order_id": f"o{len(self.calls)}", "dry_run": not self.live}
-
-    async def place_quotes(self, token_id, orders):
-        return [await self.place_quote(token_id, o["side"], o["price"], o["size"]) for o in orders]
-
-    async def cancel_all(self, token_id):
-        self.calls.append(("cancel_all", token_id))
-        return {"ok": True}
-
-    async def cancel_order(self, order_id):
-        self.calls.append(("cancel", order_id))
-        return {"ok": True}
-
-    async def flatten(self, token_id, inventory):
-        self.calls.append(("flatten", token_id, inventory))
-        return None if abs(inventory) < 1e-9 else {"ok": True}
-
-    async def close(self):
-        self.closed = True
+from pm_trader.models import Market, OrderBook, OrderBookLevel
 
 
 @pytest.fixture
-def fake_exe():
-    return FakeExecution()
+def tmp_data_dir(tmp_path: Path) -> Path:
+    """Return a temporary directory for database storage."""
+    data_dir = tmp_path / "pm-trader-test"
+    data_dir.mkdir()
+    return data_dir
+
+
+@pytest.fixture
+def sample_market() -> Market:
+    """An active Bitcoin market for testing."""
+    return Market(
+        condition_id="0xabc123",
+        slug="will-bitcoin-hit-100k",
+        question="Will Bitcoin hit $100k by end of 2026?",
+        description="Resolves YES if Bitcoin reaches $100,000 USD.",
+        outcomes=["Yes", "No"],
+        outcome_prices=[0.65, 0.35],
+        tokens=[
+            {"token_id": "tok_yes_btc", "outcome": "Yes"},
+            {"token_id": "tok_no_btc", "outcome": "No"},
+        ],
+        active=True,
+        closed=False,
+        volume=5_000_000.0,
+        liquidity=250_000.0,
+        end_date="2026-12-31T23:59:59Z",
+        fee_rate_bps=0,
+        tick_size=0.01,
+    )
+
+
+@pytest.fixture
+def closed_market() -> Market:
+    """A resolved market where YES won."""
+    return Market(
+        condition_id="0xdef456",
+        slug="will-eth-hit-5k",
+        question="Will ETH hit $5k by March 2026?",
+        description="Resolves YES if ETH reaches $5,000 USD.",
+        outcomes=["Yes", "No"],
+        outcome_prices=[1.0, 0.0],
+        tokens=[
+            {"token_id": "tok_yes_eth", "outcome": "Yes"},
+            {"token_id": "tok_no_eth", "outcome": "No"},
+        ],
+        active=False,
+        closed=True,
+        volume=2_000_000.0,
+        liquidity=0.0,
+        end_date="2026-03-01T00:00:00Z",
+        fee_rate_bps=0,
+        tick_size=0.01,
+    )
+
+
+@pytest.fixture
+def sample_order_book() -> OrderBook:
+    """A realistic multi-level order book with bids and asks."""
+    return OrderBook(
+        bids=[
+            OrderBookLevel(price=0.64, size=150.0),
+            OrderBookLevel(price=0.63, size=200.0),
+            OrderBookLevel(price=0.62, size=300.0),
+            OrderBookLevel(price=0.60, size=500.0),
+        ],
+        asks=[
+            OrderBookLevel(price=0.66, size=80.0),
+            OrderBookLevel(price=0.67, size=120.0),
+            OrderBookLevel(price=0.68, size=200.0),
+            OrderBookLevel(price=0.70, size=400.0),
+        ],
+    )

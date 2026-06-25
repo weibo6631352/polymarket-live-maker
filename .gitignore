@@ -20,7 +20,8 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# runtime state the bot writes (pools cache, kill-switch flag, logs)
+# runtime state (the engine's SQLite ledger, pool cache, logs, kill flag)
+*.db
 state/
 *.log
 safe_pools.json

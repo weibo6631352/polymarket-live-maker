@@ -1,65 +1,85 @@
-"""Tests for periodic discovery (async refresh/watch)."""
+"""Tests for periodic market discovery (paginated full scan + scheduled refresh)."""
 
 from __future__ import annotations
 
 import json
 
-from live_maker import discovery
-from live_maker.scanner import score_pool
-from tests.conftest import flat_hist, market, raw_book
+from pm_trader import discovery
+
+
+def _market(token, daily=400.0, min_size=50.0, tick=0.01):
+    return {"rewards": {"rates": [{"rewards_daily_rate": daily}],
+                        "max_spread": 4.5, "min_size": min_size},
+            "minimum_tick_size": tick, "tokens": [{"token_id": token}],
+            "question": f"Q-{token}?", "condition_id": "0x" + token}
+
+
+def _flat_hist(n=15):
+    return [{"t": i * 3600, "p": 0.5} for i in range(n)]
+
+
+def _two_sided():
+    return {"bids": [{"price": 0.49, "size": 1000}], "asks": [{"price": 0.51, "size": 1000}]}
 
 
 class FakeClient:
-    """Async stand-in for AsyncRewardsClient."""
-
     def __init__(self, markets, books, histories):
-        self.markets, self.books, self.histories = markets, books, histories
+        self.markets = markets
+        self.books = books
+        self.histories = histories
+        self.closed = False
         self.scans = 0
 
-    async def sampling_markets(self, *, max_pages=100):
+    def sampling_markets(self, *, max_pages=100):
         self.scans += 1
         return self.markets
 
-    async def book(self, token):
+    def book(self, token):
         return self.books.get(token, {})
 
-    async def prices_history(self, token, *, interval="max", fidelity=1440):
+    def prices_history(self, token, *, interval="max", fidelity=1440):
         return self.histories.get(token, [])
+
+    def close(self):
+        self.closed = True
 
 
 def _client():
-    markets = [market("a"), market("b")]
-    return FakeClient(markets, {"a": raw_book(), "b": raw_book()},
-                      {"a": flat_hist(), "b": flat_hist()})
+    markets = [_market("a"), _market("b")]
+    return FakeClient(markets, {"a": _two_sided(), "b": _two_sided()},
+                      {"a": _flat_hist(), "b": _flat_hist()})
 
 
-async def test_refresh_returns_safe_summary():
-    out = await discovery.refresh(_client(), min_daily=80.0)
-    assert "safe_count" in out and out["pools_scored"] >= 1
+class TestRefresh:
+    def test_returns_safe_summary(self):
+        out = discovery.refresh(_client(), min_daily=80.0)
+        assert "safe_count" in out and out["pools_scored"] >= 1
+
+    def test_writes_file(self, tmp_path):
+        path = tmp_path / "latest.json"
+        discovery.refresh(_client(), out_path=str(path), min_daily=80.0)
+        saved = json.loads(path.read_text())
+        assert "safe" in saved and "safe_count" in saved
 
 
-async def test_refresh_writes_file(tmp_path):
-    path = tmp_path / "latest.json"
-    await discovery.refresh(_client(), out_path=str(path), min_daily=80.0)
-    saved = json.loads(path.read_text())
-    assert "safe" in saved and "safe_count" in saved
+class TestWatch:
+    def test_loops_and_sleeps(self):
+        sleeps = []
+        c = _client()
+        results = discovery.watch(c, interval_s=300.0, rounds=3,
+                                  sleeper=lambda s: sleeps.append(s), min_daily=80.0)
+        assert len(results) == 3
+        assert c.scans == 3
+        assert sleeps == [300.0, 300.0]   # rounds-1 sleeps
+
+    def test_zero_rounds(self):
+        c = _client()
+        assert discovery.watch(c, interval_s=10.0, rounds=0, sleeper=lambda _: None) == []
 
 
-async def test_watch_loops_rounds():
-    c = _client()
-    results = await discovery.watch(c, interval_s=0.0, rounds=3, min_daily=80.0)
-    assert len(results) == 3 and c.scans == 3
-
-
-async def test_watch_zero_rounds():
-    c = _client()
-    assert await discovery.watch(c, interval_s=0.0, rounds=0) == []
-
-
-def test_score_pool_used_by_refresh_is_sane():
-    # sanity: the migrated scoring still classifies a flat pool SAFE
-    row = score_pool(
-        {"daily": 400, "max_spread": 4.5, "min_size": 50, "tick": 0.01,
-         "token": "a", "question": "q", "condition_id": "0xa"},
-        raw_book(), flat_hist())
-    assert row["jump_verdict"] == "SAFE"
+def test_run_builds_and_closes(monkeypatch):
+    fake = _client()
+    monkeypatch.setattr(discovery, "RewardsClient", lambda: fake)
+    out = discovery.run(watch_rounds=1, interval_s=10.0, min_daily=80.0)
+    assert len(out) == 1
+    assert fake.closed is True
