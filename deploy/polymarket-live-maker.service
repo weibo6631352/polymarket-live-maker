@@ -37,5 +37,7 @@ SyslogIdentifier=live-maker
 # light hardening (root, but limit blast radius)
 NoNewPrivileges=true
 
-[Install]
-WantedBy=multi-user.target
+# NO [Install]/WantedBy on purpose -> the bot NEVER auto-starts on boot. A reboot
+# always comes up clean (no bot, no wedge), so the box can never be bricked by a
+# buggy startup again. Start it explicitly + watched:  systemctl start polymarket-live-maker
+# (do NOT `systemctl enable` it until the startup is proven safe).
