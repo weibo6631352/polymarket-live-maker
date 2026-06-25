@@ -2,14 +2,27 @@
 Description=Polymarket live liquidity-rewards maker
 After=network-online.target
 Wants=network-online.target
+# Bounded restart: if the bot crashes/OOMs 4 times within 5 min, systemd GIVES UP
+# instead of looping forever. This is what lets the box self-recover (SSH stays
+# usable) instead of wedging in an infinite OOM-restart loop on boot.
+StartLimitIntervalSec=300
+StartLimitBurst=4
 
 [Service]
 Type=simple
 WorkingDirectory=/root/polymarket-live-maker
 # reads .env from the working dir; state/ (ledger + event log + runner.log) is here
 ExecStart=/root/polymarket-live-maker/.venv/bin/python -m pm_trader.runner
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=15
+# HARD memory cap (cgroup): the bot normally uses ~100 MB. If a bug leaks, the
+# kernel kills ONLY this service at the cap — it can NEVER OOM the whole box (which
+# is what made every reboot wedge it). MemoryHigh throttles before the hard kill.
+MemoryHigh=1G
+MemoryMax=1500M
+# bound how many threads/processes the unit can spawn, so a thread/fork leak hits
+# this cgroup limit (EAGAIN) instead of exhausting the host's PIDs.
+TasksMax=400
 # graceful: SIGTERM -> the runner cancels ALL resting orders + flattens before exit
 KillSignal=SIGTERM
 TimeoutStopSec=30
