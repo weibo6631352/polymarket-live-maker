@@ -64,6 +64,9 @@ MIN_ORDER_USD = 1.0  # Polymarket minimum order size
 # the same uptrend).  See [[mm-principles-for-pm-rewards]].
 MAKER_CAP_MULT = 4.0       # default position cap = 4 × quote size (shares)
 MAKER_SKEW_STRENGTH = 1.0  # default inventory-skew lean (offsets per size-unit)
+# Cap a single live accrual interval so a restart after long downtime (stale
+# last_accrued_at) can't credit a bogus multi-hour reward in one poll.
+MAX_ACCRUAL_SECONDS = 600.0
 
 # Errors that indicate an order is permanently unfillable (not transient)
 _PERMANENT_ORDER_ERRORS = (
@@ -821,6 +824,17 @@ class Engine:
         if not (0.0 < mid < 1.0):
             raise OrderRejectedError("No valid midpoint to anchor the maker quote")
 
+        # Exchange minimum-notional: each resting leg must clear the $1 order floor.
+        # The binding leg is the lighter of the YES-bid (size*(mid-offset)) and the
+        # YES-ask / NO-bid (size*(1-mid-offset)); at extreme mids one leg is tiny.
+        offset = half_spread_c / 100.0
+        min_leg = size * min(mid - offset, 1.0 - mid - offset)
+        if min_leg < MIN_ORDER_USD:
+            raise OrderRejectedError(
+                f"Maker leg notional ${min_leg:.2f} below ${MIN_ORDER_USD:.2f} "
+                f"exchange minimum (size={size}, mid={mid:.3f}, half_spread={half_spread_c}c)"
+            )
+
         cap = committed_capital(size, half_spread_c)
         if cap > account.cash:
             raise InsufficientBalanceError(required=cap, available=account.cash)
@@ -1067,15 +1081,39 @@ class Engine:
             daily_rate = pool["daily"] if pool else 0.0
             # 1. RECONCILE — pool left the program / resolved -> cancel + flatten + exit
             if pool is None or daily_rate <= 0:
-                c = submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
-                f = self._flatten_live(submitter, quote.token_id, quote.inventory)
-                if not (self._action_ok(c) and self._action_ok(f)):
-                    # real cancel/flatten FAILED -> do NOT mark the ledger flat/exited;
-                    # keep the quote active so the position stays tracked + retried.
+                # apply this poll's REAL fills (inventory + P&L marked at last_mid)
+                # BEFORE exiting, so their P&L isn't silently dropped from the
+                # ledger / kill-switch (the market is gone, so no fresh mid).
+                rd_inv = rd_pnl = 0.0
+                rn = 0
+                for rf in fills_by_token.get(quote.token_id, []):
+                    rsgn = 1.0 if str(rf["side"]).upper() == "BUY" else -1.0
+                    rsz = float(rf["size"])
+                    rd_inv += rsgn * rsz
+                    rd_pnl += rsgn * (quote.last_mid - float(rf.get("price", quote.last_mid))) * rsz
+                    rn += 1
+                final_inv = quote.inventory + rd_inv
+                cancel_res = submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
+                flat_res = self._flatten_live(submitter, quote.token_id, final_inv)
+                self._credit_maker(rd_pnl)
+                if not (self._action_ok(cancel_res) and self._action_ok(flat_res)):
+                    # real cancel/flatten FAILED -> keep the quote ACTIVE (don't zero);
+                    # the position stays tracked + retried next poll.
+                    update_maker_quote_accrual(
+                        self.db.conn, quote.id, accrued_rewards=quote.accrued_rewards,
+                        realized_bleed=quote.realized_bleed, fills=quote.fills + rn,
+                        last_mid=quote.last_mid, last_accrued_at=now_dt.isoformat(),
+                        inventory=final_inv, inventory_pnl=quote.inventory_pnl + rd_pnl)
                     results.append({"quote": _maker_quote_to_dict(quote),
                                     "exit_failed": "rewards_ended", "mid": quote.last_mid})
                     continue
-                self._exit_maker_quote(quote, quote.last_mid, "rewards_ended", results)
+                final = update_maker_quote_accrual(
+                    self.db.conn, quote.id, accrued_rewards=quote.accrued_rewards,
+                    realized_bleed=quote.realized_bleed, fills=quote.fills + rn,
+                    last_mid=quote.last_mid, last_accrued_at=now_dt.isoformat(),
+                    inventory=0.0, inventory_pnl=quote.inventory_pnl + rd_pnl)
+                self._exit_maker_quote(final, quote.last_mid, "rewards_ended", results,
+                                       inventory_pnl_delta=rd_pnl)
                 continue
             try:
                 book = self.api.get_order_book(quote.token_id)
@@ -1085,7 +1123,8 @@ class Engine:
             if not (0.0 < mid < 1.0):
                 continue
             last_dt = datetime.fromisoformat(quote.last_accrued_at)
-            seconds = max(0.0, (now_dt - last_dt).total_seconds())
+            # clamp so a restart after long downtime can't credit a bogus reward
+            seconds = min(max(0.0, (now_dt - last_dt).total_seconds()), MAX_ACCRUAL_SECONDS)
 
             # 2. reward over the elapsed in-band time, at the CURRENT daily rate
             existing_qmin = book_inband_qmin(book, mid, quote.max_spread_c)
@@ -1144,8 +1183,10 @@ class Engine:
 
             # 5. RE-CENTER — cancel + repost the inventory-skewed quote on a tick move.
             #    At/over the cap, quote ONE-SIDED (only the flattening side) so we stop
-            #    adding to an over-cap position.
-            skew = quote.skew_strength * skew_ratio
+            #    adding to an over-cap position. Clamp the skew so neither quote ever
+            #    crosses the mid (stay passive): a 1-tick half-spread allows 0 skew.
+            max_skew = max(0.0, quote.half_spread_c / (quote.tick * 100.0) - 1.0)
+            skew = max(-max_skew, min(max_skew, quote.skew_strength * skew_ratio))
             submitted: list = []
             if abs(mid - quote.last_mid) >= quote.tick:
                 submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})

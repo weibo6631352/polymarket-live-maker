@@ -288,6 +288,7 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         # If a smoke-test shows our maker fills arrive with the inverted side (e.g. a
         # BUY fill labelled SELL), set POLYMARKET_FILL_SIDE_INVERT=1 to correct it.
         self._invert_side = os.environ.get("POLYMARKET_FILL_SIDE_INVERT", "0") == "1"
+        self._own_taker_ids: set = set()  # our flatten (taker) order ids -> exclude from fills
         # Prime the trade cursor to the NEWEST existing trade so the first poll_fills
         # returns only trades AFTER startup (never replays the account's history).
         try:
@@ -332,23 +333,66 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         return {"status": "CANCELLED", "token_id": token_id, "resp": resp}
 
     def _flatten(self, token_id, side, size) -> dict:
-        # market-out a net inventory to go flat (FAK so the remainder isn't rested)
-        from py_clob_client.clob_types import OrderType
+        """Go flat with a MARKETABLE LIMIT order, FOK (all-or-nothing).
 
-        resp = self._client.create_and_post_order(
-            token_id=token_id, side=str(side).upper(), size=float(size),
-            order_type=OrderType.FAK,
-        ) if hasattr(self._client, "create_and_post_order") else \
-            self._client.post_order(
-                self._client.create_market_order(token_id=token_id,
-                                                 side=str(side).upper(), size=float(size)),
-                OrderType.FAK)
+        py-clob-client 0.17 has no usable market helper and no FAK; a marketable
+        limit avoids the market-order USDC-denomination pitfall (limit ``size`` is
+        in SHARES for both sides). FAIL CLOSED: if it doesn't fully fill, return
+        ERROR so the engine keeps the position tracked (never zeroes a live
+        position). NEEDS A LIVE SMOKE-TEST to calibrate the fill-confirm parsing.
+        """
+        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.order_builder.constants import BUY, SELL
+
+        s = str(side).upper()
+        price = 0.01 if s == "SELL" else 0.99   # aggressive marketable price
+        args = OrderArgs(token_id=token_id, price=price, size=float(size),
+                         side=(SELL if s == "SELL" else BUY))
+        signed = self._client.create_order(args)
+        resp = self._client.post_order(signed, OrderType.FOK)
+        if not self._order_filled(resp):
+            # FOK killed (book couldn't fully absorb) -> position SURVIVES; fail closed.
+            return {"status": "ERROR", "error": "flatten_unfilled", "token_id": token_id,
+                    "side": side, "size": size, "resp": resp}
+        oid = (resp or {}).get("orderID") or (resp or {}).get("order_id")
+        if oid:
+            self._own_taker_ids.add(oid)
+            if len(self._own_taker_ids) > 500:
+                self._own_taker_ids = set(list(self._own_taker_ids)[-200:])
         return {"status": "FLATTENED", "token_id": token_id, "side": side,
-                "size": size, "resp": resp}
+                "size": size, "order_id": oid, "resp": resp}
+
+    @staticmethod
+    def _order_filled(resp) -> bool:
+        """CONSERVATIVE FOK fill check: only True on EXPLICIT confirmation, else
+        False (fail closed). Calibrate against the real response on a smoke-test."""
+        if not isinstance(resp, dict) or resp.get("success") is False:
+            return False
+        status = str(resp.get("status", "")).lower()
+        if any(k in status for k in ("match", "fill", "complete")):
+            return True
+        for k in ("size_matched", "sizeMatched", "matched"):
+            v = resp.get(k)
+            try:
+                if v is not None and float(v) > 0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        return False
+
+    def _is_own_taker(self, t: dict) -> bool:
+        """True if this trade is one of OUR flatten (taker) legs — exclude it from
+        fills so we don't double-count our own taker as an inventory change."""
+        for k in ("taker_order_id", "takerOrderId", "order_id", "orderID"):
+            if t.get(k) in self._own_taker_ids:
+                return True
+        return False
 
     def poll_fills(self) -> list[dict]:
-        """Return REAL trades since the last poll (the operator's chosen fill source,
-        in lieu of a WS user channel). Each: ``{token_id, side, size, price, id}``."""
+        """Return REAL maker fills since the last poll (the operator's chosen fill
+        source). Each: ``{token_id, side, size, price, id}``. Our own flatten/taker
+        legs are excluded. NEEDS A LIVE SMOKE-TEST: get_trades() field names, the
+        maker/taker side perspective (POLYMARKET_FILL_SIDE_INVERT), and pagination."""
         trades = self._client.get_trades() or []
         out: list[dict] = []
         seen_new = False
@@ -359,6 +403,8 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
             if not seen_new:
                 self._last_trade_id = tid
                 seen_new = True
+            if self._is_own_taker(t):
+                continue   # our own flatten leg, not a maker fill
             side = (t.get("side") or "").upper()
             if self._invert_side:
                 side = "SELL" if side == "BUY" else "BUY"

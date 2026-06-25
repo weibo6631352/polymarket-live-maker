@@ -26,6 +26,7 @@ from pathlib import Path
 
 from pm_trader.engine import Engine
 from pm_trader.maker_live import DryRunSubmitter, build_clob_signer
+from pm_trader.models import NotInitializedError
 from pm_trader.portfolio import select_pools
 from pm_trader.rewards import RewardsClient, scan, score_pool
 
@@ -111,7 +112,7 @@ class RunnerConfig:
         if self.live:
             mode = "LIVE — REAL MONEY"
         elif self.dry_live:
-            mode = "DRY-LIVE (live code path, no orders sent)"
+            mode = "DRY-LIVE (live code path, no orders/fills -> P&L = gross reward only)"
         else:
             mode = "PAPER (simulator)"
         return (f"live-maker | mode={mode} | capital=${self.capital:.0f} | "
@@ -144,9 +145,7 @@ class LiveRunner:
         logging.getLogger("pm_trader").info(self.cfg.banner())
         os.makedirs(self.cfg.state_dir, exist_ok=True)
         self._install_signals()
-        if self.engine is None:
-            self.engine = Engine(Path(self.cfg.state_dir))
-            self.engine.init_account(self.cfg.capital)  # ledger cash = capital budget
+        self._ensure_engine()
         if self.cfg.live:
             if self.submitter is None:
                 self.submitter = build_clob_signer()  # hard-gated; raises unless opted in
@@ -155,32 +154,79 @@ class LiveRunner:
             self.submitter = DryRunSubmitter()
             log.info("DRY-LIVE: rehearsing the live code path (orders logged, not sent)")
 
-        self.rediscover()
-        self.reselect()
-        last_discovery = last_reeval = time.monotonic()
-
-        while not self._stop:
+        self._rehydrate()   # adopt maker quotes that survived a prior run / crash
+        try:
+            # a standing KILL must block ALL placement on (re)start
             reason = self._kill_check()
             if reason:
                 self.trip_kill(reason)
-                break
-            now = time.monotonic()
-            refreshed = False
-            if now - last_discovery >= self.cfg.discovery_interval_s:
-                self._tick_cooldowns()
-                self.rediscover()           # full universe re-scan
-                last_discovery = now
-                refreshed = True
-            if refreshed or (now - last_reeval >= self.cfg.reeval_interval_s):
-                # re-evaluate HELD pools (degradation exit + opportunity rotation),
-                # then redeploy any freed capital into the current best picks.
-                self.reevaluate_held()
-                self.reselect()
-                last_reeval = now
-            self.poll_once()
-            self._sleep_fn(self.cfg.poll_seconds)
+                return
+            self.rediscover()
+            self.reselect()
+            last_discovery = last_reeval = time.monotonic()
 
-        self._shutdown()
+            while not self._stop:
+                reason = self._kill_check()
+                if reason:
+                    self.trip_kill(reason)
+                    break
+                now = time.monotonic()
+                refreshed = False
+                if now - last_discovery >= self.cfg.discovery_interval_s:
+                    self.rediscover()           # full universe re-scan
+                    last_discovery = now
+                    refreshed = True
+                if refreshed or (now - last_reeval >= self.cfg.reeval_interval_s):
+                    self._tick_cooldowns()      # tick on the reeval beat (gates re-entry)
+                    self.reevaluate_held()      # degradation exit + opportunity rotation
+                    self.reselect()             # redeploy freed capital
+                    last_reeval = now
+                self.poll_once()
+                self._sleep_fn(self.cfg.poll_seconds)
+        finally:
+            self._shutdown()   # ALWAYS cancel/flatten on any exit (kill, signal, crash)
+
+    def _ensure_engine(self) -> None:
+        """Open the engine WITHOUT wiping a surviving ledger. init_account is a full
+        reset (deletes maker_quotes), so on a restart we must NOT call it when an
+        account already exists — otherwise we'd forget held quotes and re-place
+        duplicates while the old orders rest orphaned on-chain."""
+        if self.engine is None:
+            self.engine = Engine(Path(self.cfg.state_dir))
+        try:
+            self.engine.get_account()        # raises NotInitializedError if brand new
+        except NotInitializedError:
+            self.engine.init_account(self.cfg.capital)  # fresh start: cash = budget
+
+    def _rehydrate(self) -> None:
+        """Adopt maker quotes that survived a restart (the engine's SQLite ledger
+        persists them). Without this the runner forgets the pre-restart book and
+        re-places duplicate orders while the old ones rest orphaned on-chain.
+
+        NOTE: in LIVE this restores ledger tracking + the ability to re-center/exit
+        the pre-restart orders, but it does NOT yet reconcile against the broker's
+        actually-resting orders — see the open 'broker order reconciliation' item.
+        """
+        if self.engine is None:
+            return
+        now = time.monotonic()
+        adopted = 0
+        for q in self.engine.get_maker_quotes():
+            cond = q.get("market_condition_id")
+            if not cond or cond in self.placed:
+                continue
+            self.placed[cond] = {
+                "condition_id": cond, "token": q.get("token_id", ""),
+                "question": q.get("market_slug", ""),
+                "half_spread_c": q.get("half_spread_c"),
+                "daily": q.get("daily_rate", 0.0), "share": 0.0,
+                "committed_capital": q.get("committed_capital", 0.0),
+                "est_daily_reward": 0.0,
+            }
+            self.placed_at[cond] = now
+            adopted += 1
+        if adopted:
+            log.warning("rehydrated %d maker quote(s) from a prior run", adopted)
 
     def _install_signals(self) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -291,16 +337,24 @@ class LiveRunner:
             history = self.scanner.prices_history(token_id)
         except Exception:  # noqa: BLE001
             return None
-        return score_pool(cfg, book, history)   # share / reward_per_day / jump_verdict / empty_band
+        scored = score_pool(cfg, book, history)
+        if scored is None:
+            # book went one-sided/empty -> can't quote two-sided. This is a
+            # degradation (exit), NOT a transient read failure (None).
+            return {"one_sided": True}
+        return scored                           # share / reward_per_day / jump_verdict / empty_band
 
-    # reasons that bench a pool for a few discovery rounds (it degraded, don't
-    # immediately re-add it). "deselected" (a clean rank-out) is NOT benched.
-    _COOLDOWN_REASONS = ("jump_risk_rose", "empty_band", "share_collapsed", "daily_cut")
+    # reasons that bench a pool for a few rounds (it degraded, don't immediately
+    # re-add it). "deselected" (a clean rank-out) is NOT benched.
+    _COOLDOWN_REASONS = ("jump_risk_rose", "empty_band", "share_collapsed",
+                         "daily_cut", "one_sided")
 
     def _degrade_reason(self, fresh: dict) -> str | None:
         """Decide whether a held pool degraded enough to exit. Returns a reason or
         None. Rotation (a better pool appeared) is handled by reselect converging to
         the ideal selection — NOT here — so this only judges THIS pool on its own."""
+        if fresh.get("one_sided"):
+            return "one_sided"
         daily = fresh.get("daily", 0.0) or 0.0
         if daily <= 0:
             return "rewards_ended"

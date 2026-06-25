@@ -174,6 +174,23 @@ class TestAccrueLive:
             fills_by_token={"tok_yes": [{"side": "BUY", "size": 60, "price": 0.50}]})
         assert rows[0]["inventory"] == 60.0          # true position, NOT clamped to 50
 
+    def test_min_notional_rejected(self, eng):
+        # at mid 0.99 the YES-ask / NO leg notional is ~0 -> below the $1 exchange min
+        from pm_trader.models import OrderRejectedError
+        _mock_api(eng, mid=0.99)
+        with pytest.raises(OrderRejectedError):
+            eng.place_maker_quote_live("0xabc", submitter=FakeSubmitter(), half_spread_cents=1.0)
+
+    def test_stale_accrual_clamped(self, eng):
+        sub = FakeSubmitter()
+        self._place(eng, sub)
+        # simulate a restart after long downtime: last_accrued_at far in the past
+        eng.db.conn.execute("UPDATE maker_quotes SET last_accrued_at = ?",
+                            ("2020-01-01T00:00:00+00:00",))
+        eng.db.conn.commit()
+        rows = eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={})
+        assert rows[0]["seconds"] == 600.0   # clamped to MAX_ACCRUAL_SECONDS, not ~days
+
     def test_one_sided_quote_at_cap(self, eng):
         sub = FakeSubmitter()
         self._place(eng, sub, max_inventory=50.0)

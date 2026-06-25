@@ -28,6 +28,13 @@ class FakeEngine:
 
     def init_account(self, balance):
         self.balance = balance
+        self._has_account = True
+
+    def get_account(self):
+        if not getattr(self, "_has_account", False):
+            from pm_trader.models import NotInitializedError
+            raise NotInitializedError()
+        return object()
 
     def place_maker_quote(self, cond, *, half_spread_cents=None):
         self.placed.append((cond, half_spread_cents, False))
@@ -343,6 +350,66 @@ class TestRunLoop:
         r._sleep_fn = _sleeper
         r.run()
         assert r._stop and eng.closed and n["i"] == 1
+
+
+class TestRestartSafety:
+    def test_rehydrate_adopts_surviving_quotes(self):
+        eng = FakeEngine()
+        eng.quotes = [{"id": 1, "market_condition_id": "0xa", "token_id": "tok_a",
+                       "inventory": 0.0, "committed_capital": 49.0, "daily_rate": 400.0,
+                       "half_spread_c": 1.0, "market_slug": "m"}]
+        r = _runner(engine=eng)
+        r._rehydrate()
+        assert "0xa" in r.placed and "0xa" in r.placed_at
+
+    def test_ensure_engine_does_not_wipe_existing_ledger(self, tmp_path):
+        from unittest.mock import MagicMock
+        from pm_trader.engine import Engine
+        from pm_trader.models import Market
+        eng = Engine(tmp_path)
+        eng.init_account(200.0)
+        eng.api.get_market = MagicMock(return_value=Market(
+            condition_id="0xabc", slug="m", question="Q", description="",
+            outcomes=["Yes", "No"], outcome_prices=[0.5, 0.5],
+            tokens=[{"token_id": "tok_yes", "outcome": "Yes"},
+                    {"token_id": "tok_no", "outcome": "No"}],
+            active=True, closed=False, tick_size=0.01))
+        eng.api.get_reward_config = MagicMock(return_value={
+            "daily": 400.0, "max_spread": 4.5, "min_size": 50.0, "tick": 0.01,
+            "token": "tok_yes", "question": "Q", "condition_id": "0xabc"})
+        eng.api.get_midpoint = MagicMock(return_value=0.50)
+        eng.place_maker_quote("0xabc", half_spread_cents=1.0)
+        assert len(eng.get_maker_quotes()) == 1
+        eng.close()
+        # RESTART: fresh runner, engine=None, same state_dir
+        r = LiveRunner(RunnerConfig(state_dir=str(tmp_path), capital=200.0),
+                       scanner_client=FakeScanner(), sleeper=lambda _s: None)
+        r._ensure_engine()
+        assert len(r.engine.get_maker_quotes()) == 1   # NOT wiped
+        r._rehydrate()
+        assert "0xabc" in r.placed                      # adopted
+        r.engine.close()
+
+
+def test_shutdown_runs_on_exception():
+    eng = FakeEngine()
+    r = LiveRunner(RunnerConfig(discovery_interval_s=1e9, dry_live=False),
+                   engine=eng, scanner_client=FakeScanner(markets=[]), sleeper=None)
+
+    def _boom(_s):
+        raise RuntimeError("crash mid-loop")
+    r._sleep_fn = _boom
+    try:
+        r.run()
+    except RuntimeError:
+        pass
+    assert eng.closed is True   # _shutdown ran via try/finally despite the crash
+
+
+def test_one_sided_book_is_a_degradation():
+    r = _runner()
+    assert r._degrade_reason({"one_sided": True}) == "one_sided"
+    assert "one_sided" in LiveRunner._COOLDOWN_REASONS
 
 
 def test_config_gate(monkeypatch):
