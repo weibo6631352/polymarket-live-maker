@@ -413,6 +413,36 @@ class TestReflex:
         assert r._reflex_cancelled == set()         # consumed
 
 
+class TestBookResync:
+    def test_resync_once_pulls_rest_and_applies_to_cache(self):
+        applied = []
+
+        class _MC:
+            def apply_rest_snapshot(self, tok, book):
+                applied.append((tok, book))
+
+        class _Scanner:
+            def book(self, tok):
+                return {"bids": [{"price": "0.49", "size": "100"}],
+                        "asks": [{"price": "0.51", "size": "100"}]}
+
+        r = _runner(submitter=FakeSubmitter())
+        r.scanner = _Scanner()
+        r._market_ch = _MC()
+        r._resync_once("tokX")
+        assert applied and applied[0][0] == "tokX" and applied[0][1]["bids"]
+
+    def test_resync_once_swallows_errors(self):
+        class _Scanner:
+            def book(self, tok):
+                raise RuntimeError("rest down")
+
+        r = _runner(submitter=FakeSubmitter())
+        r.scanner = _Scanner()
+        r._market_ch = object()           # never reached
+        r._resync_once("tokX")            # must not raise
+
+
 class TestRunLoop:
     def test_run_stops_on_kill(self):
         eng = FakeEngine()

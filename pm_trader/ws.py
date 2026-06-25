@@ -188,6 +188,23 @@ class MarketChannel:
         trusted; only a stalled/dead socket trips it (-> caller uses REST instead)."""
         return self._last_recv > 0.0 and (time.monotonic() - self._last_recv) <= max_silence_s
 
+    def apply_rest_snapshot(self, token_id: str, book: dict) -> None:
+        """Overwrite a token's cached book from an AUTHORITATIVE REST /book snapshot.
+
+        The periodic re-sync uses this to correct any drift in the WS-maintained
+        book (we can't verify Polymarket's per-message ``hash``). Same parsing as a
+        WS ``book`` event. Ignores empty/one-sided snapshots (never clobber a good
+        book with junk; the stale-/book bug returns 0.99/0.01 one-sided sometimes)."""
+        if not token_id or not isinstance(book, dict):
+            return
+        bids = {_f(l.get("price")): _f(l.get("size")) for l in book.get("bids") or []}
+        asks = {_f(l.get("price")): _f(l.get("size")) for l in book.get("asks") or []}
+        if not bids or not asks:
+            return
+        with self._lock:
+            self._levels[token_id] = {"bids": bids, "asks": asks}
+            self._ts[token_id] = time.monotonic()
+
     # -- subscription management --------------------------------------------
 
     def set_tokens(self, tokens) -> None:

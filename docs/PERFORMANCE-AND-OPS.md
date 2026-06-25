@@ -131,6 +131,9 @@ All behavior-preserving except where noted; the 933-test suite stayed green.
 | **Real-time WS market channel** (book/`price_change` → `engine.book_source`) | `ws.py` | mid pushed in ~ms → fast cancel; REST reads freed (REST fallback per-token) |
 | **Real-time WS user channel** (live `trade` events → fills) | `ws.py` | real-time inventory; replaces REST `get_trades` polling |
 | **WS reflex cancel** (price callback → instant `CANCEL_ALL` on a >band move) | `ws.py`, `runner.py` | ~ms stale-order pull, decoupled from accounting; next poll reposts via `force_recenter`. Submitter lock-wrapped for thread safety |
+| **Order-conn keep-warm** (`ConnectionWarmer` pings `get_server_time` every 3s) | `maker_live.py` | sporadic cancels never pay a cold TLS handshake (cancel ~34ms → ~16-19ms) |
+| **WS liveness gate** (engine trusts WS book only if a frame arrived <15s ago) | `ws.py`, `engine.py` | a stalled socket → REST fallback, never a stale book |
+| **REST `/book` re-sync** (`LM_BOOK_RESYNC_HZ`, round-robin, allocated within 149/s) | `ws.py`, `runner.py` | authoritative anti-drift snapshot over the WS-maintained book; reserves budget for cancels |
 
 **Deliberately NOT done:** caching `get_reward_config` (it's a safety/exit signal —
 fetch it fresh; concurrency already removed its latency cost). Capping `poll_fills`

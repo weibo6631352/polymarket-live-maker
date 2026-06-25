@@ -136,6 +136,11 @@ class RunnerConfig:
     # network-free; from_env turns it ON. Falls back to REST per-token if the WS
     # cache isn't fresh, so it degrades gracefully.
     ws_enabled: bool = False
+    # periodic REST /book re-sync: round-robin authoritative /book snapshots over the
+    # held tokens to correct any WS drift. Allocates up to this many /book GETs per
+    # second OUT OF the global LM_MAX_REQ_PER_SEC budget — keep it well below 149 so
+    # the latency-critical cancels keep their headroom. 0 = off.
+    resync_hz: float = 20.0
 
     extra: dict = field(default_factory=dict)
 
@@ -157,6 +162,7 @@ class RunnerConfig:
             events_enabled=os.environ.get("LM_EVENTS", "1").strip() != "0",
             max_req_per_sec=_f("LM_MAX_REQ_PER_SEC", 149.0),
             ws_enabled=os.environ.get("LM_WS", "1").strip() != "0",
+            resync_hz=_f("LM_BOOK_RESYNC_HZ", 20.0),
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_share=_f("LM_MIN_SHARE", 0.02),
@@ -213,6 +219,7 @@ class LiveRunner:
         self._events: EventLog | None = None   # created in run(); None in unit tests
         self._market_ch: MarketChannel | None = None   # real-time book (WS)
         self._user_ch: UserChannel | None = None       # real-time fills (WS, live)
+        self._resync_thread: threading.Thread | None = None  # REST /book re-sync
         # WS reflex: cancel a held pool's orders the instant its mid moves beyond the
         # band (decoupled from accounting; the next poll reposts via force_recenter).
         self._reflex_refs: dict[str, tuple[float, float]] = {}  # token -> (mid, band)
@@ -395,6 +402,7 @@ class LiveRunner:
             if hasattr(self.engine, "book_source"):
                 self.engine.book_source = self._market_ch
             log.info("WS market channel started (real-time book + reflex cancel)")
+            self._start_book_resync()        # authoritative REST /book anti-drift
         except Exception as e:  # noqa: BLE001
             log.warning("WS market channel failed to start (using REST): %s", e)
             self._market_ch = None
@@ -418,6 +426,38 @@ class LiveRunner:
             return [q["token_id"] for q in self.engine.get_maker_quotes()]
         except Exception:  # noqa: BLE001
             return []
+
+    def _start_book_resync(self) -> None:
+        """Round-robin authoritative REST /book snapshots over the held tokens to
+        correct WS drift. Each GET goes through the shared token bucket (so it's
+        inside the global 149/s cap); the loop self-paces to ~resync_hz, leaving the
+        rest of the budget for the latency-critical cancels."""
+        if (self._market_ch is None or self.cfg.resync_hz <= 0
+                or self.rate_limiter is None):
+            return
+        interval = 1.0 / self.cfg.resync_hz
+
+        def _loop() -> None:
+            idx = 0
+            while not self._discovery_stop.wait(interval):
+                tokens = self._held_tokens()
+                if not tokens:
+                    continue
+                self._resync_once(tokens[idx % len(tokens)])  # round-robin
+                idx += 1
+
+        self._resync_thread = threading.Thread(target=_loop, name="book-resync",
+                                               daemon=True)
+        self._resync_thread.start()
+
+    def _resync_once(self, token: str) -> None:
+        """One authoritative REST /book pull -> overwrite the WS cache. Best effort."""
+        try:
+            book = self.scanner.book(token)          # paced by the shared 149 bucket
+            if book:
+                self._market_ch.apply_rest_snapshot(token, book)
+        except Exception as e:  # noqa: BLE001
+            log.debug("book resync failed for %s: %s", str(token)[:10], e)
 
     def _sync_ws_subscriptions(self) -> None:
         """Point the WS channels at the currently-held pools + refresh reflex refs."""
@@ -802,8 +842,9 @@ class LiveRunner:
     def _shutdown(self) -> None:
         # stop the background discovery thread first (it holds no orders/ledger state)
         self._discovery_stop.set()
-        if self._discovery_thread is not None:
-            self._discovery_thread.join(timeout=5.0)
+        for t in (self._discovery_thread, self._resync_thread):
+            if t is not None:
+                t.join(timeout=5.0)
         for ch in (self._market_ch, self._user_ch):   # close WS channels (no state)
             if ch is not None:
                 try:

@@ -116,6 +116,20 @@ class TestMarketChannel:
         assert mc.is_live() is True
         assert mc.is_live(max_silence_s=-1) is False  # any positive age exceeds -1
 
+    def test_apply_rest_snapshot_overwrites_cache(self):
+        mc = MarketChannel()
+        mc.handle_message(_book_msg("t1", [(0.40, 10)], [(0.60, 10)]))   # WS (drifted)
+        mc.apply_rest_snapshot("t1", {"bids": [{"price": "0.49", "size": "100"}],
+                                      "asks": [{"price": "0.51", "size": "100"}]})
+        assert mc.get_midpoint("t1") == 0.50         # REST snapshot is authoritative
+
+    def test_apply_rest_snapshot_ignores_one_sided_junk(self):
+        mc = MarketChannel()
+        mc.handle_message(_book_msg("t1", [(0.49, 10)], [(0.51, 10)]))
+        mc.apply_rest_snapshot("t1", {"bids": [{"price": "0.99", "size": "1"}],
+                                      "asks": []})    # the stale 0.99/0.01 one-sided bug
+        assert mc.get_midpoint("t1") == 0.50         # unchanged — junk not applied
+
 
 class TestUserChannel:
     def _creds(self):
