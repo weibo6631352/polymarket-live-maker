@@ -336,7 +336,8 @@ def scan(
         if p is not None and p["daily"] >= min_daily:
             pools.append(p)
     pools.sort(key=lambda p: -p["daily"])
-    pools = pools[: max(1, top)]
+    if top and top > 0:                     # top <= 0 -> NO truncation: classify every
+        pools = pools[:top]                 # eligible pool (don't hide SAFE pools in the tail)
 
     def _score_one(p: dict) -> dict | None:
         """Fetch one pool's book (+ history) and score it. Same per-pool error

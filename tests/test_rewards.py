@@ -399,6 +399,13 @@ class TestScan:
         report = rewards.scan(fc, min_daily=50.0, top=2)
         assert report["pools_scored"] == 2
 
+    def test_top_zero_means_no_cap(self):
+        markets = [_market(daily=100.0 + i, token=f"t{i}") for i in range(5)]
+        books = {f"t{i}": _two_sided() for i in range(5)}
+        fc = FakeClient(markets, books)
+        assert rewards.scan(fc, min_daily=50.0, top=0)["pools_scored"] == 5   # all
+        assert rewards.scan(fc, min_daily=50.0, top=-1)["pools_scored"] == 5  # all
+
 
 def test_run_scan_builds_and_closes_client(monkeypatch):
     markets = [_market(daily=100.0, token="ok")]

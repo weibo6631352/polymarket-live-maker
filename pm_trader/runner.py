@@ -108,17 +108,20 @@ class RunnerConfig:
     # PAPER simulator (accrue_maker_rewards, maker_fill). live=True always wins.
     dry_live: bool = True
     capital: float = 200.0
-    max_pools: int = 20                 # cap on held pools. Set to ~the supply of
-                                        # uncorrelated SAFE pools (~20-37 at scan_top=250)
-                                        # so it's NOT the binding cap; capital still gates
-                                        # funding and the reflex cancel is decoupled from
-                                        # poll-loop size, so this doesn't hurt cancel latency
+    max_pools: int = 40                 # cap on held pools. Unlike scan_top this DOES have
+                                        # a real (but high) bound: each held pool adds work
+                                        # to the 1s poll loop. The reflex cancel is decoupled
+                                        # (event-driven), so cancel latency is unaffected;
+                                        # capital + the ~uncorrelated-SAFE supply gate actual
+                                        # funding well below 40, so it's effectively non-binding
     min_daily: float = 80.0
-    # how many top-by-daily pools to actually fetch books + classify jump-risk for.
-    # This TRUNCATES the universe BEFORE SAFE filtering, so too-low starves the book of
-    # SAFE candidates (live: top=60 -> 9 SAFE -> 5 held; top=250 -> ~30 SAFE -> ~20).
-    # Off the hot loop, threadpooled + bucket-paced, every discovery_interval_s.
-    scan_top: int = 250
+    # how many top-by-daily pools to fetch books + classify jump-risk for each scan.
+    # 0 = NO cap: classify EVERY eligible pool so a SAFE pool is never hidden in the
+    # tail. Request budget is not the constraint — the scan is off the hot loop and
+    # low-priority (cancels hold a reserved lane), so it soaks leftover 149/s without
+    # touching cancel latency. Set a positive N only to limit load on Polymarket's API
+    # (their external rate-limit, not ours) if a scan ever starts getting throttled.
+    scan_top: int = 0
     half_spread_ticks: int = 1
     # use the volatility-aware optimal half-spread (engine.suggest_maker_half_spread)
     # per pool at selection instead of the fixed 1-tick offset. Off by default.
@@ -204,9 +207,9 @@ class RunnerConfig:
             live=os.environ.get("PM_TRADER_LIVE", "0").strip() == "1",
             dry_live=os.environ.get("LM_DRY_LIVE", "1").strip() != "0",
             capital=_f("LM_CAPITAL", 200.0),
-            max_pools=_i("LM_MAX_POOLS", 20),
+            max_pools=_i("LM_MAX_POOLS", 40),
             min_daily=_f("LM_MIN_DAILY", 80.0),
-            scan_top=_i("LM_SCAN_TOP", 250),
+            scan_top=_i("LM_SCAN_TOP", 0),     # 0 = scan all eligible (no cap)
             max_token_overlap=_i("LM_MAX_TOKEN_OVERLAP", 1),  # was unwired -> stuck at 1
             poll_seconds=_f("LM_POLL_SECONDS", 60.0),
             discovery_interval_s=_f("LM_DISCOVERY_INTERVAL_S", 600.0),
