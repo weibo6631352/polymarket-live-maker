@@ -489,6 +489,42 @@ class TestPollEventThrottle:
         assert sum(1 for e in lines if e["kind"] == "poll") == 2   # both logged
 
 
+class TestProfitEstimate:
+    def test_logs_live_profit_under_competition(self, tmp_path, caplog):
+        import json
+        import logging
+
+        from pm_trader.events import EventLog
+        from pm_trader.models import OrderBook, OrderBookLevel
+
+        class _MC:
+            def get_book(self, t):
+                return OrderBook(
+                    bids=[OrderBookLevel(0.49, 100), OrderBookLevel(0.48, 200)],
+                    asks=[OrderBookLevel(0.51, 100), OrderBookLevel(0.52, 200)])
+            def get_midpoint(self, t):
+                return 0.50
+            def updates(self, t):
+                return 0
+
+        eng = FakeEngine(summary={"reward_income": 1.2, "adverse_bleed": 0.3,
+                                  "net_maker_pnl": 0.9})
+        eng.quotes = [{"token_id": "tok", "size": 50.0, "half_spread_c": 1.0,
+                       "max_spread_c": 4.5, "daily_rate": 400.0,
+                       "committed_capital": 49.0}]
+        r = _runner(engine=eng, submitter=FakeSubmitter())
+        r._market_ch = _MC()
+        r._events = EventLog(tmp_path / "events", retention_days=30)
+        with caplog.at_level(logging.INFO, logger="pm_trader.runner"):
+            r._log_pool_metrics()
+        r._events.close()
+        assert any("PROFIT (live competition)" in m for m in caplog.messages)
+        evs = [json.loads(l) for f in (tmp_path / "events").glob("events-*.jsonl")
+               for l in f.read_text().splitlines()]
+        prof = [e for e in evs if e["kind"] == "profit"]
+        assert prof and prof[0]["gross_day"] > 0 and prof[0]["pools"] == 1
+
+
 class TestStats:
     def test_log_stats_emits_rate(self, caplog):
         import logging

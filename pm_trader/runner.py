@@ -29,7 +29,12 @@ from pathlib import Path
 
 from pm_trader.engine import Engine
 from pm_trader.events import EventLog
-from pm_trader.orderbook import depth_ahead
+from pm_trader.orderbook import (
+    book_inband_qmin,
+    depth_ahead,
+    maker_quote_score,
+    maker_reward_share,
+)
 from pm_trader.maker_live import DryRunSubmitter, build_clob_signer
 from pm_trader.models import NotInitializedError
 from pm_trader.portfolio import select_pools
@@ -550,6 +555,8 @@ class LiveRunner:
         except Exception:  # noqa: BLE001
             return
         now = time.monotonic()
+        total_reward_day = total_committed = 0.0
+        n = 0
         for q in quotes:
             tok = q.get("token_id")
             book = self._market_ch.get_book(tok)
@@ -565,13 +572,47 @@ class LiveRunner:
             prev = self._ws_upd_at.get(tok)
             upd_s = (cnt - prev[1]) / (now - prev[0]) if prev and now > prev[0] else 0.0
             self._ws_upd_at[tok] = (now, cnt)
+            # LIVE profit under CURRENT competition: our reward share from the live
+            # book (competitors' in-band Qmin; subtract our own in LIVE since the
+            # public book includes our resting order) x the pool's daily rate.
+            max_spread_c = q.get("max_spread_c") or 0.0
+            size = q.get("size") or 0.0
+            daily = q.get("daily_rate") or 0.0
+            book_qmin = book_inband_qmin(book, mid, max_spread_c)
+            own_qmin = maker_quote_score(size, q.get("half_spread_c") or 0.0, max_spread_c)
+            competitor = max(0.0, book_qmin - (own_qmin if self.cfg.live else 0.0))
+            share = maker_reward_share(size, q.get("half_spread_c") or 0.0,
+                                       max_spread_c, competitor)
+            reward_day = share * daily
+            total_reward_day += reward_day
+            total_committed += q.get("committed_capital") or 0.0
+            n += 1
             log.info("metrics %s | ahead bid %.0f(+%.0f@lvl)@%.3f / ask %.0f(+%.0f@lvl)@%.3f "
-                     "| mid %.4f vel %.2fc/s | book %.1f upd/s",
+                     "| mid %.4f vel %.2fc/s | book %.1f upd/s | share %.1f%% -> $%.2f/day",
                      str(tok)[:8], b_better, b_at, bid_px, a_better, a_at, ask_px,
-                     mid, vel, upd_s)
+                     mid, vel, upd_s, share * 100, reward_day)
             self._event("metrics", token=tok, mid=mid, bid_px=bid_px, ask_px=ask_px,
                         ahead_bid=b_better, at_bid=b_at, ahead_ask=a_better, at_ask=a_at,
-                        mid_vel_cps=round(vel, 3), book_upd_s=round(upd_s, 2))
+                        mid_vel_cps=round(vel, 3), book_upd_s=round(upd_s, 2),
+                        competitor_qmin=round(competitor, 2), share=round(share, 4),
+                        reward_day=round(reward_day, 4), daily=daily)
+        if n:
+            ann = (total_reward_day * 365 / total_committed * 100) if total_committed else 0.0
+            realized = {}
+            try:
+                realized = self.engine.get_maker_summary()
+            except Exception:  # noqa: BLE001
+                pass
+            log.info("PROFIT (live competition): ~$%.2f/day gross across %d pools | "
+                     "$%.0f committed (~%.0f%%/yr) | realized reward $%.2f bleed $%.2f net $%.2f",
+                     total_reward_day, n, total_committed, ann,
+                     realized.get("reward_income", 0.0), realized.get("adverse_bleed", 0.0),
+                     realized.get("net_maker_pnl", 0.0))
+            self._event("profit", gross_day=round(total_reward_day, 4), pools=n,
+                        committed=round(total_committed, 2), ann_pct=round(ann, 1),
+                        realized_reward=round(realized.get("reward_income", 0.0), 4),
+                        realized_bleed=round(realized.get("adverse_bleed", 0.0), 4),
+                        realized_net=round(realized.get("net_maker_pnl", 0.0), 4))
 
     def _sync_ws_subscriptions(self) -> None:
         """Point the WS channels at the currently-held pools + refresh reflex refs."""
