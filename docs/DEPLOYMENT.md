@@ -25,7 +25,8 @@ Production host for the live maker. Validated 2026-06-25.
 |---|---|
 | Host | `3.255.213.234` (port 22) |
 | User | `root` |
-| Password | `66313527a` (changed from the provider default 2026-06-25) |
+| Password (CURRENT) | `66313527a` — ✅ ACTIVE, confirmed working 2026-06-25 |
+| Password (OLD) | `oneFWE73@aws` — ⛔ OBSOLETE, provider default, no longer valid (do not use) |
 
 Burstable is fine: the bot is I/O-bound and near-idle (~67 MB RSS), so CPU credits
 accrue rather than deplete. RAM/disk are hugely over-provisioned for it.
