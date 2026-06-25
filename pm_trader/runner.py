@@ -122,7 +122,11 @@ class RunnerConfig:
     # continuous re-evaluation of HELD pools (degradation exit + opportunity rotation)
     reeval_enabled: bool = True
     reeval_interval_s: float = 300.0    # re-check held pools this often (cheap; held-only)
-    min_share: float = 0.02            # leave if our est share collapses below this
+    min_share: float = 0.02            # reeval: leave if our est share collapses below this
+    # entry floor: skip a candidate whose estimated reward (share x daily) is below
+    # this $/day — not worth the ~$50 capital lock. (Reward-based, NOT share-based:
+    # a small share of a high-daily pool still earns.) 0 = off.
+    min_pool_reward: float = 0.5
     # exit a held pool whose real-time mid velocity exceeds this (cents/sec) — a
     # choppy book bleeds via small pick-offs the daily jump_verdict misses. 0 = off.
     max_mid_vel_cps: float = 4.0
@@ -185,6 +189,7 @@ class RunnerConfig:
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_share=_f("LM_MIN_SHARE", 0.02),
+            min_pool_reward=_f("LM_MIN_POOL_REWARD", 0.5),
             max_mid_vel_cps=_f("LM_MAX_MID_VEL_CPS", 4.0),
             min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
             min_wallet_usdc=_f("LM_MIN_WALLET_USDC", 0.0),
@@ -697,8 +702,9 @@ class LiveRunner:
         for cond, s in want.items():
             if cond in self.placed:
                 continue
-            if (s.get("share") or 0.0) < self.cfg.min_share:
-                continue   # depth-ahead too large -> share too small to be worth entering
+            if (s.get("est_daily_reward") or 0.0) < self.cfg.min_pool_reward:
+                continue   # too little reward (share x daily) to justify the capital lock
+                           # — NOT share alone: a small share of a big pool still pays
             cap = s.get("committed_capital", 0.0)
             if committed + cap > self.cfg.capital + 1e-6:
                 continue   # would exceed the budget given what's already held

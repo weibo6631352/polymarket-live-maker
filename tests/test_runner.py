@@ -302,14 +302,16 @@ class TestReevaluateHeld:
         assert "0xb" in r.placed                              # better pool funded
         assert "0xa" not in r.cooldown                        # rank-out -> may return
 
-    def test_reselect_skips_low_share_pool(self):
+    def test_reselect_skips_dead_reward_pool_but_keeps_small_share_big_pool(self):
         eng = FakeEngine()
-        r = _runner(engine=eng, capital=10_000.0, max_pools=3, min_share=0.05)
-        r.report = {"pools": [_scan_pool("a", "Alpha", share=0.20),
-                              _scan_pool("b", "Beta", share=0.001)]}  # b too crowded
+        r = _runner(engine=eng, capital=10_000.0, max_pools=3, min_pool_reward=0.5)
+        r.report = {"pools": [
+            _scan_pool("a", "Alpha", daily=400.0, share=0.20),    # $80/day -> keep
+            _scan_pool("b", "Beta", daily=300.0, share=0.018),    # crowded but $5.4/day -> KEEP
+            _scan_pool("c", "Gamma", daily=100.0, share=0.001)]}  # $0.10/day dead -> skip
         r.reselect()
-        assert "0xa" in r.placed          # good share -> entered
-        assert "0xb" not in r.placed      # depth-ahead too large (share 0.001) -> skipped
+        assert "0xa" in r.placed and "0xb" in r.placed   # small share of a big pool still pays
+        assert "0xc" not in r.placed                     # est reward < $0.50/day -> skipped
 
     def test_reselect_keeps_still_ideal_pool(self):
         eng = FakeEngine()
