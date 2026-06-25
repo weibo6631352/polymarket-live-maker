@@ -20,9 +20,51 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections import deque
 
 from pm_trader.models import ApiError, OrderBook
+
+log = logging.getLogger("pm_trader.maker_live")
+
+
+class ConnectionWarmer:
+    """Keep a connection hot by calling ``ping`` every ``interval`` seconds on a
+    daemon thread, so a sporadic latency-critical request (a cancel) never pays a
+    cold TLS handshake. httpx drops idle pooled connections after ~5s, and cancels
+    fire only on a mid move, so without this the connection often goes cold and the
+    cancel eats ~15ms of re-handshake. Ping errors are swallowed (best effort)."""
+
+    def __init__(self, ping, interval: float = 3.0,
+                 logger: logging.Logger | None = None) -> None:
+        self._ping = ping
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._log = logger or log
+        self.ticks = 0          # successful pings (observability / tests)
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="conn-warmer",
+                                        daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        # wait(interval) returns True only when stopped -> loop pings until stop
+        while not self._stop.wait(self._interval):
+            try:
+                self._ping()
+                self.ticks += 1
+            except Exception as e:  # noqa: BLE001 — keep-warm is best effort
+                self._log.debug("connection warmer ping failed: %s", e)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
 from pm_trader.orderbook import book_inband_qmin, committed_capital, maker_reward_share
 
 
@@ -304,6 +346,21 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
             self._last_trade_id = (seed[0].get("id") or seed[0].get("trade_id")) if seed else None
         except Exception:  # noqa: BLE001 — best effort; worst case first poll is empty-safe
             self._last_trade_id = None
+        # keep the (shared py-clob-client) connection hot so sporadic cancels never
+        # pay a cold TLS handshake — get_server_time is a cheap /time GET on the same
+        # pool that create_order/cancel use.
+        self._warmer = ConnectionWarmer(self._warm_ping, interval=3.0)
+        self._warmer.start()
+
+    def _warm_ping(self) -> None:
+        self._throttle()                 # counts against the global budget (~1 req/3s)
+        self._client.get_server_time()
+
+    def close(self) -> None:
+        """Stop the keep-warm thread (called on shutdown)."""
+        w = getattr(self, "_warmer", None)
+        if w is not None:
+            w.stop()
 
     def __call__(self, action: dict) -> dict:
         kind = action.get("action")

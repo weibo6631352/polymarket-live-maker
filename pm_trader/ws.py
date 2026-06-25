@@ -79,6 +79,7 @@ class MarketChannel:
         self._levels: dict[str, dict[str, dict[float, float]]] = {}
         self._ts: dict[str, float] = {}           # token -> last update (monotonic)
         self._tokens: set[str] = set()            # desired subscription set
+        self._last_recv = 0.0                     # monotonic time of the last frame (incl. PONG)
         self._on_price = None                     # callback(token, mid) on updates
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -98,7 +99,8 @@ class MarketChannel:
 
     def handle_message(self, raw) -> None:
         """Parse one WS frame (a JSON event or array of events) into the cache.
-        Non-JSON frames (e.g. ``PONG``) are ignored."""
+        Non-JSON frames (e.g. ``PONG``) only refresh the connection-liveness clock."""
+        self._last_recv = time.monotonic()        # any frame (incl. PONG) = alive
         try:
             data = json.loads(raw)
         except (ValueError, TypeError):
@@ -179,6 +181,12 @@ class MarketChannel:
         with self._lock:
             ts = self._ts.get(token_id)
         return ts is not None and (time.monotonic() - ts) <= max_age_s
+
+    def is_live(self, max_silence_s: float = 15.0) -> bool:
+        """True if the connection got ANY frame (data or PONG, sent every 10s)
+        within ``max_silence_s``. Connection-level — a quiet-but-valid book stays
+        trusted; only a stalled/dead socket trips it (-> caller uses REST instead)."""
+        return self._last_recv > 0.0 and (time.monotonic() - self._last_recv) <= max_silence_s
 
     # -- subscription management --------------------------------------------
 

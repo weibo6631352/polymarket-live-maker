@@ -109,6 +109,13 @@ class TestMarketChannel:
         mc.handle_message(_book_msg("t2", [(0.4, 10)], [(0.6, 10)]))   # not subscribed
         assert seen == []
 
+    def test_is_live_after_message_not_before(self):
+        mc = MarketChannel()
+        assert mc.is_live() is False                 # nothing received yet -> not live
+        mc.handle_message("PONG")                    # even a PONG counts as alive
+        assert mc.is_live() is True
+        assert mc.is_live(max_silence_s=-1) is False  # any positive age exceeds -1
+
 
 class TestUserChannel:
     def _creds(self):

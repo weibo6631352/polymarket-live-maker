@@ -927,7 +927,9 @@ class Engine:
             try:
                 book = mid = None
                 src = self.book_source
-                if src is not None:                  # prefer the real-time WS cache
+                # prefer the real-time WS cache, but only while the WS connection is
+                # live (a stalled socket must not feed a stale book — fall back to REST)
+                if src is not None and (not hasattr(src, "is_live") or src.is_live()):
                     b = src.get_book(quote.token_id)
                     m = src.get_midpoint(quote.token_id)
                     if b is not None and 0.0 < m < 1.0:

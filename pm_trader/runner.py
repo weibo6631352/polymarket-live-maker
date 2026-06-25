@@ -828,6 +828,12 @@ class LiveRunner:
             self.scanner.close()
         except Exception:  # noqa: BLE001
             pass
+        closer = getattr(self.submitter, "close", None)   # stop the keep-warm thread
+        if callable(closer):
+            try:
+                closer()
+            except Exception:  # noqa: BLE001
+                pass
         log.warning("live-maker stopped.")
 
 
