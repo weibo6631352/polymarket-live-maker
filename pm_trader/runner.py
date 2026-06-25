@@ -222,6 +222,13 @@ class LiveRunner:
         else:
             rows = self.engine.accrue_maker_rewards()
         for row in rows:
+            if row.get("exit_failed"):
+                # the engine could NOT cancel/flatten the real orders — the quote is
+                # still active and tracked; surface loudly and let it retry next poll.
+                cond = row["quote"]["market_condition_id"]
+                log.error("EXIT FAILED for %s (%s) — real order/position may survive; "
+                          "retrying next poll", cond[:10], row["exit_failed"])
+                continue
             reason = row.get("reconciled")
             if reason:
                 cond = row["quote"]["market_condition_id"]

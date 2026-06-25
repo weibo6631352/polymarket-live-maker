@@ -283,7 +283,17 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         self._client = ClobClient(CLOB_HOST, **kwargs)
         # L2 API creds for authenticated order ops (derived from the key, idempotent)
         self._client.set_api_creds(self._client.create_or_derive_api_creds())
-        self._last_trade_id: str | None = None
+        # Some CLOB deployments report a trade's `side` from the TAKER's perspective.
+        # If a smoke-test shows our maker fills arrive with the inverted side (e.g. a
+        # BUY fill labelled SELL), set POLYMARKET_FILL_SIDE_INVERT=1 to correct it.
+        self._invert_side = os.environ.get("POLYMARKET_FILL_SIDE_INVERT", "0") == "1"
+        # Prime the trade cursor to the NEWEST existing trade so the first poll_fills
+        # returns only trades AFTER startup (never replays the account's history).
+        try:
+            seed = self._client.get_trades() or []
+            self._last_trade_id = (seed[0].get("id") or seed[0].get("trade_id")) if seed else None
+        except Exception:  # noqa: BLE001 — best effort; worst case first poll is empty-safe
+            self._last_trade_id = None
 
     def __call__(self, action: dict) -> dict:
         kind = action.get("action")
@@ -348,10 +358,13 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
             if not seen_new:
                 self._last_trade_id = tid
                 seen_new = True
+            side = (t.get("side") or "").upper()
+            if self._invert_side:
+                side = "SELL" if side == "BUY" else "BUY"
             out.append({
                 "id": tid,
                 "token_id": t.get("asset_id") or t.get("token_id"),
-                "side": (t.get("side") or "").upper(),
+                "side": side,
                 "size": float(t.get("size", 0) or 0),
                 "price": float(t.get("price", 0) or 0),
             })

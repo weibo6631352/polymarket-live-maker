@@ -163,6 +163,15 @@ class TestPoll:
         r.poll_once()
         assert "0xa" not in r.placed and r.cooldown.get("0xa") == 3
 
+    def test_exit_failed_keeps_pool_tracked(self):
+        # engine couldn't cancel/flatten -> quote still active; runner must NOT drop it
+        rows = [{"quote": {"market_condition_id": "0xa"}, "exit_failed": "drift_exit"}]
+        eng = FakeEngine(accrue_rows=rows)
+        r = _runner(engine=eng)
+        r.placed = {"0xa": {}}
+        r.poll_once()
+        assert "0xa" in r.placed and "0xa" not in r.cooldown
+
 
 class TestKillSwitch:
     def test_kill_on_inventory_loss(self):

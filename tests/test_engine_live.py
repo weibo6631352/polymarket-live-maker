@@ -42,15 +42,20 @@ def _mock_api(engine, *, mid=0.50, reward_config=None, book=None):
 
 
 class FakeSubmitter:
-    def __init__(self):
+    def __init__(self, fail_on=()):
         self.calls = []
+        self.fail_on = set(fail_on)
 
     def __call__(self, action):
         self.calls.append(action)
-        return {"status": "OK", **action}
+        status = "ERROR" if action["action"] in self.fail_on else "OK"
+        return {"status": status, **action}
 
     def actions(self):
         return [c["action"] for c in self.calls]
+
+    def places(self):
+        return [c for c in self.calls if c["action"] == "PLACE"]
 
 
 @pytest.fixture
@@ -73,9 +78,10 @@ class TestPlaceLive:
 
 
 class TestAccrueLive:
-    def _place(self, eng, sub, mid=0.50):
+    def _place(self, eng, sub, mid=0.50, max_inventory=None):
         _mock_api(eng, mid=mid)
-        eng.place_maker_quote_live("0xabc", submitter=sub, half_spread_cents=1.0)
+        eng.place_maker_quote_live("0xabc", submitter=sub, half_spread_cents=1.0,
+                                   max_inventory=max_inventory)
 
     def test_reconcile_exit_when_rewards_end(self, eng):
         sub = FakeSubmitter()
@@ -131,3 +137,50 @@ class TestAccrueLive:
         eng.api.get_midpoint = MagicMock(return_value=0.55)
         eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={})
         assert "FLATTEN" in sub.actions() and "CANCEL_ALL" in sub.actions()
+
+    # -- H1: a failed cancel/flatten must NOT zero the ledger / mark exited --------
+    def test_exit_failure_keeps_quote_active(self, eng):
+        sub = FakeSubmitter(fail_on={"CANCEL_ALL"})
+        self._place(eng, sub)                       # PLACE ok
+        eng.api.get_midpoint = MagicMock(return_value=0.55)  # drift
+        rows = eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={})
+        assert rows[0].get("exit_failed") == "drift_exit"
+        assert eng.get_maker_summary()["active_quotes"] == 1   # still managed, not exited
+
+    def test_reconcile_failure_keeps_quote_active(self, eng):
+        sub = FakeSubmitter(fail_on={"CANCEL_ALL"})
+        self._place(eng, sub)
+        eng.api.get_reward_config = MagicMock(return_value=None)
+        rows = eng.accrue_maker_rewards_live(submitter=sub, fills_by_token={})
+        assert rows[0].get("exit_failed") == "rewards_ended"
+        assert eng.get_maker_summary()["active_quotes"] == 1
+
+    # -- M1: fill-price P&L is booked (kill-switch sees the real edge/cost) --------
+    def test_fill_price_pnl_booked(self, eng):
+        sub = FakeSubmitter()
+        self._place(eng, sub)                       # entry mid 0.50
+        # bought 50 @ 0.49 vs mid 0.50 -> +0.5 mark
+        eng.accrue_maker_rewards_live(
+            submitter=sub,
+            fills_by_token={"tok_yes": [{"side": "BUY", "size": 50, "price": 0.49}]})
+        assert eng.get_maker_summary()["inventory_pnl"] > 0
+
+    # -- M2: real inventory not clamped; quote goes one-sided at the cap -----------
+    def test_inventory_not_clamped_past_cap(self, eng):
+        sub = FakeSubmitter()
+        self._place(eng, sub, max_inventory=50.0)   # cap = 50 shares
+        rows = eng.accrue_maker_rewards_live(
+            submitter=sub,
+            fills_by_token={"tok_yes": [{"side": "BUY", "size": 60, "price": 0.50}]})
+        assert rows[0]["inventory"] == 60.0          # true position, NOT clamped to 50
+
+    def test_one_sided_quote_at_cap(self, eng):
+        sub = FakeSubmitter()
+        self._place(eng, sub, max_inventory=50.0)
+        sub.calls.clear()
+        eng.api.get_midpoint = MagicMock(return_value=0.52)   # tick move -> re-center
+        eng.accrue_maker_rewards_live(
+            submitter=sub,
+            fills_by_token={"tok_yes": [{"side": "BUY", "size": 60, "price": 0.50}]})
+        places = sub.places()
+        assert len(places) == 1 and places[0]["side"] == "SELL"  # only the flattening side

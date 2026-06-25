@@ -1001,13 +1001,25 @@ class Engine:
     # paper methods above are untouched (PM_TRADER_LIVE-gated submitter only).
     # ------------------------------------------------------------------
 
-    def _flatten_live(self, submitter, token_id: str, inventory: float) -> None:
-        """Market-out a real net inventory to go flat (long -> SELL, short -> BUY)."""
+    @staticmethod
+    def _action_ok(res) -> bool:
+        """A submitter result counts as success unless it explicitly errored.
+
+        ``None`` (nothing to do) is success; a dict with status ERROR/REJECTED is a
+        failure (so we never mark the ledger flat/exited while a real order or
+        position actually survived)."""
+        if isinstance(res, dict):
+            return res.get("status") not in ("ERROR", "REJECTED")
+        return True
+
+    def _flatten_live(self, submitter, token_id: str, inventory: float):
+        """Market-out a real net inventory to go flat (long -> SELL, short -> BUY).
+        Returns the submitter result (or ``None`` when already flat)."""
         if abs(inventory) < 1e-9:
-            return
+            return None
         side = "SELL" if inventory > 0 else "BUY"
-        submitter({"action": "FLATTEN", "token_id": token_id,
-                   "side": side, "size": abs(inventory)})
+        return submitter({"action": "FLATTEN", "token_id": token_id,
+                          "side": side, "size": abs(inventory)})
 
     def place_maker_quote_live(
         self, slug_or_id: str, *, submitter, outcome: str = "yes",
@@ -1055,8 +1067,14 @@ class Engine:
             daily_rate = pool["daily"] if pool else 0.0
             # 1. RECONCILE — pool left the program / resolved -> cancel + flatten + exit
             if pool is None or daily_rate <= 0:
-                submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
-                self._flatten_live(submitter, quote.token_id, quote.inventory)
+                c = submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
+                f = self._flatten_live(submitter, quote.token_id, quote.inventory)
+                if not (self._action_ok(c) and self._action_ok(f)):
+                    # real cancel/flatten FAILED -> do NOT mark the ledger flat/exited;
+                    # keep the quote active so the position stays tracked + retried.
+                    results.append({"quote": _maker_quote_to_dict(quote),
+                                    "exit_failed": "rewards_ended", "mid": quote.last_mid})
+                    continue
                 self._exit_maker_quote(quote, quote.last_mid, "rewards_ended", results)
                 continue
             try:
@@ -1075,57 +1093,85 @@ class Engine:
                 quote.size, quote.half_spread_c, quote.max_spread_c, existing_qmin)
             reward = reward_accrual(share, daily_rate, seconds)
 
-            # 3. REAL fills -> inventory (replaces the maker_fill simulation)
+            # 3. REAL fills -> inventory (replaces the maker_fill simulation). Track
+            #    the TRUE (unclamped) position for flatten/exit sizing, and book each
+            #    fill's P&L against the current mid (cost basis = fill price); the cap
+            #    only shapes the skew / one-sided quoting below, it never hides shares.
             cap = quote.max_inventory if quote.max_inventory > 0 else MAKER_CAP_MULT * quote.size
             d_inv = 0.0
+            fill_pnl = 0.0
             n_fills = 0
             for f in fills_by_token.get(quote.token_id, []):
-                d_inv += (1.0 if str(f["side"]).upper() == "BUY" else -1.0) * float(f["size"])
+                sgn = 1.0 if str(f["side"]).upper() == "BUY" else -1.0
+                sz = float(f["size"])
+                d_inv += sgn * sz
+                fill_pnl += sgn * (mid - float(f.get("price", mid))) * sz
                 n_fills += 1
-            new_inventory = max(-cap, min(cap, quote.inventory + d_inv))
+            new_inventory = quote.inventory + d_inv          # raw real position
             held_mtm = quote.inventory * (mid - quote.last_mid)
+            pnl_delta = held_mtm + fill_pnl
+            skew_ratio = max(-1.0, min(1.0, new_inventory / cap)) if cap > 0 else 0.0
 
             # 4. DRIFT-EXIT — a full-band move from entry -> flatten + cancel + exit
             entry_mid = quote.entry_mid if quote.entry_mid > 0 else mid
             if abs(mid - entry_mid) >= quote.max_spread_c / 100.0:
-                submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
-                self._flatten_live(submitter, quote.token_id, new_inventory)
-                self._credit_maker(reward + held_mtm)
+                c = submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
+                f = self._flatten_live(submitter, quote.token_id, new_inventory)
+                self._credit_maker(reward + pnl_delta)
+                if not (self._action_ok(c) and self._action_ok(f)):
+                    # exit FAILED -> keep the quote ACTIVE with its real inventory and
+                    # retry next poll (never zero a position we couldn't actually flatten).
+                    update_maker_quote_accrual(
+                        self.db.conn, quote.id,
+                        accrued_rewards=quote.accrued_rewards + reward,
+                        realized_bleed=quote.realized_bleed, fills=quote.fills + n_fills,
+                        last_mid=mid, last_accrued_at=now_dt.isoformat(),
+                        inventory=new_inventory, inventory_pnl=quote.inventory_pnl + pnl_delta)
+                    results.append({"quote": _maker_quote_to_dict(quote),
+                                    "exit_failed": "drift_exit", "mid": mid,
+                                    "inventory": round(new_inventory, 4)})
+                    continue
                 final = update_maker_quote_accrual(
                     self.db.conn, quote.id,
                     accrued_rewards=quote.accrued_rewards + reward,
                     realized_bleed=quote.realized_bleed, fills=quote.fills + n_fills,
                     last_mid=mid, last_accrued_at=now_dt.isoformat(), inventory=0.0,
-                    inventory_pnl=quote.inventory_pnl + held_mtm)
+                    inventory_pnl=quote.inventory_pnl + pnl_delta)
                 self._exit_maker_quote(final, mid, "drift_exit", results,
-                                       reward=reward, inventory_pnl_delta=held_mtm,
+                                       reward=reward, inventory_pnl_delta=pnl_delta,
                                        share=share, seconds=seconds)
                 continue
 
-            # 5. RE-CENTER — cancel + repost the inventory-skewed quote on a tick move
-            skew = (quote.skew_strength * max(-1.0, min(1.0, new_inventory / cap))
-                    if cap > 0 else 0.0)
+            # 5. RE-CENTER — cancel + repost the inventory-skewed quote on a tick move.
+            #    At/over the cap, quote ONE-SIDED (only the flattening side) so we stop
+            #    adding to an over-cap position.
+            skew = quote.skew_strength * skew_ratio
             submitted: list = []
             if abs(mid - quote.last_mid) >= quote.tick:
                 submitter({"action": "CANCEL_ALL", "token_id": quote.token_id})
-                for o in compute_two_sided_quotes(
+                orders = compute_two_sided_quotes(
                     mid, half_spread_c=quote.half_spread_c, size=quote.size,
-                    tick=quote.tick, max_spread_c=quote.max_spread_c, skew_ticks=skew):
+                    tick=quote.tick, max_spread_c=quote.max_spread_c, skew_ticks=skew)
+                if new_inventory >= cap:
+                    orders = [o for o in orders if o["side"] == "SELL"]
+                elif new_inventory <= -cap:
+                    orders = [o for o in orders if o["side"] == "BUY"]
+                for o in orders:
                     submitted.append(
                         submitter({"action": "PLACE", "token_id": quote.token_id, **o}))
 
             # 6. accrue to the ledger
-            self._credit_maker(reward + held_mtm)
+            self._credit_maker(reward + pnl_delta)
             updated = update_maker_quote_accrual(
                 self.db.conn, quote.id,
                 accrued_rewards=quote.accrued_rewards + reward,
                 realized_bleed=quote.realized_bleed, fills=quote.fills + n_fills,
                 last_mid=mid, last_accrued_at=now_dt.isoformat(),
-                inventory=new_inventory, inventory_pnl=quote.inventory_pnl + held_mtm)
+                inventory=new_inventory, inventory_pnl=quote.inventory_pnl + pnl_delta)
             results.append({
                 "quote": _maker_quote_to_dict(updated), "reward": round(reward, 6),
                 "inventory": round(new_inventory, 4),
-                "inventory_pnl_delta": round(held_mtm, 6), "share": round(share, 6),
+                "inventory_pnl_delta": round(pnl_delta, 6), "share": round(share, 6),
                 "seconds": round(seconds, 2), "mid": mid, "submitted": submitted,
                 "fills_applied": n_fills,
             })
