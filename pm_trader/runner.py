@@ -140,6 +140,11 @@ class RunnerConfig:
     # up is a conscious risk choice; the safe default stays min_size.
     deploy_capital: bool = False
     size_share_cap: float = 0.33       # cap est per-pool share when sizing up (stay productive)
+    # GTD dead-man's switch (seconds). >0: live orders auto-expire after this long, so a
+    # process/server outage can't leave un-cancellable resting orders to be picked off
+    # while we're dark. The poll loop re-places at half this interval so online pools
+    # stay covered. 0 = GTC (current). Set on the SUBMITTER too via LM_ORDER_EXPIRY_S.
+    order_expiry_s: float = 0.0
     # how hard selection penalises a CHOPPY (high daily_vol) book, 0..1. Continuous
     # chop IS cancellable, so a fast canceller can tolerate more than a slow poller.
     # But our real cancel-efficiency is UNMEASURED until we have live fills, so the
@@ -212,6 +217,7 @@ class RunnerConfig:
             chop_aversion=_f("LM_CHOP_AVERSION", 0.7),
             deploy_capital=os.environ.get("LM_DEPLOY_CAPITAL", "0").strip() == "1",
             size_share_cap=_f("LM_SIZE_SHARE_CAP", 0.33),
+            order_expiry_s=_f("LM_ORDER_EXPIRY_S", 0.0),
             max_mid_vel_cps=_f("LM_MAX_MID_VEL_CPS", 4.0),
             min_hold_s=_f("LM_MIN_HOLD_S", 600.0),
             min_wallet_usdc=_f("LM_MIN_WALLET_USDC", 0.0),
@@ -274,6 +280,7 @@ class LiveRunner:
         self._stats_granted: tuple[float, float] = (0.0, 0.0)  # (granted, granted_low)
         self._mid_hist: dict[str, deque] = {}      # token -> recent (ts, mid) for velocity
         self._ws_upd_at: dict[str, tuple[float, int]] = {}  # token -> (ts, update count)
+        self._refresh_at: dict[str, float] = {}    # token -> last GTD re-place (dead-man refresh)
         # WS reflex: cancel a held pool's orders the instant its mid moves beyond the
         # band (decoupled from accounting; the next poll reposts via force_recenter).
         self._reflex_refs: dict[str, tuple[float, float]] = {}  # token -> (mid, band)
@@ -954,6 +961,20 @@ class LiveRunner:
             with self._reflex_lock:               # reflex-pulled tokens -> force repost
                 forced = self._reflex_cancelled
                 self._reflex_cancelled = set()
+            if self.cfg.order_expiry_s > 0:       # GTD dead-man refresh: re-place before
+                interval = self.cfg.order_expiry_s / 2.0   # expiry so online pools stay covered
+                nowm = time.monotonic()
+                held = {m.get("token") for m in self.placed.values() if m.get("token")}
+                for tok in held:
+                    last = self._refresh_at.get(tok)
+                    if last is None:
+                        self._refresh_at[tok] = nowm       # just placed -> start the clock
+                    elif nowm - last >= interval:
+                        forced.add(tok)                    # due -> re-place (fresh expiry)
+                        self._refresh_at[tok] = nowm
+                for tok in list(self._refresh_at):         # prune released tokens
+                    if tok not in held:
+                        self._refresh_at.pop(tok, None)
             rows = self.engine.accrue_maker_rewards_live(
                 submitter=self.submitter, fills_by_token=fills_by_token,
                 recenter_ticks=self.cfg.recenter_ticks, force_recenter=forced)

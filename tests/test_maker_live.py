@@ -175,3 +175,15 @@ class TestLiveMakerBot:
         out2 = bot.step(_book(0.60, 0.62), 0.61)
         assert out2["halted"] is True
         assert out2["submitted"] == []
+
+
+class TestGtdExpiration:
+    def test_adds_expiry_to_now(self):
+        from pm_trader.maker_live import _gtd_expiration
+        assert _gtd_expiration(300, 1_000_000) == 1_000_300
+
+    def test_floors_at_60s_pm_threshold(self):
+        from pm_trader.maker_live import _gtd_expiration
+        # too-short config can't make orders bounce inside PM's ~1-min GTD threshold
+        assert _gtd_expiration(5, 1_000_000) == 1_000_060
+        assert _gtd_expiration(0, 1_000_000) == 1_000_060

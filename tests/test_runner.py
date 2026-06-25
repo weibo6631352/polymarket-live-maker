@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from pm_trader.runner import LiveRunner, RunnerConfig, load_dotenv
 
 
@@ -460,6 +462,25 @@ class TestReflex:
         r.poll_once()
         assert eng.last_force_recenter == {"tok"}   # forwarded to the engine
         assert r._reflex_cancelled == set()         # consumed
+
+    def test_dead_man_refresh_replaces_aged_orders(self):
+        eng = FakeEngine()
+        eng.quotes = [{"id": 1, "market_condition_id": "0xa", "token_id": "tok",
+                       "inventory": 0.0, "tick": 0.01, "last_mid": 0.5}]
+        r = _runner(engine=eng, submitter=FakeSubmitter(), order_expiry_s=120.0)
+        r.placed = {"0xa": {"token": "tok"}}
+        r._refresh_at = {"tok": time.monotonic() - 999}   # older than expiry/2 = 60s -> due
+        r.poll_once()
+        assert "tok" in (eng.last_force_recenter or set())  # re-placed before expiry
+
+    def test_dead_man_refresh_skips_fresh_orders(self):
+        eng = FakeEngine()
+        eng.quotes = [{"id": 1, "market_condition_id": "0xa", "token_id": "tok",
+                       "inventory": 0.0, "tick": 0.01, "last_mid": 0.5}]
+        r = _runner(engine=eng, submitter=FakeSubmitter(), order_expiry_s=120.0)
+        r.placed = {"0xa": {"token": "tok"}}
+        r.poll_once()                                # first sight -> start clock, don't force
+        assert "tok" not in (eng.last_force_recenter or set())
 
 
 class TestPollEventThrottle:

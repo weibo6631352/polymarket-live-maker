@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections import deque
 
 from pm_trader.models import ApiError, OrderBook
@@ -295,7 +296,8 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
 
     Callable as ``submitter(action)`` so it drops straight into ``LiveMakerBot``'s
     ``submitter`` slot (same interface as the dry-run echo). Actions:
-      - ``{"action": "PLACE", "token_id", "side", "price", "size"}`` -> GTC limit order
+      - ``{"action": "PLACE", "token_id", "side", "price", "size"}`` -> resting limit
+        order (GTC, or GTD with auto-expiry if LM_ORDER_EXPIRY_S > 0)
       - ``{"action": "CANCEL_ALL", "token_id"}``                     -> cancel that token's orders
 
     It also tracks live order ids per token and exposes :meth:`poll_fills` (polls
@@ -310,6 +312,11 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         # shared TokenBucket so order ops + fill polls share the global req/s budget
         # with the read path. None = unlimited.
         self.rate_limiter = rate_limiter
+        # GTD dead-man's switch: >0 places orders that auto-expire after this many
+        # seconds, so a process/server outage can't leave un-cancellable resting
+        # orders to be picked off. 0 = GTC (rest until we cancel). The runner re-places
+        # well before expiry so online pools stay covered.
+        self._expiry_s = max(0.0, float(os.environ.get("LM_ORDER_EXPIRY_S", "0") or 0))
         if os.environ.get("PM_TRADER_LIVE") != "1":
             raise ApiError("Refusing live signer: set PM_TRADER_LIVE=1 to opt in")
         pk = os.environ.get("POLYMARKET_PRIVATE_KEY")
@@ -378,15 +385,23 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
         return {"status": "IGNORED", **action}
 
     def _place(self, token_id, side, price, size) -> dict:
-        # RECOMMENDED one-step helper; posts GTC (a resting maker quote). create_order
-        # auto-resolves tick_size + neg_risk + fee and validates the price.
+        # create_order/create_and_post_order auto-resolve tick_size + neg_risk + fee
+        # and validate the price.
         from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
 
         self._throttle()
-        resp = self._client.create_and_post_order(OrderArgs(
-            token_id=token_id, price=float(price), size=float(size),
-            side=(BUY if str(side).upper() == "BUY" else SELL)))
+        s = BUY if str(side).upper() == "BUY" else SELL
+        if self._expiry_s > 0:
+            # GTD dead-man's switch: PM auto-cancels at `expiration` even if we go dark.
+            from py_clob_client.clob_types import OrderType
+            signed = self._client.create_order(OrderArgs(
+                token_id=token_id, price=float(price), size=float(size), side=s,
+                expiration=_gtd_expiration(self._expiry_s, time.time())))
+            resp = self._client.post_order(signed, OrderType.GTD)
+        else:
+            resp = self._client.create_and_post_order(OrderArgs(  # GTC: rests until cancel
+                token_id=token_id, price=float(price), size=float(size), side=s))
         r = resp or {}
         oid = r.get("orderID") or r.get("order_id")
         status = str(r.get("status", "")).strip().lower()
@@ -533,6 +548,14 @@ class ClobSubmitter:  # pragma: no cover - requires external lib + live creds
                 "price": float(t.get("price", 0) or 0),
             })
         return out
+
+
+def _gtd_expiration(expiry_s: float, now_unix: float) -> int:
+    """Unix-seconds expiration for a GTD 'dead-man' order. Floored at 60s — Polymarket
+    rejects GTD orders inside its ~1-min security threshold, so a too-short config
+    can't make orders bounce. The order auto-cancels at this time even if our process
+    or whole server dies, bounding offline pick-off exposure to ``expiry_s``."""
+    return int(now_unix) + max(int(expiry_s), 60)
 
 
 def build_clob_signer(rate_limiter=None):  # pragma: no cover - requires lib + live creds
