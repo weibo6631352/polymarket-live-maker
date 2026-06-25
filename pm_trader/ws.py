@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import deque
+from urllib.parse import urlparse
 
 from pm_trader.models import OrderBook, OrderBookLevel
 
@@ -30,6 +32,27 @@ USER_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 _PING_INTERVAL_S = 10.0   # docs: send "PING" every 10s, server replies "PONG"
 
 log = logging.getLogger("pm_trader.ws")
+
+
+def _proxy_kwargs(proxy_url: str | None) -> dict:
+    """Parse a proxy URL into websocket-client create_connection kwargs, or {}.
+
+    Default is DIRECT (works from non-geo-blocked locations, e.g. Ireland). Set
+    ``LM_WS_PROXY`` (http://host:port or socks5://host:port) to route WS through a
+    proxy — SOCKS needs the ``python-socks`` package.
+    """
+    if not proxy_url:
+        return {}
+    u = urlparse(proxy_url)
+    if not u.hostname or not u.port:
+        return {}
+    ptype = {"socks5": "socks5", "socks5h": "socks5h", "socks4": "socks4",
+             "http": "http", "https": "http"}.get((u.scheme or "http").lower(), "http")
+    kw: dict = {"http_proxy_host": u.hostname, "http_proxy_port": u.port,
+                "proxy_type": ptype}
+    if u.username:
+        kw["http_proxy_auth"] = (u.username, u.password or "")
+    return kw
 
 
 def _f(x, default=0.0):
@@ -47,8 +70,10 @@ class MarketChannel:
     snapshot yet (just subscribed) so the caller falls back to REST.
     """
 
-    def __init__(self, url: str = MARKET_WS) -> None:
+    def __init__(self, url: str = MARKET_WS, proxy: str | None = None) -> None:
         self.url = url
+        self._proxy = _proxy_kwargs(proxy if proxy is not None
+                                    else os.environ.get("LM_WS_PROXY"))
         self._lock = threading.Lock()
         # token -> {"bids": {price: size}, "asks": {price: size}}
         self._levels: dict[str, dict[str, dict[float, float]]] = {}
@@ -203,12 +228,20 @@ class MarketChannel:
     def _run(self) -> None:  # pragma: no cover - needs a live WS
         import websocket  # lazy: only the live path needs the dep
         while not self._stop.is_set():
+            with self._lock:
+                have_tokens = bool(self._tokens)
+            if not have_tokens:
+                self._stop.wait(0.5)        # nothing subscribed -> don't hold an idle conn
+                continue
             try:
-                self._ws = websocket.create_connection(self.url, timeout=15)
+                self._ws = websocket.create_connection(self.url, timeout=15, **self._proxy)
                 self._ws.settimeout(1.0)
                 self._resubscribe()
                 last_ping = time.monotonic()
                 while not self._stop.is_set():
+                    with self._lock:
+                        if not self._tokens:
+                            break            # all unsubscribed -> drop the connection
                     now = time.monotonic()
                     if now - last_ping >= _PING_INTERVAL_S:
                         self._ws.send("PING")
@@ -241,9 +274,11 @@ class UserChannel:
     """
 
     def __init__(self, creds: dict, condition_ids=None, *, url: str = USER_WS,
-                 invert_side: bool = False) -> None:
+                 invert_side: bool = False, proxy: str | None = None) -> None:
         # creds: {"apiKey","secret","passphrase"}
         self.url = url
+        self._proxy = _proxy_kwargs(proxy if proxy is not None
+                                    else os.environ.get("LM_WS_PROXY"))
         self.creds = creds
         self._invert = invert_side
         self._lock = threading.Lock()
@@ -331,12 +366,17 @@ class UserChannel:
     def _run(self) -> None:  # pragma: no cover - needs a live WS
         import websocket
         while not self._stop.is_set():
+            if not self._markets:
+                self._stop.wait(0.5)        # no markets yet -> don't hold an idle conn
+                continue
             try:
-                self._ws = websocket.create_connection(self.url, timeout=15)
+                self._ws = websocket.create_connection(self.url, timeout=15, **self._proxy)
                 self._ws.settimeout(1.0)
                 self._resubscribe()
                 last_ping = time.monotonic()
                 while not self._stop.is_set():
+                    if not self._markets:
+                        break               # nothing to watch -> drop the connection
                     now = time.monotonic()
                     if now - last_ping >= _PING_INTERVAL_S:
                         self._ws.send("PING")

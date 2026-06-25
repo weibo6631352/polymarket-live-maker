@@ -4,7 +4,26 @@ from __future__ import annotations
 
 import json
 
-from pm_trader.ws import MarketChannel, UserChannel
+from pm_trader.ws import MarketChannel, UserChannel, _proxy_kwargs
+
+
+class TestProxyKwargs:
+    def test_none_and_empty(self):
+        assert _proxy_kwargs(None) == {}
+        assert _proxy_kwargs("") == {}
+
+    def test_socks5(self):
+        kw = _proxy_kwargs("socks5://127.0.0.1:1080")
+        assert kw == {"http_proxy_host": "127.0.0.1", "http_proxy_port": 1080,
+                      "proxy_type": "socks5"}
+
+    def test_http_with_auth(self):
+        kw = _proxy_kwargs("http://user:pass@proxy.local:8080")
+        assert kw["http_proxy_host"] == "proxy.local" and kw["http_proxy_port"] == 8080
+        assert kw["proxy_type"] == "http" and kw["http_proxy_auth"] == ("user", "pass")
+
+    def test_missing_port_ignored(self):
+        assert _proxy_kwargs("socks5://hostonly") == {}
 
 
 def _book_msg(token, bids, asks):

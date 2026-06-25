@@ -34,6 +34,7 @@ live = [
     "py-clob-client>=0.34",
     "socksio>=1.0",            # httpx SOCKS proxy support (reaching the CLOB via proxy)
     "websocket-client>=1.7",   # real-time WS market + user channels (ws.py)
+    "python-socks>=2.0",       # SOCKS support for the WS channels (LM_WS_PROXY=socks5://...)
 ]
 dev = [
     "pytest>=8.0",
