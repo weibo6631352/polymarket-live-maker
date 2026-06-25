@@ -6,6 +6,7 @@ the API client, order book simulator, and database layer.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,6 +68,11 @@ MAKER_SKEW_STRENGTH = 1.0  # default inventory-skew lean (offsets per size-unit)
 # Cap a single live accrual interval so a restart after long downtime (stale
 # last_accrued_at) can't credit a bogus multi-hour reward in one poll.
 MAX_ACCRUAL_SECONDS = 600.0
+
+# Concurrency cap for the per-pool network prefetch in the maker poll. The reads
+# are I/O-bound (httpx.Client multiplexes), so threads beat a serial loop without
+# burning CPU; bounded so a large book can't spawn an unbounded thread fan-out.
+MAKER_PREFETCH_WORKERS = 16
 
 # Errors that indicate an order is permanently unfillable (not transient)
 _PERMANENT_ORDER_ERRORS = (
@@ -883,6 +889,51 @@ class Engine:
         self._record_equity()
         return _maker_quote_to_dict(updated)
 
+    def _prefetch_quote_reads(self, quotes: list) -> dict:
+        """Fetch each active quote's (reward_config, book, midpoint) CONCURRENTLY.
+
+        These three CLOB GETs per pool are the maker poll's only blocking I/O and
+        are independent across pools, so the serial-per-pool loop they used to live
+        in made a cycle's wall-time grow linearly with the book size — directly
+        throttling the cancel latency that IS the strategy's profit lever. Fetching
+        them up front in a threadpool collapses that to roughly one round-trip's
+        wait regardless of pool count. It is thread-safe: httpx.Client multiplexes
+        the connections and none of these endpoints touch SQLite (they are the
+        'never cached' reads). The decision / order-submit / ledger-write loop that
+        consumes the results stays fully serial on the main thread (sqlite is
+        single-threaded; submission order is preserved).
+
+        Returns ``{quote.id: {"config_ok", "pool", "book_ok", "book", "mid"}}``.
+        Read failures become ``*_ok=False`` so the consumer skips that pool exactly
+        as the old per-pool ``try/except: continue`` did. Book/mid are fetched only
+        when the pool is still paying — mirroring the old ordering (a reconcile/exit
+        pool never read its book), so per-endpoint call counts are unchanged.
+        """
+        def _read_one(quote) -> dict:
+            out = {"config_ok": False, "pool": None, "book_ok": False,
+                   "book": None, "mid": None}
+            try:
+                out["pool"] = self.api.get_reward_config(quote.market_condition_id)
+                out["config_ok"] = True
+            except Exception:
+                return out  # transient — caller retries next poll
+            pool = out["pool"]
+            if pool is None or (pool.get("daily", 0.0) or 0.0) <= 0:
+                return out  # reconcile/exit path needs no book or mid
+            try:
+                out["book"] = self.api.get_order_book(quote.token_id)
+                out["mid"] = self.api.get_midpoint(quote.token_id)
+                out["book_ok"] = True
+            except Exception:
+                pass  # transient — caller skips this pool this poll
+            return out
+
+        if not quotes:
+            return {}
+        workers = min(MAKER_PREFETCH_WORKERS, len(quotes))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return dict(zip((q.id for q in quotes), ex.map(_read_one, quotes)))
+
     def accrue_maker_rewards(self, now: datetime | None = None) -> list[dict]:
         """Advance every active maker quote one inventory-aware poll.
 
@@ -904,11 +955,13 @@ class Engine:
         self._require_account()
         now_dt = _utcnow(now)
         results: list[dict] = []
-        for quote in get_active_maker_quotes(self.db.conn):
-            try:
-                pool = self.api.get_reward_config(quote.market_condition_id)
-            except Exception:
+        quotes = list(get_active_maker_quotes(self.db.conn))
+        reads = self._prefetch_quote_reads(quotes)  # concurrent config+book+mid
+        for quote in quotes:
+            r = reads.get(quote.id) or {}
+            if not r.get("config_ok"):
                 continue  # transient API/network error — retry next poll
+            pool = r["pool"]
             daily_rate = pool["daily"] if pool else 0.0
             if pool is None or daily_rate <= 0:
                 # rewards ended / market resolved → flatten, free capital, stop
@@ -916,11 +969,10 @@ class Engine:
                     quote, quote.last_mid, "rewards_ended", results,
                     crossing_cost=self.maker_crossing_cost_c / 100.0 * abs(quote.inventory))
                 continue
-            try:
-                book = self.api.get_order_book(quote.token_id)
-                mid = self.api.get_midpoint(quote.token_id)
-            except Exception:
+            if not r.get("book_ok"):
                 continue  # transient API/network error — retry next poll
+            book = r["book"]
+            mid = r["mid"]
             if not (0.0 < mid < 1.0):
                 continue
 
@@ -1100,11 +1152,13 @@ class Engine:
         fills_by_token = fills_by_token or {}
         now_dt = _utcnow(now)
         results: list[dict] = []
-        for quote in get_active_maker_quotes(self.db.conn):
-            try:
-                pool = self.api.get_reward_config(quote.market_condition_id)
-            except Exception:
+        quotes = list(get_active_maker_quotes(self.db.conn))
+        reads = self._prefetch_quote_reads(quotes)  # concurrent config+book+mid
+        for quote in quotes:
+            r = reads.get(quote.id) or {}
+            if not r.get("config_ok"):
                 continue  # transient — retry next poll
+            pool = r["pool"]
             daily_rate = pool["daily"] if pool else 0.0
             # 1. RECONCILE — pool left the program / resolved -> cancel + flatten + exit
             if pool is None or daily_rate <= 0:
@@ -1144,11 +1198,10 @@ class Engine:
                 self._exit_maker_quote(final, quote.last_mid, "rewards_ended", results,
                                        inventory_pnl_delta=rd_pnl)
                 continue
-            try:
-                book = self.api.get_order_book(quote.token_id)
-                mid = self.api.get_midpoint(quote.token_id)
-            except Exception:
-                continue
+            if not r.get("book_ok"):
+                continue  # transient book/mid read failure — retry next poll
+            book = r["book"]
+            mid = r["mid"]
             if not (0.0 < mid < 1.0):
                 continue
             last_dt = datetime.fromisoformat(quote.last_accrued_at)

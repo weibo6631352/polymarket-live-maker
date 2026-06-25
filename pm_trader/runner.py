@@ -20,7 +20,9 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,6 +33,11 @@ from pm_trader.portfolio import select_pools
 from pm_trader.rewards import RewardsClient, reward_share, scan, score_pool
 
 log = logging.getLogger("pm_trader.runner")
+
+# Concurrency cap for the held-pool re-score fetch in reevaluate_held(). Each
+# held pool's re-score is 3 independent read-only CLOB GETs; fetching the held
+# book concurrently keeps the reeval beat from stalling the loop as the book grows.
+REEVAL_WORKERS = 16
 
 
 def load_dotenv(path: str | os.PathLike = ".env") -> None:
@@ -149,6 +156,9 @@ class LiveRunner:
         self._last_scan_ok: float | None = None  # monotonic time of last good discovery
         self._stop = False
         self._kill_reason = ""
+        # background discovery: the heavy reward-universe scan runs off the hot loop
+        self._discovery_thread: threading.Thread | None = None
+        self._discovery_stop = threading.Event()
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -174,9 +184,11 @@ class LiveRunner:
             if reason:
                 self.trip_kill(reason)
                 return
-            self.rediscover()
+            self.rediscover()                  # initial SYNC scan so reselect has data
             self.reselect()
-            last_discovery = last_reeval = time.monotonic()
+            self._start_discovery_thread()     # subsequent scans run OFF the hot loop
+            last_reeval = time.monotonic()
+            next_poll = time.monotonic()
 
             while not self._stop:
                 reason = self._kill_check()
@@ -184,18 +196,30 @@ class LiveRunner:
                     self.trip_kill(reason)
                     break
                 now = time.monotonic()
-                refreshed = False
-                if now - last_discovery >= self.cfg.discovery_interval_s:
-                    self.rediscover()           # full universe re-scan
-                    last_discovery = now
-                    refreshed = True
-                if refreshed or (now - last_reeval >= self.cfg.reeval_interval_s):
+                # Discovery now runs on a background thread (keeps self.report +
+                # _last_scan_ok fresh); the loop only does reeval/reselect on their
+                # own beat and the fast poll. reselect reads the latest bg scan.
+                if now - last_reeval >= self.cfg.reeval_interval_s:
                     self._tick_cooldowns()      # tick on the reeval beat (gates re-entry)
                     self.reevaluate_held()      # degradation exit + opportunity rotation
                     self.reselect()             # redeploy freed capital
                     last_reeval = now
                 self.poll_once()
-                self._sleep_fn(self.cfg.poll_seconds)
+                # DEADLINE scheduling: sleep only the time this cycle's work did NOT
+                # already consume, instead of a fixed sleep stacked on top of it. The
+                # heartbeat — and therefore cancel latency, the profit lever — stays a
+                # true poll_seconds as the book grows. If a cycle overruns the budget
+                # (book too large / network slow), sleep 0, warn, and re-anchor rather
+                # than drift ever further behind.
+                next_poll += self.cfg.poll_seconds
+                delay = next_poll - time.monotonic()
+                if delay < 0:
+                    log.warning("poll cycle overran the %.0fs budget by %.1fs — not "
+                                "sleeping (consider fewer pools or faster network)",
+                                self.cfg.poll_seconds, -delay)
+                    next_poll = time.monotonic()   # re-anchor the cadence
+                    delay = 0.0
+                self._sleep_fn(delay)
         finally:
             self._shutdown()   # ALWAYS cancel/flatten on any exit (kill, signal, crash)
 
@@ -284,6 +308,26 @@ class LiveRunner:
 
     # -- discovery / selection ---------------------------------------------
 
+    def _start_discovery_thread(self) -> None:
+        """Run the heavy reward-universe scan on a BACKGROUND thread so it never
+        blocks the poll/cancel loop. The scan (seconds long, every
+        ``discovery_interval_s``) updates ``self.report`` + ``self._last_scan_ok``;
+        the main loop reads them (atomic reference swap under the GIL — no lock
+        needed). The initial scan already ran synchronously in :meth:`run`, so the
+        thread WAITS before its first scan. Disabled when the interval is <= 0."""
+        if self.cfg.discovery_interval_s <= 0:
+            return
+
+        def _loop() -> None:
+            while not self._discovery_stop.is_set():
+                if self._discovery_stop.wait(self.cfg.discovery_interval_s):
+                    break                       # stop signalled during the wait
+                self.rediscover()               # own try/except + staleness guard
+
+        self._discovery_thread = threading.Thread(
+            target=_loop, name="discovery", daemon=True)
+        self._discovery_thread.start()
+
     def rediscover(self) -> None:
         try:
             self.report = scan(self.scanner, min_daily=self.cfg.min_daily,
@@ -368,6 +412,9 @@ class LiveRunner:
         quotes_by_cond = {q["market_condition_id"]: q
                           for q in self.engine.get_maker_quotes()}
         now = time.monotonic()
+        # Build the worklist on the main thread (DB read + anti-churn gating); drop
+        # held pools the engine already exited.
+        worklist: list[tuple[str, dict]] = []
         for cond, pool in list(self.placed.items()):
             q = quotes_by_cond.get(cond)
             if q is None:                       # engine already exited it (reconcile/drift)
@@ -376,8 +423,22 @@ class LiveRunner:
                 continue
             if now - self.placed_at.get(cond, 0.0) < self.cfg.min_hold_s:
                 continue                        # anti-churn: respect the minimum hold
-            fresh = self._rescore(cond, q["token_id"], own_size=q.get("size", 0.0),
-                                  own_half_spread_c=q.get("half_spread_c", 0.0))
+            worklist.append((cond, q))
+        if not worklist:
+            return
+        # Re-score every held pool CONCURRENTLY — independent read-only I/O, and
+        # _rescore swallows its own errors to None so no worker raises. The exit
+        # decisions (cancel/flatten + ledger writes) then run SERIALLY below on the
+        # main thread, preserving order and keeping sqlite single-threaded.
+        def _score(cq: tuple[str, dict]) -> dict | None:
+            cond, q = cq
+            return self._rescore(cond, q["token_id"], own_size=q.get("size", 0.0),
+                                 own_half_spread_c=q.get("half_spread_c", 0.0))
+
+        workers = min(REEVAL_WORKERS, len(worklist))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            fresh_list = list(ex.map(_score, worklist))
+        for (cond, q), fresh in zip(worklist, fresh_list):
             if fresh is None:
                 continue                        # transient read failure — try next round
             reason = self._degrade_reason(fresh)
@@ -550,6 +611,10 @@ class LiveRunner:
     # -- shutdown ----------------------------------------------------------
 
     def _shutdown(self) -> None:
+        # stop the background discovery thread first (it holds no orders/ledger state)
+        self._discovery_stop.set()
+        if self._discovery_thread is not None:
+            self._discovery_thread.join(timeout=5.0)
         log.warning("shutdown (%s): cancelling all maker quotes", self._kill_reason or "stop")
         if self.engine is not None:
             try:

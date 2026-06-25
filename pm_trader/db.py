@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS equity_curve (
 """
 
 
+# equity_curve is appended ~1 row/poll and never read in the hot loop. Left
+# unbounded it grows forever (at a 10s cadence ~8,640 rows/day). Keep a rolling
+# window of the most recent rows; prune amortized (not every insert) so the hot
+# path stays a single INSERT. 200k rows ≈ 23 days @10s / ~139 days @60s.
+EQUITY_CURVE_MAX_ROWS = 200_000
+_EQUITY_PRUNE_EVERY = 1_000
+
+
 class Database:
     """SQLite database for pm-trader paper trading state."""
 
@@ -73,6 +81,7 @@ class Database:
         self.db_path = data_dir / "paper.db"
         self._ensure_dir()
         self._conn: sqlite3.Connection | None = None
+        self._equity_inserts = 0   # amortizes equity_curve pruning
 
     def _ensure_dir(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +92,10 @@ class Database:
             self._conn = sqlite3.connect(str(self.db_path))
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # NORMAL is durable under WAL (only loses the very last txn(s) on an OS
+            # crash, never corrupts) and drops the per-commit fsync — the hot maker
+            # loop commits per pool per poll, so this removes most of that fsync cost.
+            self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
         return self._conn
 
@@ -177,10 +190,21 @@ class Database:
     # ------------------------------------------------------------------
 
     def record_equity(self, equity: float) -> None:
-        """Append a mark-to-market equity snapshot to the curve."""
+        """Append a mark-to-market equity snapshot; roll off rows past the cap.
+
+        Keeps the most recent ``EQUITY_CURVE_MAX_ROWS`` and prunes only every
+        ``_EQUITY_PRUNE_EVERY`` inserts, so the per-poll hot path is a single
+        INSERT while the table stays bounded over multi-month uptime.
+        """
         self.conn.execute(
             "INSERT INTO equity_curve (equity) VALUES (?)", (equity,)
         )
+        self._equity_inserts += 1
+        if self._equity_inserts % _EQUITY_PRUNE_EVERY == 0:
+            self.conn.execute(
+                "DELETE FROM equity_curve WHERE id <= "
+                "(SELECT MAX(id) FROM equity_curve) - ?", (EQUITY_CURVE_MAX_ROWS,)
+            )
         self.conn.commit()
 
     def get_equity_curve(self) -> list[float]:
