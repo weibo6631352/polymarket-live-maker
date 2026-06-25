@@ -54,9 +54,15 @@ class MarketChannel:
         self._levels: dict[str, dict[str, dict[float, float]]] = {}
         self._ts: dict[str, float] = {}           # token -> last update (monotonic)
         self._tokens: set[str] = set()            # desired subscription set
+        self._on_price = None                     # callback(token, mid) on updates
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._ws = None                           # live connection (set in the loop)
+
+    def set_price_callback(self, fn) -> None:
+        """Register ``fn(token_id, mid)``, fired (off-lock) on each mid update for a
+        subscribed token. Used by the runner's reflex to cancel on a fast move."""
+        self._on_price = fn
 
     # -- pure message handling (unit-tested) --------------------------------
 
@@ -72,32 +78,46 @@ class MarketChannel:
             data = json.loads(raw)
         except (ValueError, TypeError):
             return
+        touched: set[str] = set()
         for ev in (data if isinstance(data, list) else [data]):
             if not isinstance(ev, dict):
                 continue
             et = ev.get("event_type")
             if et == "book":
-                self._on_book(ev)
+                t = self._on_book(ev)
+                if t:
+                    touched.add(t)
             elif et == "price_change":
-                self._on_price_change(ev)
+                touched.update(self._on_price_change(ev))
+        # fire the price callback OUTSIDE the lock (it may do I/O / take other locks)
+        cb = self._on_price
+        if cb is not None:
+            for t in touched:
+                if t in self._tokens:
+                    mid = self.get_midpoint(t)
+                    if mid > 0:
+                        cb(t, mid)
 
-    def _on_book(self, ev: dict) -> None:
+    def _on_book(self, ev: dict) -> str | None:
         token = ev.get("asset_id")
         if not token:
-            return
+            return None
         bids = {_f(l.get("price")): _f(l.get("size")) for l in ev.get("bids") or []}
         asks = {_f(l.get("price")): _f(l.get("size")) for l in ev.get("asks") or []}
         with self._lock:
             self._levels[token] = {"bids": bids, "asks": asks}   # full snapshot
             self._ts[token] = time.monotonic()
+        return token
 
-    def _on_price_change(self, ev: dict) -> None:
+    def _on_price_change(self, ev: dict) -> set[str]:
         changes = ev.get("price_changes") or []
+        touched: set[str] = set()
         with self._lock:
             for ch in changes:
                 token = ch.get("asset_id")
                 if not token:
                     continue
+                touched.add(token)
                 book = self._levels.setdefault(token, {"bids": {}, "asks": {}})
                 side = "bids" if str(ch.get("side", "")).upper() == "BUY" else "asks"
                 price, size = _f(ch.get("price")), _f(ch.get("size"))
@@ -106,6 +126,7 @@ class MarketChannel:
                 else:
                     book[side][price] = size
                 self._ts[token] = time.monotonic()
+        return touched
 
     # -- engine book-source interface ---------------------------------------
 

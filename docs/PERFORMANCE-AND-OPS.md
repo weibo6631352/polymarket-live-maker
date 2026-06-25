@@ -130,6 +130,7 @@ All behavior-preserving except where noted; the 933-test suite stayed green.
 | **Global request budget** (one shared `TokenBucket`, default `LM_MAX_REQ_PER_SEC`=149) | `ratelimit.py` | all CLOB reads+writes+discovery self-pace under the ~149/s order-book limit → fast polling without 429s |
 | **Real-time WS market channel** (book/`price_change` → `engine.book_source`) | `ws.py` | mid pushed in ~ms → fast cancel; REST reads freed (REST fallback per-token) |
 | **Real-time WS user channel** (live `trade` events → fills) | `ws.py` | real-time inventory; replaces REST `get_trades` polling |
+| **WS reflex cancel** (price callback → instant `CANCEL_ALL` on a >band move) | `ws.py`, `runner.py` | ~ms stale-order pull, decoupled from accounting; next poll reposts via `force_recenter`. Submitter lock-wrapped for thread safety |
 
 **Deliberately NOT done:** caching `get_reward_config` (it's a safety/exit signal —
 fetch it fresh; concurrency already removed its latency cost). Capping `poll_fills`
