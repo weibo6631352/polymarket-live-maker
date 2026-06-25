@@ -79,6 +79,7 @@ class MarketChannel:
         self._levels: dict[str, dict[str, dict[float, float]]] = {}
         self._ts: dict[str, float] = {}           # token -> last update (monotonic)
         self._tokens: set[str] = set()            # desired subscription set
+        self._updates: dict[str, int] = {}        # token -> cumulative book updates (speed gauge)
         self._last_recv = 0.0                     # monotonic time of the last frame (incl. PONG)
         self._on_price = None                     # callback(token, mid) on updates
         self._stop = threading.Event()
@@ -116,6 +117,8 @@ class MarketChannel:
                     touched.add(t)
             elif et == "price_change":
                 touched.update(self._on_price_change(ev))
+        for t in touched:                          # book-update counter (speed gauge)
+            self._updates[t] = self._updates.get(t, 0) + 1
         # fire the price callback OUTSIDE the lock (it may do I/O / take other locks)
         cb = self._on_price
         if cb is not None:
@@ -181,6 +184,10 @@ class MarketChannel:
         with self._lock:
             ts = self._ts.get(token_id)
         return ts is not None and (time.monotonic() - ts) <= max_age_s
+
+    def updates(self, token_id: str) -> int:
+        """Cumulative book updates seen for a token (delta over time = updates/s)."""
+        return self._updates.get(token_id, 0)
 
     def is_live(self, max_silence_s: float = 15.0) -> bool:
         """True if the connection got ANY frame (data or PONG, sent every 10s)

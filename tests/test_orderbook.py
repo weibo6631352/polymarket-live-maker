@@ -959,3 +959,30 @@ class TestMakerFill:
         d_inv, loss = maker_fill(0.50, 0.47, 0.0, 50.0, 1.0, 1.0, 0.5, 200.0)
         assert d_inv == pytest.approx(25.0)
         assert loss == pytest.approx(0.5)
+
+
+def _ob(bids, asks):
+    from pm_trader.models import OrderBook, OrderBookLevel
+    return OrderBook(bids=[OrderBookLevel(p, s) for p, s in bids],
+                     asks=[OrderBookLevel(p, s) for p, s in asks])
+
+
+class TestDepthAhead:
+    def test_bid_side_better_and_at_level(self):
+        from pm_trader.orderbook import depth_ahead
+        book = _ob([(0.50, 100), (0.49, 200), (0.48, 300)], [(0.52, 50)])
+        # our BUY at 0.49: higher bids (0.50=100) are ahead; 0.49 level (200) is at-level
+        better, at = depth_ahead(book, 0.49, "bid")
+        assert better == 100 and at == 200
+
+    def test_ask_side_better_and_at_level(self):
+        from pm_trader.orderbook import depth_ahead
+        book = _ob([(0.49, 10)], [(0.51, 100), (0.52, 200), (0.53, 300)])
+        # our SELL at 0.52: lower asks (0.51=100) ahead; 0.52 level (200) at-level
+        better, at = depth_ahead(book, 0.52, "ask")
+        assert better == 100 and at == 200
+
+    def test_front_of_book_nothing_ahead(self):
+        from pm_trader.orderbook import depth_ahead
+        book = _ob([(0.50, 100)], [(0.52, 100)])
+        assert depth_ahead(book, 0.51, "bid") == (0.0, 0.0)   # better than any bid

@@ -225,6 +225,27 @@ def book_inband_qmin(book: OrderBook, mid: float, max_spread_c: float) -> float:
     return min(bid_score, ask_score)
 
 
+def depth_ahead(book: OrderBook, price: float, side: str) -> tuple[float, float]:
+    """Resting size 'ahead of' a maker order at ``price`` on ``side`` — i.e. what
+    would fill before it. Returns ``(better_size, at_level_size)``:
+      - better_size: size at strictly better prices (a BUY: higher bids; a SELL:
+        lower asks) — these have price priority and fill first.
+      - at_level_size: size resting at exactly ``price`` (we queue behind it; L2
+        gives no time order, so treat the whole level as ahead).
+    A rough queue-position gauge for fill probability / adverse-selection.
+    """
+    eps = 1e-9
+    is_bid = str(side).lower() in ("bid", "buy")
+    levels = book.bids if is_bid else book.asks
+    better = at = 0.0
+    for lvl in levels:
+        if abs(lvl.price - price) <= eps:
+            at += lvl.size
+        elif (lvl.price > price) if is_bid else (lvl.price < price):
+            better += lvl.size
+    return better, at
+
+
 def maker_quote_score(size: float, half_spread_c: float, max_spread_c: float) -> float:
     """Binding-side reward score of our own two-sided quote.
 

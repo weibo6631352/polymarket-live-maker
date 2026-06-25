@@ -168,3 +168,14 @@ class TestUserChannel:
         m = json.loads(UserChannel.subscribe_msg(self._creds(), ["0xabc"]))
         assert m["type"] == "user" and m["markets"] == ["0xabc"]
         assert m["auth"] == {"apiKey": "k", "secret": "s", "passphrase": "p"}
+
+
+class TestBookActivity:
+    def test_update_counter_increments_per_touched_token(self):
+        mc = MarketChannel()
+        assert mc.updates("t1") == 0
+        mc.handle_message(_book_msg("t1", [(0.49, 10)], [(0.51, 10)]))
+        mc.handle_message(json.dumps({"event_type": "price_change", "price_changes": [
+            {"asset_id": "t1", "side": "BUY", "price": "0.50", "size": "5"}]}))
+        assert mc.updates("t1") == 2
+        assert mc.updates("other") == 0

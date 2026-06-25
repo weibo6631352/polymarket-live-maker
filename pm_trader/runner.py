@@ -22,12 +22,14 @@ import os
 import signal
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from pm_trader.engine import Engine
 from pm_trader.events import EventLog
+from pm_trader.orderbook import depth_ahead
 from pm_trader.maker_live import DryRunSubmitter, build_clob_signer
 from pm_trader.models import NotInitializedError
 from pm_trader.portfolio import select_pools
@@ -239,6 +241,8 @@ class LiveRunner:
         self._poll_evt_at: dict[str, float] = {}   # token -> last poll-event time (throttle)
         self._stats_at: float | None = None        # last stats log (monotonic)
         self._stats_granted: tuple[float, float] = (0.0, 0.0)  # (granted, granted_low)
+        self._mid_hist: dict[str, deque] = {}      # token -> recent (ts, mid) for velocity
+        self._ws_upd_at: dict[str, tuple[float, int]] = {}  # token -> (ts, update count)
         # WS reflex: cancel a held pool's orders the instant its mid moves beyond the
         # band (decoupled from accounting; the next poll reposts via force_recenter).
         self._reflex_refs: dict[str, tuple[float, float]] = {}  # token -> (mid, band)
@@ -515,6 +519,46 @@ class LiveRunner:
                      load1, len(self.placed), threading.active_count())
         self._stats_at = now
         self._stats_granted = (g, gl)
+        self._log_pool_metrics()
+
+    def _log_pool_metrics(self) -> None:
+        """Per held pool (main thread → sqlite ok): depth AHEAD of our quote (queue
+        gauge) + book movement speed (WS updates/s + mid velocity). Logged + emitted
+        as a 'metrics' event for review."""
+        if self.engine is None or self._market_ch is None:
+            return
+        try:
+            quotes = self.engine.get_maker_quotes()
+        except Exception:  # noqa: BLE001
+            return
+        now = time.monotonic()
+        for q in quotes:
+            tok = q.get("token_id")
+            book = self._market_ch.get_book(tok)
+            if not tok or book is None:
+                continue
+            mid = self._market_ch.get_midpoint(tok)
+            hs = (q.get("half_spread_c") or 0.0) / 100.0
+            bid_px, ask_px = round(mid - hs, 4), round(mid + hs, 4)
+            b_better, b_at = depth_ahead(book, bid_px, "bid")
+            a_better, a_at = depth_ahead(book, ask_px, "ask")
+            # mid velocity (sum |Δmid| / span) in cents/s, and WS updates/s
+            hist = self._mid_hist.get(tok)
+            vel = 0.0
+            if hist and len(hist) >= 2 and hist[-1][0] > hist[0][0]:
+                moves = sum(abs(hist[i][1] - hist[i - 1][1]) for i in range(1, len(hist)))
+                vel = moves / (hist[-1][0] - hist[0][0]) * 100.0
+            cnt = self._market_ch.updates(tok)
+            prev = self._ws_upd_at.get(tok)
+            upd_s = (cnt - prev[1]) / (now - prev[0]) if prev and now > prev[0] else 0.0
+            self._ws_upd_at[tok] = (now, cnt)
+            log.info("metrics %s | ahead bid %.0f(+%.0f@lvl)@%.3f / ask %.0f(+%.0f@lvl)@%.3f "
+                     "| mid %.4f vel %.2fc/s | book %.1f upd/s",
+                     str(tok)[:8], b_better, b_at, bid_px, a_better, a_at, ask_px,
+                     mid, vel, upd_s)
+            self._event("metrics", token=tok, mid=mid, bid_px=bid_px, ask_px=ask_px,
+                        ahead_bid=b_better, at_bid=b_at, ahead_ask=a_better, at_ask=a_at,
+                        mid_vel_cps=round(vel, 3), book_upd_s=round(upd_s, 2))
 
     def _sync_ws_subscriptions(self) -> None:
         """Point the WS channels at the currently-held pools + refresh reflex refs."""
@@ -825,6 +869,9 @@ class LiveRunner:
         for row in rows:
             q = row.get("quote") or {}
             tok = q.get("token_id")
+            mid_v = row.get("mid")
+            if tok and isinstance(mid_v, (int, float)) and mid_v > 0:  # for velocity
+                self._mid_hist.setdefault(tok, deque(maxlen=120)).append((now_m, mid_v))
             # throttle the per-pool "poll" heartbeat (always log fills/reconcile/exit)
             notable = bool(row.get("fills_applied") or row.get("reconciled")
                            or row.get("exit_failed"))
