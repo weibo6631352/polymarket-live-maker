@@ -66,10 +66,10 @@ CREATE TABLE IF NOT EXISTS equity_curve (
 
 
 # equity_curve is appended ~1 row/poll and never read in the hot loop. Left
-# unbounded it grows forever (at a 10s cadence ~8,640 rows/day). Keep a rolling
-# window of the most recent rows; prune amortized (not every insert) so the hot
-# path stays a single INSERT. 200k rows ≈ 23 days @10s / ~139 days @60s.
-EQUITY_CURVE_MAX_ROWS = 200_000
+# unbounded it grows forever. Keep a rolling time window (the operator only needs
+# recent history for review); prune amortized (not every insert) so the hot path
+# stays a single INSERT.
+EQUITY_RETENTION_DAYS = 10
 _EQUITY_PRUNE_EVERY = 1_000
 
 
@@ -190,11 +190,12 @@ class Database:
     # ------------------------------------------------------------------
 
     def record_equity(self, equity: float) -> None:
-        """Append a mark-to-market equity snapshot; roll off rows past the cap.
+        """Append a mark-to-market equity snapshot; roll off rows past the window.
 
-        Keeps the most recent ``EQUITY_CURVE_MAX_ROWS`` and prunes only every
+        Keeps the last ``EQUITY_RETENTION_DAYS`` and prunes only every
         ``_EQUITY_PRUNE_EVERY`` inserts, so the per-poll hot path is a single
-        INSERT while the table stays bounded over multi-month uptime.
+        INSERT while the table stays bounded over long uptime. (recorded_at and
+        the cutoff are both SQLite UTC, so the comparison is consistent.)
         """
         self.conn.execute(
             "INSERT INTO equity_curve (equity) VALUES (?)", (equity,)
@@ -202,8 +203,8 @@ class Database:
         self._equity_inserts += 1
         if self._equity_inserts % _EQUITY_PRUNE_EVERY == 0:
             self.conn.execute(
-                "DELETE FROM equity_curve WHERE id <= "
-                "(SELECT MAX(id) FROM equity_curve) - ?", (EQUITY_CURVE_MAX_ROWS,)
+                "DELETE FROM equity_curve WHERE recorded_at < datetime('now', ?)",
+                (f"-{EQUITY_RETENTION_DAYS} days",)
             )
         self.conn.commit()
 

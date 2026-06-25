@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pm_trader.engine import Engine
+from pm_trader.events import EventLog
 from pm_trader.maker_live import DryRunSubmitter, build_clob_signer
 from pm_trader.models import NotInitializedError
 from pm_trader.portfolio import select_pools
@@ -98,6 +99,9 @@ class RunnerConfig:
     min_hold_s: float = 600.0          # don't soft-exit a pool held less than this
     state_dir: str = "state"
     kill_file: str = "KILL"
+    # rolling data retention (days) for the event log + equity curve + rotated logs
+    retention_days: int = 10
+    events_enabled: bool = True        # append-only per-poll/discovery event log
 
     extra: dict = field(default_factory=dict)
 
@@ -115,6 +119,8 @@ class RunnerConfig:
             discovery_interval_s=_f("LM_DISCOVERY_INTERVAL_S", 600.0),
             cooldown_rounds=_i("LM_COOLDOWN_ROUNDS", 3),
             max_loss=_f("LM_MAX_LOSS_PER_DAY", 20.0),
+            retention_days=_i("LM_RETENTION_DAYS", 10),
+            events_enabled=os.environ.get("LM_EVENTS", "1").strip() != "0",
             reeval_enabled=os.environ.get("LM_REEVAL", "1").strip() != "0",
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_share=_f("LM_MIN_SHARE", 0.02),
@@ -159,12 +165,21 @@ class LiveRunner:
         # background discovery: the heavy reward-universe scan runs off the hot loop
         self._discovery_thread: threading.Thread | None = None
         self._discovery_stop = threading.Event()
+        self._events: EventLog | None = None   # created in run(); None in unit tests
+
+    def _event(self, kind: str, **fields) -> None:
+        """Append one review/iteration event (no-op until run() opens the log)."""
+        if self._events is not None:
+            self._events.write(kind, **fields)
 
     # -- lifecycle ----------------------------------------------------------
 
     def run(self) -> None:
         logging.getLogger("pm_trader").info(self.cfg.banner())
         os.makedirs(self.cfg.state_dir, exist_ok=True)
+        if self.cfg.events_enabled and self._events is None:
+            self._events = EventLog(Path(self.cfg.state_dir) / "events",
+                                    retention_days=self.cfg.retention_days)
         self._install_signals()
         self._ensure_engine()
         self.engine.maker_crossing_cost_c = self.cfg.crossing_cost_c  # PAPER-sim realism
@@ -335,6 +350,13 @@ class LiveRunner:
             self._last_scan_ok = time.monotonic()
             log.info("discovery: %d safe of %d scored",
                      self.report.get("safe_count", 0), self.report.get("pools_scored", 0))
+            # snapshot the universe for review (top candidates + their key stats)
+            self._event("discovery", safe=self.report.get("safe_count", 0),
+                        scored=self.report.get("pools_scored", 0),
+                        top=[{"cond": p.get("condition_id"), "q": p.get("question"),
+                              "daily": p.get("daily"), "share": p.get("share"),
+                              "jump": p.get("jump_verdict")}
+                             for p in (self.report.get("pools") or [])[:10]])
         except Exception as e:  # noqa: BLE001 — keep the LAST good report; staleness guard handles it
             log.warning("discovery scan failed: %s", e)
 
@@ -392,6 +414,9 @@ class LiveRunner:
                 self.placed_at[cond] = time.monotonic()
                 log.info("placed %s | %s | daily=$%.0f", cond[:10],
                          s["question"][:48], s["daily"])
+                self._event("place", cond=cond, q=s.get("question"),
+                            daily=s.get("daily"), share=s.get("share"),
+                            committed=cap)
             except Exception as e:  # noqa: BLE001 — one bad market mustn't sink the book
                 log.warning("place failed for %s: %s", cond[:10], e)
         log.info("active book: %d pools (selected %d)", len(self.placed), len(self.selected))
@@ -513,6 +538,7 @@ class LiveRunner:
         if reason in self._COOLDOWN_REASONS:    # degraded -> bench a few rounds
             self.cooldown[cond] = self.cfg.cooldown_rounds
         log.info("re-eval EXIT %s (%s)", cond[:10], reason)
+        self._event("exit", cond=cond, reason=reason, inventory=inv)
 
     def _use_live_path(self) -> bool:
         """Drive the engine's *_live methods (real LIVE, or DRY-LIVE rehearsal)."""
@@ -551,6 +577,16 @@ class LiveRunner:
         else:
             rows = self.engine.accrue_maker_rewards()
         for row in rows:
+            if self._events is not None:        # granular per-pool series for review
+                q = row.get("quote") or {}
+                self._event("poll", cond=q.get("market_condition_id"),
+                            token=q.get("token_id"), mid=row.get("mid"),
+                            reward=row.get("reward"), share=row.get("share"),
+                            inventory=row.get("inventory"),
+                            inv_pnl_delta=row.get("inventory_pnl_delta"),
+                            fills=row.get("fills_applied"),
+                            reconciled=row.get("reconciled"),
+                            exit_failed=row.get("exit_failed"))
             if row.get("exit_failed"):
                 # the engine could NOT cancel/flatten the real orders — the quote is
                 # still active and tracked; surface loudly and let it retry next poll.
@@ -615,6 +651,8 @@ class LiveRunner:
         self._discovery_stop.set()
         if self._discovery_thread is not None:
             self._discovery_thread.join(timeout=5.0)
+        if self._events is not None:
+            self._events.close()
         log.warning("shutdown (%s): cancelling all maker quotes", self._kill_reason or "stop")
         if self.engine is not None:
             try:
@@ -635,11 +673,23 @@ class LiveRunner:
 
 
 def main() -> None:
+    cfg = RunnerConfig.from_env()
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    # also persist a rolling N-day file log (stdout alone is ephemeral)
+    try:
+        from logging.handlers import TimedRotatingFileHandler
+        os.makedirs(cfg.state_dir, exist_ok=True)
+        handlers.append(TimedRotatingFileHandler(
+            os.path.join(cfg.state_dir, "runner.log"),
+            when="midnight", backupCount=cfg.retention_days))
+    except Exception:  # noqa: BLE001 — file logging is best-effort, never block startup
+        pass
     logging.basicConfig(
         level=os.environ.get("LM_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
     )
-    LiveRunner(RunnerConfig.from_env()).run()
+    LiveRunner(cfg).run()
 
 
 if __name__ == "__main__":
