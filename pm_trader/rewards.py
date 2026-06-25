@@ -28,6 +28,8 @@ makes a share estimate trustworthy.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import httpx
 
 from pm_trader.models import ApiError
@@ -35,6 +37,13 @@ from pm_trader.models import ApiError
 CLOB_BASE = "https://clob.polymarket.com"
 
 _TIMEOUT = httpx.Timeout(15.0)
+
+# Concurrency cap for the per-pool book/history fetch in scan(). The discovery
+# scan is the heaviest network beat (one book + one history per top-N pool, all
+# independent reads); fetching them in a threadpool turns an O(N) serial stall —
+# ~5s for the default top — into roughly one round-trip, so it stops blocking the
+# runner's cancel loop for seconds every discovery interval.
+SCAN_WORKERS = 16
 
 # Defaults (overridable per scan)
 MIN_DAILY = 50.0       # ignore dust pools below this daily reward rate (USD)
@@ -320,21 +329,27 @@ def scan(
     pools.sort(key=lambda p: -p["daily"])
     pools = pools[: max(1, top)]
 
-    scored: list[dict] = []
-    for p in pools:
+    def _score_one(p: dict) -> dict | None:
+        """Fetch one pool's book (+ history) and score it. Same per-pool error
+        handling as the old serial loop: a book ApiError drops the pool; a
+        history ApiError just disables jump-risk for it."""
         try:
             book = client.book(p["token"])
         except ApiError:
-            continue
+            return None
         history: list[dict] = []
         if with_jump_risk:
             try:
                 history = client.prices_history(p["token"])
             except ApiError:
                 history = []
-        row = score_pool(p, book, history)
-        if row is not None:
-            scored.append(row)
+        return score_pool(p, book, history)
+
+    scored: list[dict] = []
+    if pools:
+        workers = min(SCAN_WORKERS, len(pools))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            scored = [row for row in ex.map(_score_one, pools) if row is not None]
 
     # rank: SAFE first, then realistic (non-empty-band) high gross yield
     verdict_order = {"SAFE": 0, "WATCH": 1, "no-history": 2, "KILL": 3, None: 4}

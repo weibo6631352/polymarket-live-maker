@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import deque
 
 from pm_trader.models import ApiError, OrderBook
 from pm_trader.orderbook import book_inband_qmin, committed_capital, maker_reward_share
@@ -481,7 +482,8 @@ class DryRunSubmitter:
 
     def __init__(self, logger: logging.Logger | None = None) -> None:
         self._log = logger or logging.getLogger("pm_trader.dryrun")
-        self.sent: list[dict] = []
+        # bounded: a multi-day dry-live soak would otherwise grow this without limit
+        self.sent: deque[dict] = deque(maxlen=5000)
 
     def __call__(self, action: dict) -> dict:
         self.sent.append(action)
