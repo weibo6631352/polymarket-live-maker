@@ -15,7 +15,7 @@ Production host for the live maker. Validated 2026-06-25.
 | CPU | Intel Xeon Platinum 8259CL @ 2.50 GHz (turbo ~3.1) |
 | Disk | 80 GB (≈2 GB used) |
 | OS | Amazon Linux 2023 (kernel 6.1) |
-| Python | 3.11.15 (project requires ≥3.10; AL2023 default 3.9 not used) |
+| Toolchain | GCC 14 + cmake (Kitware standalone) + ninja; C++20. No Python. |
 | Order ID | #1790240704463104 |
 | Expiry | 2026-07-25 16:13 |
 | Panel | https://aws.121788.xyz/lb/etfowz7n6o9wx328 |
@@ -52,15 +52,14 @@ cancel-latency profit lever is genuinely viable here.
 ## Layout
 
 - Code: `/root/polymarket-live-maker` (full repo incl. `.git`)
-- venv: `/root/polymarket-live-maker/.venv` (`pip install -e ".[live,dev]"`)
+- Build: `cd cpp && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j2`
 - Config: `/root/polymarket-live-maker/.env` (real creds; `PM_TRADER_LIVE=0`,
   `LM_WS=1`, `LM_POLL_SECONDS=1.0`, `LM_MAX_REQ_PER_SEC=149`, signature_type=1)
-- Run: `cd /root/polymarket-live-maker && .venv/bin/python -m pm_trader.runner`
-  (or the `live-maker` entrypoint)
+- Run: `cd /root/polymarket-live-maker && cpp/build/live-maker`
 
 ## Validation on host (2026-06-25)
 
-- **983 tests pass** (`pytest -q -m "not live"`) on Python 3.11.
+- **C++ test binaries pass** (19 `pmm_*` parity/smoke tests, run directly).
 - Dry-run smoke (`PM_TRADER_LIVE=0`, direct, no proxy): WS market channel up,
   discovery 10 safe/60 in ~2 s, 3-pool book placed, DRY orders logged, **WS reflex
   CANCEL fired on real mid moves**, real-time event log written, **0 errors / 0

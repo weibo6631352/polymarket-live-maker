@@ -3,26 +3,30 @@
 .env.*
 !.env.example
 
-# python
+# C++ build output
+build/
+build-*/
+*.o
+*.a
+compile_commands.json
+.cache/
+
+# python venv / bytecode (repo is C++-only; keep these so a stray .venv or .pyc
+# can never be accidentally committed again)
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
-dist/
-build/
-.venv/
-venv/
 
-# tooling
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.mypy_cache/
-.ruff_cache/
-
-# runtime state (the engine's SQLite ledger, pool cache, logs, kill flag)
+# runtime state (the SQLite ledger, pool cache, logs, kill flag)
 *.db
 state/
 *.log
 safe_pools.json
 KILL
+
+# editor / OS
+.DS_Store
+.coverage
+.coverage.*
