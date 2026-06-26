@@ -1,0 +1,45 @@
+[Unit]
+Description=Polymarket live liquidity-rewards maker (C++ live-maker)
+After=network-online.target
+Wants=network-online.target
+# Bounded restart: if the bot crashes/OOMs 4 times within 5 min, systemd GIVES UP
+# instead of looping forever — lets the box self-recover (SSH stays usable) instead
+# of wedging in an infinite restart loop on boot.
+StartLimitIntervalSec=300
+StartLimitBurst=4
+
+[Service]
+Type=simple
+WorkingDirectory=/root/polymarket-live-maker
+# reads .env from the working dir; state/ (ledger + event log + live-maker.pid) lives here.
+# The C++ binary is self-contained (no venv). Build with: cmake --build cpp/build -j
+ExecStart=/root/polymarket-live-maker/cpp/build/live-maker
+Restart=on-failure
+RestartSec=15
+# HARD memory cap (cgroup): the C++ bot normally uses ~30-60 MB (vs ~100 MB for the
+# Python one). If a bug leaks, the kernel kills ONLY this service at the cap — it can
+# NEVER OOM the whole box. MemoryHigh throttles before the hard kill.
+MemoryHigh=384M
+MemoryMax=512M
+# bound threads/processes so a thread leak hits this cgroup limit (EAGAIN) instead of
+# exhausting host PIDs. Normal thread count: WS readers + discovery + resync + reeval
+# pool + prefetch + warmer ≈ 40, well under this.
+TasksMax=400
+# NO CPUQuota on purpose — the bot must burst CPU (scan, fast cancel); a hard cap would
+# throttle legitimate work. StartLimit above still bounds a crash-loop.
+# graceful: SIGTERM -> the runner trips kill-switch -> cancels ALL resting orders +
+# flattens inventory before exit; then the single-instance lock (flock) is released.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=live-maker
+# light hardening (limit blast radius)
+NoNewPrivileges=true
+
+# NO [Install]/WantedBy on purpose -> the bot NEVER auto-starts on boot. A reboot always
+# comes up clean (no bot, no wedge). Start it explicitly + watched:
+#   systemctl start polymarket-live-maker-cpp
+# (do NOT `systemctl enable` it until the startup is proven safe).
+# Single-instance: two processes sharing this WorkingDirectory's state/ are refused by
+# the flock on state/live-maker.pid — a stale lock (after SIGKILL) auto-reaps within 1s.

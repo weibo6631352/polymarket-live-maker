@@ -1,0 +1,13 @@
+# build output
+/build/
+/build-*/
+*.o
+*.a
+compile_commands.json
+
+# secrets — never commit
+.env
+
+# editor / OS
+.DS_Store
+.cache/

@@ -1,0 +1,54 @@
+# clang-format for polymarket-live-maker-cpp.
+# Adopted from sports-trader-cpp (Google base, C++20). Include regex retargeted stcpp/ -> pmm/.
+
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++20
+
+# 缩进
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+IndentCaseLabels: true
+IndentPPDirectives: AfterHash
+
+# 行宽
+ColumnLimit: 110
+PenaltyBreakBeforeFirstCallParameter: 1
+PenaltyExcessCharacter: 1000000
+
+# 大括号
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: Inline
+
+# include 顺序: own.hpp, std, third_party, project(pmm/)
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"[^/]+\.hpp"$'
+    Priority: 1
+  - Regex: '^<[a-z_]+>$'
+    Priority: 2
+  - Regex: '^<.*/.*>$'
+    Priority: 3
+  - Regex: '^"pmm/'
+    Priority: 4
+
+# 指针 / 引用
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# 模板
+AlwaysBreakTemplateDeclarations: Yes
+
+# 其他
+FixNamespaceComments: true
+NamespaceIndentation: None
+ReflowComments: true
+SpaceBeforeParens: ControlStatements
+SpacesInAngles: false
+Cpp11BracedListStyle: true

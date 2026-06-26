@@ -1,0 +1,209 @@
+cmake_minimum_required(VERSION 3.27)
+project(pmm
+    VERSION 0.1.0
+    DESCRIPTION "Polymarket live liquidity-rewards market maker (C++ port of pm_trader)"
+    LANGUAGES CXX C
+)
+# C 语言: secp256k1 (Bitcoin Core, FetchContent) 是 C 工程, 必须 enable C。
+
+# C++20 锁 (沿用 sports-trader-cpp ADR-001)。
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
+endif()
+
+# ---- 编译警告 (吸收 sports-trader-cpp 的严格构建卫生) ----
+# C++-only 警告用 generator expression 限制, 避免 secp256k1 的 C 源报错。
+add_compile_options(
+    -Wall -Wextra
+    $<$<COMPILE_LANGUAGE:CXX>:-Wshadow>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wcast-align>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wconversion>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wsign-conversion>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wnull-dereference>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wdouble-promotion>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wformat=2>
+    -fno-omit-frame-pointer
+)
+# -Werror 暂以 option 控制 (默认 OFF, 迁移成形后转 ON)。
+option(PMM_WERROR "Treat warnings as errors" OFF)
+if(PMM_WERROR)
+    add_compile_options(-Werror)
+endif()
+
+# Sanitizers (开发期, 不进 release)。
+option(PMM_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(PMM_ENABLE_UBSAN "Enable UBSan" OFF)
+option(PMM_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+if(PMM_ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -fno-sanitize-recover=address)
+    add_link_options(-fsanitize=address)
+endif()
+if(PMM_ENABLE_UBSAN)
+    add_compile_options(-fsanitize=undefined -fno-sanitize-recover=undefined)
+    add_link_options(-fsanitize=undefined)
+endif()
+if(PMM_ENABLE_TSAN AND NOT PMM_ENABLE_ASAN)
+    add_compile_options(-fsanitize=thread)
+    add_link_options(-fsanitize=thread)
+endif()
+
+include_directories(${CMAKE_SOURCE_DIR}/include)
+
+# ---- OpenSSL (HMAC-SHA256 for CLOB L2 auth; TLS for PersistentHttps) ----
+find_package(OpenSSL QUIET)
+if(NOT OpenSSL_FOUND)
+    # Homebrew 手动回退 (同 sports-trader-cpp app/CMakeLists)。
+    find_path(OPENSSL_INCLUDE_DIR openssl/ssl.h
+        PATHS /opt/homebrew/opt/openssl@3/include /opt/homebrew/opt/openssl/include NO_DEFAULT_PATH)
+    find_library(OPENSSL_SSL_LIBRARY ssl
+        PATHS /opt/homebrew/opt/openssl@3/lib /opt/homebrew/opt/openssl/lib NO_DEFAULT_PATH)
+    find_library(OPENSSL_CRYPTO_LIBRARY crypto
+        PATHS /opt/homebrew/opt/openssl@3/lib /opt/homebrew/opt/openssl/lib NO_DEFAULT_PATH)
+    if(NOT OPENSSL_INCLUDE_DIR OR NOT OPENSSL_CRYPTO_LIBRARY)
+        message(FATAL_ERROR "OpenSSL not found. brew install openssl@3")
+    endif()
+    add_library(OpenSSL::Crypto UNKNOWN IMPORTED)
+    set_target_properties(OpenSSL::Crypto PROPERTIES
+        IMPORTED_LOCATION ${OPENSSL_CRYPTO_LIBRARY}
+        INTERFACE_INCLUDE_DIRECTORIES ${OPENSSL_INCLUDE_DIR})
+    add_library(OpenSSL::SSL UNKNOWN IMPORTED)
+    set_target_properties(OpenSSL::SSL PROPERTIES
+        IMPORTED_LOCATION ${OPENSSL_SSL_LIBRARY}
+        INTERFACE_INCLUDE_DIRECTORIES ${OPENSSL_INCLUDE_DIR}
+        INTERFACE_LINK_LIBRARIES OpenSSL::Crypto)
+endif()
+
+# ---- secp256k1 v0.6.0 (Ethereum ECDSA, recovery module) ----
+# 离线复用: configure 时传 -DFETCHCONTENT_SOURCE_DIR_SECP256K1=<已解压源码目录> 跳过下载。
+include(FetchContent)
+set(SECP256K1_ENABLE_MODULE_RECOVERY ON  CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_BENCHMARK        OFF CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_TESTS            OFF CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_EXHAUSTIVE_TESTS OFF CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_CTIME_TESTS      OFF CACHE BOOL "" FORCE)
+set(SECP256K1_INSTALL                OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS                OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(secp256k1
+    URL      "https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v0.6.0.tar.gz"
+    URL_HASH SHA256=785bb98e7d6705c51c8dfa8ac3af6aa2ccfa3774714d51c0b9e28fac1146e9f1
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(secp256k1)
+
+# ---- pmm_crypto: 复用 EIP-712 + secp256k1 + CLOB wire 签名链 ----
+add_library(pmm_crypto STATIC
+    src/pmm/crypto/eip712_v2.cpp
+    src/pmm/crypto/secp256k1_signer.cpp
+    src/pmm/wire/clob_wire.cpp
+)
+target_compile_features(pmm_crypto PUBLIC cxx_std_20)
+target_link_libraries(pmm_crypto
+    PRIVATE secp256k1 OpenSSL::Crypto
+)
+
+# ---- SQLite3 (持久化) ----
+find_package(SQLite3 REQUIRED)
+
+# ---- libcurl (ClobSubmitter 的实盘下单 POST/DELETE + L1/L2 鉴权; 读路径仍用 PersistentHttps) ----
+find_package(CURL REQUIRED)
+
+# ---- nlohmann/json (vendored single header, 解析 Gamma/CLOB 响应 + 构造事件 JSON) ----
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json INTERFACE ${CMAKE_SOURCE_DIR}/third_party)
+
+# ---- pmm_core: 业务逻辑库 (随迁移逐模块增长) ----
+add_library(pmm_core STATIC
+    src/pmm/config.cpp
+    src/pmm/db.cpp
+    src/pmm/orderbook.cpp
+    src/pmm/events.cpp
+    src/pmm/analytics.cpp
+    src/pmm/api.cpp
+    src/pmm/rewards.cpp
+    src/pmm/portfolio.cpp
+    src/pmm/maker_live.cpp
+    src/pmm/clob_submitter.cpp
+    src/pmm/engine.cpp
+    src/pmm/ws.cpp
+    src/pmm/runner.cpp
+    src/pmm/maker_sim.cpp
+    src/pmm/review.cpp
+)
+target_compile_features(pmm_core PUBLIC cxx_std_20)
+# OpenSSL::SSL: PersistentHttps 的 TLS 客户端 (带 openssl 头路径 + libssl/libcrypto)。
+target_link_libraries(pmm_core PUBLIC pmm_crypto SQLite::SQLite3 nlohmann_json OpenSSL::SSL CURL::libcurl)
+
+# ---- 测试 (tests/): smoke + 数值 parity 自检 (apps/ 只放可发布程序) ----
+add_executable(pmm_smoke tests/smoke_main.cpp)
+target_link_libraries(pmm_smoke PRIVATE pmm_crypto)
+
+add_executable(pmm_db_smoke tests/db_smoke_main.cpp)
+target_link_libraries(pmm_db_smoke PRIVATE pmm_core)
+
+add_executable(pmm_config_smoke tests/config_smoke_main.cpp)
+target_link_libraries(pmm_config_smoke PRIVATE pmm_core)
+
+add_executable(pmm_orderbook_parity tests/orderbook_parity_main.cpp)
+target_link_libraries(pmm_orderbook_parity PRIVATE pmm_core)
+
+add_executable(pmm_ratelimit_smoke tests/ratelimit_smoke_main.cpp)
+target_link_libraries(pmm_ratelimit_smoke PRIVATE pmm_core)
+
+add_executable(pmm_events_smoke tests/events_smoke_main.cpp)
+target_link_libraries(pmm_events_smoke PRIVATE pmm_core)
+
+add_executable(pmm_analytics_parity tests/analytics_parity_main.cpp)
+target_link_libraries(pmm_analytics_parity PRIVATE pmm_core)
+
+add_executable(pmm_api_rewards_parity tests/api_rewards_parity_main.cpp)
+target_link_libraries(pmm_api_rewards_parity PRIVATE pmm_core)
+
+add_executable(pmm_portfolio_parity tests/portfolio_parity_main.cpp)
+target_link_libraries(pmm_portfolio_parity PRIVATE pmm_core)
+
+add_executable(pmm_maker_parity tests/maker_parity_main.cpp)
+target_link_libraries(pmm_maker_parity PRIVATE pmm_core)
+
+add_executable(pmm_review_fixes tests/review_fixes_main.cpp)
+target_link_libraries(pmm_review_fixes PRIVATE pmm_core)
+
+add_executable(pmm_clob_amounts_parity tests/clob_amounts_parity_main.cpp)
+target_link_libraries(pmm_clob_amounts_parity PRIVATE pmm_core)
+
+add_executable(pmm_orders_smoke tests/orders_smoke_main.cpp)
+target_link_libraries(pmm_orders_smoke PRIVATE pmm_core)
+
+add_executable(pmm_engine_smoke tests/engine_smoke_main.cpp)
+target_link_libraries(pmm_engine_smoke PRIVATE pmm_core)
+
+add_executable(pmm_ws_smoke tests/ws_smoke_main.cpp)
+target_link_libraries(pmm_ws_smoke PRIVATE pmm_core)
+
+add_executable(pmm_runner_smoke tests/runner_smoke_main.cpp)
+target_link_libraries(pmm_runner_smoke PRIVATE pmm_core)
+
+add_executable(pmm_lock_smoke tests/lock_smoke_main.cpp)
+target_link_libraries(pmm_lock_smoke PRIVATE pmm_core)
+
+add_executable(pmm_maker_sim_parity tests/maker_sim_parity_main.cpp)
+target_link_libraries(pmm_maker_sim_parity PRIVATE pmm_core)
+
+add_executable(pmm_review_parity tests/review_parity_main.cpp)
+target_link_libraries(pmm_review_parity PRIVATE pmm_core)
+
+# ---- 生产入口: live-maker (自主做市轮询循环) ----
+add_executable(live-maker apps/runner_main.cpp)
+target_link_libraries(live-maker PRIVATE pmm_core)
+
+# ---- 分析工具: review-report (估计 vs 链上实际奖励对账) ----
+add_executable(review-report apps/review_main.cpp)
+target_link_libraries(review-report PRIVATE pmm_core)
+
+message(STATUS "pmm scaffold: crypto reuse + models + db (sqlite3) + smoke checks")

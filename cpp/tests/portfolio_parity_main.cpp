@@ -1,0 +1,101 @@
+// apps/portfolio_parity_main.cpp — select_pools 选池配资与 Python 对齐 (golden 见 gen_portfolio.py)。
+#include "pmm/portfolio.hpp"
+#include "pmm/rewards.hpp"
+
+#include <cmath>
+#include <cstdio>
+#include <set>
+#include <string>
+#include <vector>
+
+namespace P = pmm::portfolio;
+namespace R = pmm::rewards;
+
+namespace {
+int g_fail = 0;
+void Approx(double got, double want, const char* what) {
+    const double tol = 1e-4 + 1e-7 * std::abs(want);
+    const bool ok = std::abs(got - want) <= tol;
+    std::printf("[%s] %-26s got=%.6g want=%.6g\n", ok ? "PASS" : "FAIL", what, got, want);
+    if (!ok) ++g_fail;
+}
+void Eq(const std::string& got, const std::string& want, const char* what) {
+    const bool ok = got == want;
+    std::printf("[%s] %-26s got=%s want=%s\n", ok ? "PASS" : "FAIL", what, got.c_str(), want.c_str());
+    if (!ok) ++g_fail;
+}
+
+R::PoolReport pool(std::string q, std::string cid, std::string tok, double daily, double reward,
+                   std::string verdict = "SAFE", double dwiped = 50.0, double volc = 1.0) {
+    R::PoolReport p;
+    p.question = std::move(q);
+    p.condition_id = std::move(cid);
+    p.token = std::move(tok);
+    p.daily = daily;
+    p.max_spread_c = 3.0;
+    p.min_size = 100.0;
+    p.tick = 0.01;
+    p.share = 0.1;
+    p.min_side_score = 200.0;
+    p.empty_band = false;
+    p.reward_per_day = reward;
+    p.gross_ann_pct = 100.0;
+    p.jump_verdict = std::move(verdict);
+    p.max_jump_c = 5.0;
+    p.daily_vol_c = volc;
+    p.days_wiped = dwiped;
+    return p;
+}
+}  // namespace
+
+int main() {
+    R::ScanResult report;
+    report.pools = {
+        pool("Will the Fed cut rates in December?", "0x1", "t1", 300, 30.0, "SAFE", 60),
+        pool("FOMC March decision outcome", "0x2", "t2", 280, 28.0, "SAFE", 55),
+        pool("Will Lakers championship parade happen", "0x3", "t3", 200, 18.0, "SAFE", 40),
+        pool("Lakers championship odds this year", "0x4", "t4", 190, 17.0, "SAFE", 38),
+        pool("Will it rain in Seattle tomorrow", "0x5", "t5", 150, 12.0, "SAFE", 30),
+        pool("Bitcoin above 100k by July", "0x6", "t6", 120, 9.0, "SAFE", 25),
+        pool("Tiny dust pool low score", "0x7", "t7", 90, 0.3, "SAFE", 5, 8.0),
+        pool("Some KILL pool", "0x8", "t8", 400, 40.0, "KILL", 50),
+    };
+
+    // ---- 单一配资路径 (始终质量加权; loss_budget=0 / 预算紧时 size 退化到 min_size,
+    //      但 share 始终按 size 重算 maker_reward_share) ----
+    P::SelectParams params;  // capital=1000 默认; loss_budget=0 -> size 退化到 min_size=100
+    const auto sel = P::select_pools(report, params);
+    Approx(static_cast<double>(sel.size()), 4, "N");
+    const std::vector<std::string> want_tok = {"t2", "t3", "t5", "t6"};
+    const std::vector<double> want_ras = {2.371, 2.0106, 1.7027, 1.4766};
+    const std::vector<double> want_edr = {50.9091, 36.3636, 27.2727, 21.8182};
+    for (std::size_t i = 0; i < sel.size() && i < 4; ++i) {
+        Eq(sel[i].token, want_tok[i], ("tok[" + std::to_string(i) + "]").c_str());
+        Approx(sel[i].risk_adj_score, want_ras[i], ("ras[" + std::to_string(i) + "]").c_str());
+        Approx(sel[i].size, 100.0, ("size[" + std::to_string(i) + "]").c_str());
+        Approx(sel[i].committed_capital, 98.0, ("cap[" + std::to_string(i) + "]").c_str());
+        Approx(sel[i].share, 0.1818, ("share[" + std::to_string(i) + "]").c_str());
+        Approx(sel[i].est_daily_reward, want_edr[i], ("edr[" + std::to_string(i) + "]").c_str());
+    }
+
+    // loss_budget 抬高在此 fixture 下 size 仍受 min_size/份额上限约束, 结果不变 (确认单路径一致)。
+    P::SelectParams dp;
+    dp.loss_budget = 20.0;
+    const auto sel2 = P::select_pools(report, dp);
+    Approx(static_cast<double>(sel2.size()), 4, "lb N");
+    for (std::size_t i = 0; i < sel2.size() && i < 4; ++i) {
+        Approx(sel2[i].size, 100.0, ("lb size[" + std::to_string(i) + "]").c_str());
+        Approx(sel2[i].est_daily_reward, want_edr[i], ("lb edr[" + std::to_string(i) + "]").c_str());
+    }
+
+    // ---- 助手 ----
+    const auto toks = P::significant_tokens("Will the Fed cut rates in December?");
+    const std::set<std::string> want_toks = {"cut", "december", "fed", "rates"};
+    Approx(static_cast<double>(toks == want_toks ? 1 : 0), 1, "significant_tokens");
+    Eq(P::cluster_key("FOMC March decision outcome"), "us-fed", "cluster_key fed");
+    Eq(P::cluster_key("Will it rain in Seattle tomorrow"), "", "cluster_key none");
+    Approx(P::risk_adjusted_score(report.pools[0], 7.0, 1.0), 2.350746, "risk_adjusted_score");
+
+    std::printf(g_fail ? "\n%d CHECK(S) FAILED\n" : "\nALL CHECKS PASSED\n", g_fail);
+    return g_fail ? 1 : 0;
+}
