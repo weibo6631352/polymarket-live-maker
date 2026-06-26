@@ -6,6 +6,7 @@ import pytest
 
 from pm_trader import portfolio as pf
 from pm_trader.models import OrderBook, OrderBookLevel
+from pm_trader.orderbook import maker_quote_score
 from pm_trader.portfolio import (
     MakerPortfolio,
     _cluster_key,
@@ -14,6 +15,15 @@ from pm_trader.portfolio import (
     fetch_market_data,
     select_pools,
 )
+
+
+def _mss(share, min_size, tick, max_spread_c=4.5):
+    """Competitor Qmin (min_side_score) consistent with a desired min_size share,
+    so select_pools' recomputed share reproduces the fixture's intended share."""
+    if not 0 < share < 1:
+        return 0.0
+    mine = maker_quote_score(min_size, tick * 100.0, max_spread_c)
+    return mine * (1 - share) / share
 
 
 def _rich_pool(token, question, *, daily=400.0, share=0.3, min_size=50.0,
@@ -32,6 +42,7 @@ def _pool(token="t1", daily=400.0, share=0.3, min_size=50.0, tick=0.01,
         "question": q, "condition_id": "0x" + token, "token": token,
         "daily": daily, "share": share, "min_size": min_size, "tick": tick,
         "max_spread_c": 4.5, "jump_verdict": verdict, "empty_band": empty,
+        "min_side_score": _mss(share, min_size, tick),
     }
 
 

@@ -66,7 +66,10 @@ int main() {
         {-100.0, 1, 0, 0.0, 1}, {-100.0, 1, 0, 0.0, 0}};
     const std::vector<double> want_bid = {0.49, 0.51, 0.49};
     const std::vector<double> want_ask = {0.51, 0.53, 0.51};
-    const std::vector<double> want_share = {0.0816, 0.6154, 0.0816};
+    // S1 mid=0.515 makes the in-band book lopsided (bid 0.48 falls out of the 3c band,
+    // ask side dominates) -> official single-sided credit max(min, max/3) raises the
+    // competing Qmin, so our share is correctly lower than the old strict-min 0.6154.
+    const std::vector<double> want_share = {0.0816, 0.2775, 0.0816};
 
     for (std::size_t i = 0; i < mids.size(); ++i) {
         const M::MakerPlan p = bot.step(book, mids[i]);

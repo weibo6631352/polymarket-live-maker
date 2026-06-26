@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import time
 
+from pm_trader.orderbook import maker_quote_score
 from pm_trader.runner import LiveRunner, RunnerConfig, load_dotenv
+
+
+def _mss(share, min_size, tick, max_spread_c=4.5):
+    """Competitor Qmin consistent with a desired min_size share (select_pools
+    recomputes share from min_side_score, so fixtures must set it consistently)."""
+    if not 0 < share < 1:
+        return 0.0
+    mine = maker_quote_score(min_size, tick * 100.0, max_spread_c)
+    return mine * (1 - share) / share
 
 
 def _scan_pool(token, q, *, daily=400.0, share=0.2, min_size=50.0):
@@ -13,6 +23,7 @@ def _scan_pool(token, q, *, daily=400.0, share=0.2, min_size=50.0):
         "daily": daily, "share": share, "min_size": min_size, "tick": 0.01,
         "max_spread_c": 4.5, "jump_verdict": "SAFE", "empty_band": False,
         "days_wiped": 2.0, "reward_per_day": share * daily,
+        "min_side_score": _mss(share, min_size, 0.01),
     }
 
 

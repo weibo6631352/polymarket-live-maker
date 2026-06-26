@@ -726,10 +726,13 @@ class TestBookInbandQmin:
 
     def test_out_of_band_levels_excluded(self) -> None:
         book = OrderBook(
-            bids=[OrderBookLevel(price=0.40, size=100.0)],  # 10c >> 4c band
-            asks=[OrderBookLevel(price=0.51, size=100.0)],
+            bids=[OrderBookLevel(price=0.40, size=100.0)],  # 10c >> 4c band -> excluded
+            asks=[OrderBookLevel(price=0.51, size=100.0)],  # 1c -> in-band
         )
-        assert book_inband_qmin(book, 0.50, 4.0) == 0.0  # empty bid side
+        # far bid excluded -> no in-band bid score; the in-band ask side then earns the
+        # official single-sided credit at a mid-range midpoint: max(min, max/3).
+        # ask score = 100 * ((4-1)/4)^2 = 56.25  ->  binding qmin = 56.25/3 = 18.75
+        assert book_inband_qmin(book, 0.50, 4.0) == pytest.approx(18.75)
 
     def test_empty_book_zero(self) -> None:
         assert book_inband_qmin(OrderBook(), 0.50, 4.0) == 0.0
