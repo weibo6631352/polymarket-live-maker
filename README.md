@@ -1,97 +1,52 @@
 # polymarket-live-maker
 
-Autonomous **live liquidity-rewards market maker** for Polymarket. This is the
-proven `polymarket-paper-trader` codebase, **REST/API-based** (`py-clob-client` —
-no official SDK, no WebSocket), **polling-driven on the same cadence as before**,
-with **MCP removed** and one thing added: it actually **places real orders**
-through the CLOB REST API — gated behind an explicit operator switch (dry-run by
-default). No LLM anywhere in the loop.
+Autonomous **live liquidity-rewards market maker** for Polymarket, implemented in
+**C++20** (`cpp/`). Self-contained native binary — custom CLOB order signing
+(secp256k1 / EIP-712), persistent HTTPS + WebSocket, SQLite ledger, polling-driven
+autonomous quoting loop. Dry-live by default; places real orders only behind an
+explicit operator switch (`PM_TRADER_LIVE=1`). No LLM in the loop.
 
-> The strategy and its economics are unchanged and documented in
-> [`docs/research/04-lp-rewards-edge.md`](docs/research/04-lp-rewards-edge.md):
+> Strategy + economics: [`docs/research/04-lp-rewards-edge.md`](docs/research/04-lp-rewards-edge.md).
 > Polymarket pays a daily USDC pool to two-sided limit orders resting within
 > `max_spread` of mid. The bot discovers safe, low-jump mid-tail reward pools,
-> quotes a small decorrelated book, manages inventory with skewed quotes, and
-> exits + benches a pool on a catalyst jump. Read it before risking money.
+> quotes a small decorrelated book, sizes by quality (capped for diversification),
+> manages inventory with skewed quotes, and exits + benches a pool on a catalyst
+> jump. Read it before risking money.
 
-## What changed vs the paper-trader
+## Build
 
-It is the same package (`pm_trader`, same modules, same logic, same tests) **minus
-MCP**, plus the live wiring:
-
-- **`maker_live.ClobSubmitter`** — implements the previously-stubbed live signer:
-  real `place` / `cancel` via `py-clob-client`, and `poll_fills()` to read the
-  account's **real trades** (you chose REST trade-polling over a WS user channel).
-- **`LiveMakerBot(external_fills=True)`** — in live mode inventory comes from those
-  real fills; dry-run keeps the original mid-cross inference (一模一样).
-- **`runner.py`** — the autonomous, single-process **polling loop** that replaces
-  the agent/MCP that used to call the maker poll by hand: rediscover → select →
-  step each bot every `poll_seconds`, with cooldown + kill-switch.
-
-Everything else (reward math, scanner, discovery, portfolio selection, engine
-ledger, CLI) is the paper-trader as-is.
-
-## Install
+Requires a C++20 toolchain (**GCC 14+** for `<format>`), **cmake ≥ 3.27**, **ninja**,
+and `-devel` packages: openssl, sqlite, libcurl, zlib. secp256k1 is fetched via
+CMake FetchContent (needs git + network).
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e .              # click + httpx (dry-run + CLI)
-pip install -e ".[live]"      # adds py-clob-client (real order submission)
-pip install -e ".[dev]"       # test extras
+cd cpp
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j
 ```
 
-## Configure
+Produces `cpp/build/live-maker` plus the test binaries (`pmm_*`). Run a test binary
+directly to check it (they are not wired to ctest).
+
+## Run
+
+Reads `.env` (see `.env.example`) and writes `state/` (ledger + event log) in the
+working directory; single-instance locked per `state/`.
 
 ```bash
-cp .env.example .env          # .env is gitignored — NEVER commit it
-$EDITOR .env                  # POLYMARKET_PRIVATE_KEY (+ funder/signature type)
+cd <working dir with .env>
+/path/to/cpp/build/live-maker
 ```
 
-## Run — dry-run (default, no orders sent)
+- **Default: dry-live** — exercises the live code path, logs the orders it *would*
+  place, sends nothing. P&L = gross reward only.
+- **`PM_TRADER_LIVE=1` → real orders (real money).** Start tiny (`LM_CAPITAL=20`);
+  capital is the exposure throttle.
+- **Kill switch:** `touch KILL` in the working dir → cancels all + flattens + stops.
+- Config knobs: see `.env.example`.
 
-```bash
-python -m pm_trader.runner    # or: live-maker
-```
+Deployment: `docs/DEPLOYMENT.md`. systemd unit: `deploy/polymarket-live-maker-cpp.service`.
 
-It discovers pools, polls books/mids on the cadence, computes the exact two-sided
-quotes and cancels, and **logs every order it WOULD place** — sending nothing.
-Confirm it picks sane pools and reacts to moves before going live.
+## License
 
-The original CLI is still here too (`pm-trader scan`, `pm-trader maker ...`,
-`pm-trader watch ...`, etc.) for manual inspection.
-
-## Go live — the operator's explicit switch
-
-Real orders flow **only** when you set, in `.env` (or the environment):
-
-```bash
-PM_TRADER_LIVE=1
-```
-
-Nothing flips this for you. The live submitter derives API creds from your key and
-posts/cancels real orders. **Stage the ramp:** start tiny (`LM_CAPITAL=200`),
-confirm **jump survival over days**, then scale capital up.
-
-### Safety controls
-
-- **Kill-switch** (`runner._kill_check`) — trips on a `KILL` file (`touch KILL` or
-  in `state/`) or the day's conservative book mark-to-market (from real fills)
-  breaching `LM_MAX_LOSS_PER_DAY`. On a trip it cancels all orders and stands down.
-- **Per-pool inventory cap** + inventory-skewed quotes (`LiveMakerBot`).
-- **Jump-halt + cooldown** — a pool that moves beyond the reward band is cancelled
-  and benched for several discovery rounds (`LiveMakerBot` halt + runner cooldown).
-- **SIGINT/SIGTERM** — graceful shutdown cancels every order.
-
-### Before real money: smoke-test the API path
-
-`py-clob-client` is not exercised by the test suite (it's behind `PM_TRADER_LIVE`
-and imported lazily). The exact field names for order responses / `get_trades`
-should be confirmed on a tiny live run before scaling — `ClobSubmitter` is written
-defensively but unverified end-to-end here.
-
-## Tests
-
-```bash
-pip install -e ".[dev]"
-pytest -q -m "not live"       # 890+ tests; no network, no SDK, no MCP
-```
+See `LICENSE`.
