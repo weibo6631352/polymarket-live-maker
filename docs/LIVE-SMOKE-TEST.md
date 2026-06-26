@@ -20,9 +20,9 @@ cp .env.example .env   # set POLYMARKET_PRIVATE_KEY (+ funder / signature type)
 - [ ] Fund the wallet with a small amount of USDC (e.g. $20–50).
 - [ ] One-time approvals: the bot calls `setup_trading_approvals()` only when live,
       OR run it once yourself. Confirm USDC allowance is set for the CLOB exchange.
-- [ ] Set conservative limits in `.env`: `LM_CAPITAL=20`, `LM_MAX_POOLS=1`,
-      `LM_MAX_LOSS_PER_DAY=5`, and the hard wallet floor `LM_MIN_WALLET_USDC=<your
-      floor>`.
+- [ ] Set conservative limits in `.env`: `LM_CAPITAL=20` (tiny capital is the
+      exposure throttle — it only funds ~1 pool), `LM_MAX_LOSS_PER_DAY=5`, and the
+      hard wallet floor `LM_MIN_WALLET_USDC=<your floor>`.
 
 ## 1. Signer / identity (one Python REPL)
 ```python
@@ -89,12 +89,12 @@ print(c.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLAT
 ## 6. Supervised dry-live → live
 - [ ] Run **dry-live** first (`python -m pm_trader.runner`, default) and watch the
       logged `DRY PLACE/CANCEL` decisions against the real book for a while.
-- [ ] Flip `PM_TRADER_LIVE=1`, start with `LM_CAPITAL=20 LM_MAX_POOLS=1`, and WATCH
+- [ ] Flip `PM_TRADER_LIVE=1`, start with `LM_CAPITAL=20`, and WATCH
       the first place → re-center → exit cycle end-to-end. Verify on the Polymarket
       UI that orders appear/cancel and inventory matches the ledger.
 - [ ] Test the kill-switch: `touch KILL` → confirm it cancels everything and stops.
 - [ ] Only after a clean multi-hour (ideally multi-day, across a jump) run, scale
-      `LM_CAPITAL` / `LM_MAX_POOLS` up.
+      `LM_CAPITAL` up.
 
 ## What this checklist de-risks (already verified, not blocking)
 OrderType GTC/FOK/GTD/FAK exist; `OrderArgs.size` is shares (flatten is

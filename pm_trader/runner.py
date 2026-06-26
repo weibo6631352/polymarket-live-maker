@@ -108,12 +108,6 @@ class RunnerConfig:
     # PAPER simulator (accrue_maker_rewards, maker_fill). live=True always wins.
     dry_live: bool = True
     capital: float = 200.0
-    max_pools: int = 40                 # cap on held pools. Unlike scan_top this DOES have
-                                        # a real (but high) bound: each held pool adds work
-                                        # to the 1s poll loop. The reflex cancel is decoupled
-                                        # (event-driven), so cancel latency is unaffected;
-                                        # capital + the ~uncorrelated-SAFE supply gate actual
-                                        # funding well below 40, so it's effectively non-binding
     min_daily: float = 80.0
     # how many top-by-daily pools to fetch books + classify jump-risk for each scan.
     # 0 = NO cap: classify EVERY eligible pool so a SAFE pool is never hidden in the
@@ -142,19 +136,16 @@ class RunnerConfig:
     # $/day (share x daily) to be worth the ~$50 capital lock. Reward-based, NOT
     # share-based: a small share of a high-daily pool still earns. 0 = off.
     min_pool_reward: float = 0.5
-    # capital-aware sizing: by default we quote each pool's min_size (more capital just
-    # funds more pools, saturating at ~the # of uncorrelated SAFE pools). Turn this on
-    # to instead SIZE UP each pool toward an even capital slice — reward is ~linear in
-    # size while our share stays small (the productive zone), so this is how $1k/$3k
-    # actually earn more than $200. Risk scales with size (a jump fills size x gap), so
-    # it is capped by size_share_cap AND the daily loss budget. OFF by default — sizing
-    # up is a conscious risk choice; the safe default stays min_size.
-    deploy_capital: bool = False
+    # capital-aware sizing (always on): SIZE UP each pool toward a score-weighted capital
+    # slice — reward is ~linear in size while our share stays small (the productive zone),
+    # so this is how $1k/$3k earn more than $200. Risk scales with size (a jump fills
+    # size x gap), so it is capped by size_share_cap AND the daily loss budget; a tight
+    # budget / zero loss budget floors size at each pool's min_size.
     size_share_cap: float = 0.33       # cap est per-pool share when sizing up (stay productive)
     # dynamic allocation plan (no hard pool count): fund a pool only while its risk-adjusted
-    # score is >= this fraction of the BEST pool's (drops the junk tail), and with
-    # deploy_capital ON, size each pool proportional to its score (capital flows to quality)
-    # capped at max_pool_frac of capital (diversification). Balances profit vs concentration.
+    # score is >= this fraction of the BEST pool's (drops the junk tail); size each pool
+    # proportional to its score (capital flows to quality) capped at max_pool_frac of
+    # capital (diversification). Balances profit vs concentration.
     quality_floor_frac: float = 0.10
     max_pool_frac: float = 0.25
     # GTD dead-man's switch (seconds). >0: live orders auto-expire after this long, so a
@@ -213,7 +204,6 @@ class RunnerConfig:
             live=os.environ.get("PM_TRADER_LIVE", "0").strip() == "1",
             dry_live=os.environ.get("LM_DRY_LIVE", "1").strip() != "0",
             capital=_f("LM_CAPITAL", 200.0),
-            max_pools=_i("LM_MAX_POOLS", 40),
             min_daily=_f("LM_MIN_DAILY", 80.0),
             scan_top=_i("LM_SCAN_TOP", 0),     # 0 = scan all eligible (no cap)
             max_token_overlap=_i("LM_MAX_TOKEN_OVERLAP", 1),  # was unwired -> stuck at 1
@@ -233,7 +223,6 @@ class RunnerConfig:
             reeval_interval_s=_f("LM_REEVAL_INTERVAL_S", 300.0),
             min_pool_reward=_f("LM_MIN_POOL_REWARD", 0.5),
             chop_aversion=_f("LM_CHOP_AVERSION", 0.7),
-            deploy_capital=os.environ.get("LM_DEPLOY_CAPITAL", "0").strip() == "1",
             size_share_cap=_f("LM_SIZE_SHARE_CAP", 0.33),
             quality_floor_frac=_f("LM_QUALITY_FLOOR_FRAC", 0.10),
             max_pool_frac=_f("LM_MAX_POOL_FRAC", 0.25),
@@ -254,7 +243,7 @@ class RunnerConfig:
         else:
             mode = "PAPER (simulator)"
         return (f"live-maker | mode={mode} | capital=${self.capital:.0f} | "
-                f"max_pools={self.max_pools} | poll={self.poll_seconds:.0f}s | "
+                f"poll={self.poll_seconds:.0f}s | "
                 f"min_daily=${self.min_daily:.0f} | max_loss=${self.max_loss:.0f}")
 
 
@@ -763,11 +752,10 @@ class LiveRunner:
             return
         cd = {k for k, v in self.cooldown.items() if v > 0}
         self.selected = select_pools(
-            self.report, capital=self.cfg.capital, max_pools=self.cfg.max_pools,
+            self.report, capital=self.cfg.capital,
             half_spread_ticks=self.cfg.half_spread_ticks,
             risk_tolerance_days=self.cfg.risk_tolerance_days,
             chop_aversion=self.cfg.chop_aversion,
-            deploy_capital=self.cfg.deploy_capital,
             size_share_cap=self.cfg.size_share_cap,
             loss_budget=self.cfg.max_loss,
             quality_floor_frac=self.cfg.quality_floor_frac,

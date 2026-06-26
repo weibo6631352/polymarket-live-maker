@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 
 from pm_trader.models import ApiError
+from pm_trader.orderbook import binding_qmin
 
 CLOB_BASE = "https://clob.polymarket.com"
 
@@ -277,7 +278,8 @@ def score_pool(pool: dict, book: dict, history: list[dict]) -> dict | None:
     c = pool["max_spread"]
     bscore, bnot = inband_score(bids, mid, c, True)
     ascore, anot = inband_score(asks, mid, c, False)
-    share = reward_share(pool["min_size"], pool["tick"], c, min(bscore, ascore))
+    qmin = binding_qmin(bscore, ascore, mid)  # official binding Qmin (single-sided credit mid-range)
+    share = reward_share(pool["min_size"], pool["tick"], c, qmin)
     capital = pool["min_size"]  # two-sided min_size locks ≈ min_size dollars
     reward_per_day = share * pool["daily"]
     gross_ann = (reward_per_day * 365 / capital * 100) if capital > 0 else 0.0
@@ -303,7 +305,7 @@ def score_pool(pool: dict, book: dict, history: list[dict]) -> dict | None:
         "spread_c": round((best_ask - best_bid) * 100, 2),
         "inband_notional": round(bnot + anot),
         "share": round(share, 4),
-        "min_side_score": round(min(bscore, ascore), 4),  # competitors' binding Qmin
+        "min_side_score": round(qmin, 4),  # competitors' binding Qmin (official formula)
         "empty_band": empty_band,
         "reward_per_day": round(reward_per_day, 2),
         "gross_ann_pct": round(gross_ann),

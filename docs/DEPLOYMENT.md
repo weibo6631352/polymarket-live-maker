@@ -69,13 +69,14 @@ cancel-latency profit lever is genuinely viable here.
 ## Go-live checklist (when the operator decides)
 
 1. Fund the Polymarket proxy wallet (funder `0x78dE…`) with USDC.
-2. Confirm `.env` capital/risk knobs (`LM_CAPITAL`, `LM_MAX_POOLS`,
+2. Confirm `.env` capital/risk knobs (`LM_CAPITAL`,
    `LM_MAX_LOSS_PER_DAY`, optional `LM_MIN_WALLET_USDC`).
    - **Set `LM_ORDER_EXPIRY_S=300`** (dead-man's switch): if the box/process goes
      offline, resting orders auto-cancel on Polymarket within ~5 min instead of
      sitting un-cancelled to be picked off. The bot re-places while online.
-   - To deploy more than ~6 pools' worth of capital, set `LM_DEPLOY_CAPITAL=1`
-     (sizes each pool up; risk scales with size — keep `LM_MAX_LOSS_PER_DAY` honest).
+   - Capital-aware sizing is automatic: more `LM_CAPITAL` sizes each pool up toward a
+     score-weighted slice (capped by `LM_SIZE_SHARE_CAP` / `LM_MAX_POOL_FRAC` and the
+     daily loss budget), so just raise `LM_CAPITAL` to deploy more — keep `LM_MAX_LOSS_PER_DAY` honest.
 3. Flip `PM_TRADER_LIVE=1` in `.env`.
 4. Run under a process manager (e.g. systemd) for auto-restart; `state/` holds the
    ledger + event log + rotating `runner.log` and must persist across restarts.

@@ -118,7 +118,7 @@ def _runner(*, engine=None, submitter=None, **cfg):
 class TestSelection:
     def test_reselect_places_new_pools(self):
         eng = FakeEngine()
-        r = _runner(engine=eng, capital=10_000.0, max_pools=3)
+        r = _runner(engine=eng, capital=10_000.0)
         r.report = {"pools": [_scan_pool("a", "Alpha"), _scan_pool("b", "Bravo")]}
         r.reselect()
         assert {p[0] for p in eng.placed} == {"0xa", "0xb"}
@@ -126,7 +126,7 @@ class TestSelection:
 
     def test_reselect_skips_already_placed(self):
         eng = FakeEngine()
-        r = _runner(engine=eng, capital=10_000.0, max_pools=3)
+        r = _runner(engine=eng, capital=10_000.0)
         r.report = {"pools": [_scan_pool("a", "Alpha")]}
         r.reselect()
         r.reselect()  # second pass should NOT re-place 'a'
@@ -134,7 +134,7 @@ class TestSelection:
 
     def test_reselect_skips_cooldown(self):
         eng = FakeEngine()
-        r = _runner(engine=eng, capital=10_000.0, max_pools=3)
+        r = _runner(engine=eng, capital=10_000.0)
         r.report = {"pools": [_scan_pool("a", "Alpha"), _scan_pool("b", "Bravo")]}
         r.cooldown = {"0xa": 2}
         r.reselect()
@@ -304,7 +304,7 @@ class TestReevaluateHeld:
         eng = FakeEngine()
         eng.quotes = [{"id": 9, "market_condition_id": "0xa", "token_id": "tok_a",
                        "inventory": 0.0}]
-        r = _runner(engine=eng, capital=10_000.0, max_pools=3)
+        r = _runner(engine=eng, capital=10_000.0)
         r.placed = {"0xa": {"token": "tok_a"}}
         r.placed_at = {"0xa": 0.0}
         r.report = {"pools": [_scan_pool("b", "Bravo")]}   # 0xa no longer ideal
@@ -317,7 +317,7 @@ class TestReevaluateHeld:
         eng = FakeEngine()
         # quality_floor_frac=0 isolates the reward filter (else Beta is also below the
         # relative quality floor vs Alpha); the dynamic floor is tested in test_portfolio.
-        r = _runner(engine=eng, capital=10_000.0, max_pools=3, min_pool_reward=0.5,
+        r = _runner(engine=eng, capital=10_000.0, min_pool_reward=0.5,
                     quality_floor_frac=0.0)
         r.report = {"pools": [
             _scan_pool("a", "Alpha", daily=400.0, share=0.20),    # $80/day -> keep
@@ -331,7 +331,7 @@ class TestReevaluateHeld:
         eng = FakeEngine()
         eng.quotes = [{"id": 9, "market_condition_id": "0xa", "token_id": "tok_a",
                        "inventory": 0.0}]
-        r = _runner(engine=eng, capital=10_000.0, max_pools=3)
+        r = _runner(engine=eng, capital=10_000.0)
         r.placed = {"0xa": {"token": "tok_a"}}
         r.placed_at = {"0xa": 0.0}
         r.report = {"pools": [_scan_pool("a", "Alpha")]}   # still ideal

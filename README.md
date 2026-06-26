@@ -69,8 +69,8 @@ PM_TRADER_LIVE=1
 ```
 
 Nothing flips this for you. The live submitter derives API creds from your key and
-posts/cancels real orders. **Stage the ramp:** start tiny (`LM_CAPITAL=200`,
-`LM_MAX_POOLS=3`), confirm **jump survival over days**, then scale.
+posts/cancels real orders. **Stage the ramp:** start tiny (`LM_CAPITAL=200`),
+confirm **jump survival over days**, then scale capital up.
 
 ### Safety controls
 

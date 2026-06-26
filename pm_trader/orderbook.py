@@ -207,12 +207,32 @@ def _inband_weight(s_cents: float, max_spread_c: float) -> float:
     return ((max_spread_c - s_cents) / max_spread_c) ** 2
 
 
+# Official PM single-sided divisor: for mid-range midpoints, lopsided/one-sided
+# liquidity still scores, at 1/c the rate (c=3). See docs.polymarket.com market-makers.
+SINGLE_SIDED_DIVISOR = 3.0
+
+
+def binding_qmin(bid_score: float, ask_score: float, mid: float) -> float:
+    """Official binding Qmin from two side-scores (matches PM's documented formula).
+
+    Mid-range midpoints ``[0.10, 0.90]`` credit lopsided/one-sided liquidity at a
+    reduced rate: ``max(min(b,a), max(b,a)/3)``. At the extremes (<0.10 or >0.90)
+    liquidity must be two-sided: ``min(b,a)``. NOTE: PM sums each maker's OWN Qmin;
+    anonymized L2 only exposes the aggregate book, so we apply the rule to the
+    aggregate as the closest proxy the public data allows.
+    """
+    lo = min(bid_score, ask_score)
+    if 0.10 <= mid <= 0.90:
+        return max(lo, max(bid_score, ask_score) / SINGLE_SIDED_DIVISOR)
+    return lo
+
+
 def book_inband_qmin(book: OrderBook, mid: float, max_spread_c: float) -> float:
-    """Binding-side (min of bid/ask) in-band reward score of the live book.
+    """Competing makers' binding Qmin of the live in-band book.
 
     Sums each side's ``size * weight`` over the levels within ``max_spread_c`` of
-    ``mid``, then returns the lighter side — the competing makers' Qmin, used as
-    the denominator term when estimating our own reward share.
+    ``mid``, then folds them with the official ``binding_qmin`` rule — the
+    denominator term when estimating our own reward share.
     """
     bid_score = sum(
         lvl.size * _inband_weight((mid - lvl.price) * 100.0, max_spread_c)
@@ -222,7 +242,7 @@ def book_inband_qmin(book: OrderBook, mid: float, max_spread_c: float) -> float:
         lvl.size * _inband_weight((lvl.price - mid) * 100.0, max_spread_c)
         for lvl in book.asks
     )
-    return min(bid_score, ask_score)
+    return binding_qmin(bid_score, ask_score, mid)
 
 
 def depth_ahead(book: OrderBook, price: float, side: str) -> tuple[float, float]:

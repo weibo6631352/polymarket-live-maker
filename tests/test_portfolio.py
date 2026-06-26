@@ -80,11 +80,6 @@ class TestSelectPools:
         sel = select_pools(rep, capital=200.0, half_spread_ticks=2)  # 60c half-spread → cap 0
         assert sel == []
 
-    def test_max_pools_limit(self):
-        rep = {"pools": [_pool(f"t{i}", min_size=1.0) for i in range(10)]}
-        sel = select_pools(rep, capital=1000.0, max_pools=3)
-        assert len(sel) == 3
-
 
 # ---------------------------------------------------------------------------
 # MakerPortfolio
@@ -276,7 +271,7 @@ class TestChopAwareRanking:
     def test_calm_pool_ranks_above_choppy_equal_reward(self):
         from pm_trader.portfolio import select_pools
         rep = {"pools": [self._pool("calm", 0.5), self._pool("choppy", 9.0)]}
-        sel = select_pools(rep, capital=10_000.0, max_pools=2)
+        sel = select_pools(rep, capital=10_000.0)
         assert [s["condition_id"] for s in sel] == ["calm", "choppy"]  # calm first
 
     def test_missing_vol_no_penalty(self):
@@ -293,15 +288,16 @@ class TestCapitalAwareSizing:
                 "days_wiped": 5.0, "reward_per_day": 12.0, "daily_vol_c": 1.0,
                 "min_side_score": comp, "max_jump_c": max_jump_c}
 
-    def test_off_keeps_min_size(self):
+    def test_zero_loss_budget_keeps_min_size(self):
         from pm_trader.portfolio import select_pools
-        sel = select_pools({"pools": [self._pool("a")]}, capital=3000.0, max_pools=6)
-        assert sel[0]["size"] == 50.0                       # default: min_size
+        # loss_budget defaults to 0 -> deploy sizing floors at min_size
+        sel = select_pools({"pools": [self._pool("a")]}, capital=3000.0)
+        assert sel[0]["size"] == 50.0                       # no risk budget: min_size
 
-    def test_on_sizes_up_within_capital(self):
+    def test_sizes_up_within_capital(self):
         from pm_trader.portfolio import select_pools
-        sel = select_pools({"pools": [self._pool("a")]}, capital=3000.0, max_pools=6,
-                           deploy_capital=True, loss_budget=100.0)
+        sel = select_pools({"pools": [self._pool("a")]}, capital=3000.0,
+                           loss_budget=100.0)
         s = sel[0]
         assert s["size"] > 50.0                             # sized up beyond min_size
         assert s["est_daily_reward"] > 12.0                 # more size -> more reward
@@ -313,7 +309,7 @@ class TestCapitalAwareSizing:
         # a jumpy pool (max_jump 40c) with a tiny loss budget must NOT size up:
         # cap_risk = loss_budget(12) / 0.40 = 30 < min_size 50 -> pinned at min_size
         sel = select_pools({"pools": [self._pool("a", max_jump_c=40.0)]},
-                           capital=3000.0, deploy_capital=True, loss_budget=12.0)
+                           capital=3000.0, loss_budget=12.0)
         assert sel[0]["size"] == 50.0                       # risk caps below min_size -> floored
 
 
