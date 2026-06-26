@@ -42,7 +42,7 @@ def _pool(token="t1", daily=400.0, share=0.3, min_size=50.0, tick=0.01,
         "question": q, "condition_id": "0x" + token, "token": token,
         "daily": daily, "share": share, "min_size": min_size, "tick": tick,
         "max_spread_c": 4.5, "jump_verdict": verdict, "empty_band": empty,
-        "min_side_score": _mss(share, min_size, tick),
+        "min_side_score": _mss(share, min_size, tick), "max_jump_c": 5.0,
     }
 
 
