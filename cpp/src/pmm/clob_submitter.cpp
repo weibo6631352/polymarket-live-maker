@@ -801,6 +801,30 @@ json ClobSubmitter::query_rewards(const std::string& date) {
         out["live_pct_markets"] = live;
         out["pct_by_condition"] = by_cond;
     }
+    // 3) /rewards/user/total — 官方汇总总额 (按 asset 分组), 权威 ground truth。比 #1 自己逐行求和可靠:
+    //    /markets 的 earnings 是日内估计 (会在结算时修正); /total 是官方结算口径。校准利润模型以此为准。
+    {
+        const std::string path = "/rewards/user/total";
+        std::string query = path + "?maker_address=" + maker_lc + "&signature_type=" + st;
+        if (!date.empty()) query += "&date=" + date;
+        const std::string ts = std::to_string(now_unix());
+        const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
+        out["total_http"] = r.status;
+        double official = 0.0;
+        try {
+            const json j = json::parse(r.body);  // 数组 [{date, asset_address, earnings, asset_rate}]
+            const json* arr = j.is_array() ? &j : ju::find(j, "data");
+            if (arr != nullptr && arr->is_array())
+                for (const auto& t : *arr) {
+                    double e = 0.0, rate = 1.0;
+                    if (const json* ev = ju::find(t, "earnings")) e = ju::to_double(*ev);
+                    if (const json* rv = ju::find(t, "asset_rate")) rate = ju::to_double(*rv);
+                    official += e * (rate > 0.0 ? rate : 1.0);  // 折成 USDC (asset_rate≈0.999)
+                }
+        } catch (...) {
+        }
+        out["official_total"] = std::nearbyint(official * 1e4) / 1e4;
+    }
     return out;
 }
 
