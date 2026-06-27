@@ -500,12 +500,14 @@ json ClobSubmitter::flatten(const std::string& token_id, const std::string& side
             std::this_thread::sleep_for(std::chrono::milliseconds(600));
             continue;
         }
-        // 扫单价: 比触价再激进 ~8 档, 让 FAK 跨过多个盘口档位吃满。
+        // 扫单价: 阶梯式激进 (第 attempt 次扫 2/4/6/8… 档, 封顶 8)。流动盘口第一次 2 档就吃满 → 省穿价
+        // 滑点; 薄盘口/跳变下随重试逐步加深保证清零。比固定 8 档每次都付满滑点省钱 (mid 不可预测, 不能持有等)。
+        const double sweep = std::min(8.0, 2.0 * static_cast<double>(attempt)) * tick_d;
         double px = *mkt_px;
         if (is_buy)
-            px = std::min(1.0 - tick_d, px + 8.0 * tick_d);  // 空头回补: 抬价扫 ask
+            px = std::min(1.0 - tick_d, px + sweep);  // 空头回补: 抬价扫 ask
         else
-            px = std::max(tick_d, px - 8.0 * tick_d);  // 平多头: 压价扫 bid
+            px = std::max(tick_d, px - sweep);  // 平多头: 压价扫 bid
         const OrderAmounts amt = is_buy ? get_market_order_amounts(true, remaining * px, px, rc)
                                         : get_market_order_amounts(false, remaining, px, rc);
 
