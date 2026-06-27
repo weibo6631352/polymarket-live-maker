@@ -91,6 +91,26 @@ double pow10i(int n) {
     return f;
 }
 
+// 从下单 response 解析"实际成交股数": 仅当 status=matched/delayed 才计。REJECTED/其它的 making/takingAmount
+// 是订单"意向量"非"成交量" — 误读会把"被拒的平仓"当成成功 → 置 inv=0 退场 → 真仓孤立 (实测孤立根因)。
+// BUY(回补)看 takingAmount(买入股数), SELL(平多)看 makingAmount(卖出股数)。
+double order_filled_shares(const json& j, bool is_buy) {
+    std::string st;
+    if (const json* v = ju::find(j, "status")) st = ju::to_str(*v);
+    for (char& ch : st) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (st != "matched" && st != "delayed") return 0.0;
+    const json* v = ju::find(j, is_buy ? "takingAmount" : "makingAmount");
+    if (v == nullptr) return 0.0;
+    if (v->is_number()) return v->get<double>();
+    if (v->is_string()) {
+        try {
+            return std::stod(v->get<std::string>());
+        } catch (...) {
+        }
+    }
+    return 0.0;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -474,20 +494,7 @@ json ClobSubmitter::flatten(const std::string& token_id, const std::string& side
     }
     // 重试到清零: FAK 在薄盘口只吃顶档 → 部分成交 → 残量孤立 (实测: 247 股大单被扫后只平掉一点,
     // 剩 247 股孤立, 手动平时价格已跌→亏)。循环最多 N 次, 每次重新取价+扫剩余量, 直到仓位清掉。
-    const auto filled_shares = [](const json& j) -> double {  // SELL→makingAmount(股); BUY→takingAmount(股)
-        auto num = [](const json* v) -> double {
-            if (v == nullptr) return 0.0;
-            if (v->is_number()) return v->get<double>();
-            if (v->is_string()) {
-                try {
-                    return std::stod(v->get<std::string>());
-                } catch (...) {
-                }
-            }
-            return 0.0;
-        };
-        return num(ju::find(j, "makingAmount"));
-    };
+    // 成交量由 order_filled_shares 解析 (仅 matched 才计 — REJECTED 不算, 修"被拒当成功"的孤立根因)。
     constexpr int kMaxAttempts = 6;
     double remaining = size;
     double total_filled = 0.0;
@@ -559,21 +566,7 @@ json ClobSubmitter::flatten(const std::string& token_id, const std::string& side
             const json j = json::parse(r.body);
             if (const json* v = ju::find(j, "status")) last_status = ju::to_str(*v);
             if (const json* v = ju::find(j, "orderID")) last_order_id = ju::to_str(*v);
-            made = is_buy ? 0.0 : filled_shares(j);  // SELL: 卖出股数 = makingAmount
-            if (is_buy) {  // 空头回补: takingAmount = 买入股数
-                auto num = [](const json* v) -> double {
-                    if (v == nullptr) return 0.0;
-                    if (v->is_number()) return v->get<double>();
-                    if (v->is_string()) {
-                        try {
-                            return std::stod(v->get<std::string>());
-                        } catch (...) {
-                        }
-                    }
-                    return 0.0;
-                };
-                made = num(ju::find(j, "takingAmount"));
-            }
+            made = order_filled_shares(j, is_buy);  // 仅 matched 才计 (REJECTED 的 making/takingAmount 是意向量)
         } catch (...) {
         }
         if (made > 0.0) {
