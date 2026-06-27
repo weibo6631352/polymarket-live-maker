@@ -2,6 +2,7 @@
 #include "pmm/api.hpp"
 #include "pmm/env.hpp"
 #include "pmm/models.hpp"
+#include "pmm/orderbook.hpp"
 #include "pmm/rewards.hpp"
 #include "pmm/strutil.hpp"
 
@@ -57,6 +58,19 @@ int main() {
     const json m = json::parse(R"({"conditionId":null,"condition_id":"0xAAA","slug":"s"})");
     const pmm::Market mk = pmm::parse_market(m);
     Check(mk.condition_id.empty(), "#6 conditionId=null -> no snake_case fallback (matches Python None)");
+
+    // #7 利润校准 κ: 把竞争对手分充气 1/κ (实测 κ≈0.237, 毛估高估份额 4.2×) → 估计份额↓ → 奖励↓ →
+    //    net=reward-bleed 的最优半宽变宽 (之前高估奖励→挂太紧→多被逆选)。验证这个行为方向。
+    {
+        const double daily = 50.0, v = 3.0, min_sz = 100.0, tick_c = 1.0, qmin = 200.0, sigma = 0.3;
+        const double ppd = 86400.0;  // poll=1s
+        const auto base = pmm::orderbook::optimal_half_spread(daily, v, min_sz, tick_c, qmin, sigma, ppd);
+        const auto calib =
+            pmm::orderbook::optimal_half_spread(daily, v, min_sz, tick_c, qmin / 0.237, sigma, ppd);
+        Check(calib.share < base.share, "#7 kappa: inflated competition -> strictly lower estimated share");
+        Check(calib.half_spread_c >= base.half_spread_c,
+              "#7 kappa: lower reward -> wider-or-equal optimal half-spread");
+    }
 
     std::printf(g_fail ? "\n%d CHECK(S) FAILED\n" : "\nALL CHECKS PASSED\n", g_fail);
     return g_fail ? 1 : 0;
