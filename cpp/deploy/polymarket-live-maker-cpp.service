@@ -30,7 +30,10 @@ TasksMax=400
 # graceful: SIGTERM -> the runner trips kill-switch -> cancels ALL resting orders +
 # flattens inventory before exit; then the single-instance lock (flock) is released.
 KillSignal=SIGTERM
-TimeoutStopSec=30
+# 关停要撤掉所有挂单 + 平掉库存 (LIVE 时每个池一次限速 HTTP), 必须给足时间; 到点 SIGKILL
+# 会打断撤单循环 → 真单残留在挂单簿上。runner 主循环已改为可中断睡眠 (收到 SIGTERM ~0.2s
+# 内开始关停, 不再拖一个 poll 周期); 90s 给 LIVE 多池撤单/平仓留足余量。
+TimeoutStopSec=90
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=live-maker

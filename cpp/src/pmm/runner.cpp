@@ -173,6 +173,10 @@ void LiveRunner::run() {
         double next_poll = mono_now();
         while (!stop_.load()) {
             if (g_signal_stop.load()) trip_kill("signal");
+            // 收到信号/kill 立刻退出: 不再多跑一次 poll_once + 整睡一个 poll 周期。
+            // 否则关停被拖到 ~poll_seconds 之后才开始, 超过 systemd TimeoutStopSec 被 SIGKILL,
+            // 真单残留在挂单簿上 (DRY 实测 SIGTERM→退出 ~40s, prod poll=60s 可逼近 ~120s)。
+            if (stop_.load()) break;
             if (auto reason = kill_check()) {
                 trip_kill(*reason);
                 break;
@@ -194,7 +198,13 @@ void LiveRunner::run() {
                 next_poll = mono_now();  // 超预算 → 重锚, 不睡
                 delay = 0.0;
             }
-            sleeper_(delay);
+            // 可中断睡眠: 切片 (≤0.2s) 轮询 stop_/信号, SIGTERM 后 ~0.2s 内醒来走关停。
+            // (旧实现 sleeper_(delay) 整睡, 信号要等满一个 poll 周期才被察觉。)
+            while (delay > 0.0 && !stop_.load() && !g_signal_stop.load()) {
+                const double slice = delay < 0.2 ? delay : 0.2;
+                sleeper_(slice);
+                delay -= slice;
+            }
         }
     } catch (...) {
         // 任意异常都要走关停
