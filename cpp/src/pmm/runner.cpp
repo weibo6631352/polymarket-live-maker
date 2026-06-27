@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "pmm/clob_submitter.hpp"
+#include "pmm/env.hpp"
 #include "pmm/maker_live.hpp"
 #include "pmm/orderbook.hpp"
 #include "pmm/round.hpp"
@@ -167,6 +168,15 @@ void LiveRunner::run() {
     start_ws();
     rehydrate();
     reconcile_broker_orders();
+    // 启动对账: 把账本两腿持仓校正到链上真实持仓 (修手动平仓/崩溃留下的幻象库存; 修双边记账根因之一)。
+    if (use_live_path() && engine_ != nullptr) {
+        const std::string funder = pmm::env::str("POLYMARKET_FUNDER");
+        if (!funder.empty()) {
+            const int fixed = engine_->reconcile_inventory(engine_->api().chain_positions(funder));
+            if (fixed > 0)
+                std::fprintf(stderr, "startup reconcile: corrected %d quote(s) to on-chain truth\n", fixed);
+        }
+    }
     try {
         if (auto reason = kill_check()) {
             trip_kill(*reason);

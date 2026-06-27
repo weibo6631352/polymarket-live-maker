@@ -526,7 +526,8 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
 
         // 1. RECONCILE — 池退出/结算 → 撤两腿 + 卖掉两边持仓 + exit
         if (!r.pool || daily_rate <= 0.0) {
-            double rd_pnl = 0.0, rd_bleed = 0.0, yes_inv = quote.inventory, no_inv = 0.0;
+            double rd_pnl = 0.0, rd_bleed = 0.0, yes_inv = quote.inventory,
+                   no_inv = quote.complement_inventory;
             int rn = 0;
             for (const auto& rf : fills) {  // YES 腿 (mid 空间)
                 const double sgn = (to_lower(rf.side) == "buy") ? 1.0 : -1.0;
@@ -550,17 +551,19 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
             u.last_accrued_at = unix_to_iso(now);
             u.inventory_pnl = quote.inventory_pnl + rd_pnl;
             if (!(okc && fy && fn)) {
-                if (!fn && std::abs(no_inv) >= 1e-9)
+                if (std::abs(yes_inv) >= 1.0 || std::abs(no_inv) >= 1.0)
                     std::fprintf(stderr,
-                                 "WARN orphaned NO inventory %.4f on %s (flatten failed) — flatten manually\n",
-                                 no_inv, no_token.c_str());
+                                 "WARN reconcile flatten incomplete: YES=%.2f NO=%.2f — persisted, retry\n",
+                                 yes_inv, no_inv);
                 u.inventory = yes_inv;
+                u.complement_inventory = no_inv;  // 持久化两腿残留 → 重试
                 db_.update_maker_quote_accrual(quote.id, u);
                 results.push_back({{"quote", maker_quote_to_dict(quote)},
                                    {"exit_failed", "rewards_ended"}, {"mid", quote.last_mid}});
                 continue;
             }
             u.inventory = 0.0;
+            u.complement_inventory = 0.0;
             const MakerQuote final_q = db_.update_maker_quote_accrual(quote.id, u);
             exit_maker_quote(final_q, quote.last_mid, "rewards_ended", results,
                              maker_crossing_cost_c_ / 100.0 * (std::abs(yes_inv) + std::abs(no_inv)),
@@ -594,12 +597,14 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
             d_no += sgn * f.size; fill_pnl += fp; bleed += std::max(0.0, -fp); ++n_fills;
         }
         const double yes_inv = quote.inventory + d_yes;
-        const double no_inv = d_no;
-        const double pnl_delta = quote.inventory * (mid - quote.last_mid) + fill_pnl;
+        const double no_inv = quote.complement_inventory + d_no;  // 累积 NO 持仓 (跨轮持久化, 不再每轮归零丢失)
+        // MTM: YES 腿在 mid 空间; NO 腿在 (1-mid) 空间 → comp_inv×((1-mid)-(1-last)) = comp_inv×(last-mid)。
+        const double pnl_delta = quote.inventory * (mid - quote.last_mid) +
+                                 quote.complement_inventory * (quote.last_mid - mid) + fill_pnl;
 
-        // 2. 任一腿被吃 → 失败安全: 撤两腿 + 卖掉两边持仓 + 退出该池
+        // 2. 任一腿被吃 OR 有残留持仓(上轮平仓失败)→ 失败安全: 撤两腿 + 平两腿(跨轮重试残留)+ 退场
         //    (v1 保守, 不在双币上做净额/skew; 被成交即退场, cooldown 后可重选)。
-        if (n_fills > 0) {
+        if (n_fills > 0 || std::abs(quote.inventory) >= 1.0 || std::abs(quote.complement_inventory) >= 1.0) {
             const bool okc = cancel_both();
             const bool fy = action_ok(flatten_live(submitter, quote.token_id, yes_inv));
             const bool fn = no_token.empty() || action_ok(flatten_live(submitter, no_token, no_inv));
@@ -612,19 +617,21 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
             u.last_accrued_at = unix_to_iso(now);
             u.inventory_pnl = quote.inventory_pnl + pnl_delta;
             if (!(okc && fy && fn)) {
-                // NO 腿 flatten 失败时 no_inv 无列持久化 → 真实 NO 份额会被孤立。先大声告警 (人工/监督处理),
-                // 完整修复 = 给 maker_quotes 加 complement_inventory 列并重试。YES 腿经 inventory 已会重试。
-                if (!fn && std::abs(no_inv) >= 1e-9)
+                // 两腿持仓都持久化 (inventory + complement_inventory) → 下轮仍命中本分支重试平仓, 不再孤立。
+                if (std::abs(yes_inv) >= 1.0 || std::abs(no_inv) >= 1.0)
                     std::fprintf(stderr,
-                                 "WARN orphaned NO inventory %.4f on %s (flatten failed) — flatten manually\n",
-                                 no_inv, no_token.c_str());
+                                 "WARN flatten incomplete: YES=%.2f NO=%.2f — persisted, retry next cycle\n",
+                                 yes_inv, no_inv);
                 u.inventory = yes_inv;
+                u.complement_inventory = no_inv;  // 持久化 NO 残留 → 下轮重试 (修复孤立根因)
                 db_.update_maker_quote_accrual(quote.id, u);
                 results.push_back({{"quote", maker_quote_to_dict(quote)}, {"exit_failed", "filled_exit"},
-                                   {"mid", mid}, {"inventory", round_to(yes_inv, 4)}});
+                                   {"mid", mid}, {"inventory", round_to(yes_inv, 4)},
+                                   {"complement_inventory", round_to(no_inv, 4)}});
                 continue;
             }
             u.inventory = 0.0;
+            u.complement_inventory = 0.0;
             const MakerQuote final_q = db_.update_maker_quote_accrual(quote.id, u);
             exit_maker_quote(final_q, mid, "filled_exit", results,
                              maker_crossing_cost_c_ / 100.0 * (std::abs(yes_inv) + std::abs(no_inv)),
@@ -647,12 +654,14 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
             u.inventory_pnl = quote.inventory_pnl + pnl_delta;
             if (!okc) {
                 u.inventory = quote.inventory;
+                u.complement_inventory = quote.complement_inventory;
                 db_.update_maker_quote_accrual(quote.id, u);
                 results.push_back({{"quote", maker_quote_to_dict(quote)}, {"exit_failed", "drift_exit"},
                                    {"mid", mid}});
                 continue;
             }
             u.inventory = 0.0;
+            u.complement_inventory = 0.0;
             const MakerQuote final_q = db_.update_maker_quote_accrual(quote.id, u);
             exit_maker_quote(final_q, mid, "drift_exit", results, 0.0,
                              json{{"reward", reward}, {"inventory_pnl_delta", pnl_delta},
@@ -688,6 +697,7 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
         u.last_mid = mid;
         u.last_accrued_at = unix_to_iso(now);
         u.inventory = quote.inventory;  // 无成交 → 库存不变 (常为 0)
+        u.complement_inventory = quote.complement_inventory;  // NO 腿同样保持 (无成交时常为 0)
         u.inventory_pnl = quote.inventory_pnl + pnl_delta;
         const MakerQuote updated = db_.update_maker_quote_accrual(quote.id, u);
         results.push_back({{"quote", maker_quote_to_dict(updated)},
@@ -702,6 +712,46 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
     }
     record_equity();
     return results;
+}
+
+// ---- reconcile_inventory: 启动时把账本两腿持仓校正到链上真实 (清幻象 + 找回真实仓) ----
+int Engine::reconcile_inventory(const std::map<std::string, double>& chain) {
+    int fixed = 0;
+    std::set<std::string> matched;
+    for (const auto& q : db_.get_active_maker_quotes()) {
+        double real_yes = 0.0, real_no = 0.0;
+        if (auto it = chain.find(q.token_id); it != chain.end()) {
+            real_yes = it->second;
+            matched.insert(q.token_id);
+        }
+        if (!q.complement_token_id.empty()) {
+            if (auto it = chain.find(q.complement_token_id); it != chain.end()) {
+                real_no = it->second;
+                matched.insert(q.complement_token_id);
+            }
+        }
+        if (std::abs(q.inventory - real_yes) < 0.5 && std::abs(q.complement_inventory - real_no) < 0.5)
+            continue;  // 账本与链上一致, 不动
+        AccrualUpdate u;
+        u.accrued_rewards = q.accrued_rewards;
+        u.realized_bleed = q.realized_bleed;
+        u.fills = q.fills;
+        u.last_mid = q.last_mid;
+        u.last_accrued_at = q.last_accrued_at;
+        u.inventory = real_yes;
+        u.complement_inventory = real_no;
+        u.inventory_pnl = q.inventory_pnl;
+        db_.update_maker_quote_accrual(q.id, u);
+        std::fprintf(stderr,
+                     "reconcile: quote %d YES %.2f->%.2f, NO %.2f->%.2f (chain truth, was phantom/stale)\n",
+                     q.id, q.inventory, real_yes, q.complement_inventory, real_no);
+        ++fixed;
+    }
+    for (const auto& [tok, sz] : chain)  // 链上有、但没对应活跃 quote 的真实仓 → 告警 (监督人工处理)
+        if (matched.count(tok) == 0)
+            std::fprintf(stderr, "reconcile: WARN untracked on-chain position %.2f on %s (no active quote)\n",
+                         sz, tok.substr(0, 14).c_str());
+    return fixed;
 }
 
 // ---- suggest_maker_half_spread ----
@@ -781,7 +831,7 @@ json Engine::get_maker_summary() {
     for (const auto& q : quotes) {
         if (q.status == "active") {
             committed += q.committed_capital;
-            open_inventory += q.inventory;
+            open_inventory += std::abs(q.inventory) + std::abs(q.complement_inventory);  // 两腿持仓
             ++active;
         }
         reward_income += q.accrued_rewards;
@@ -815,6 +865,7 @@ json maker_quote_to_dict(const MakerQuote& q) {
             {"max_inventory", q.max_inventory},
             {"skew_strength", q.skew_strength},
             {"inventory", q.inventory},
+            {"complement_inventory", q.complement_inventory},
             {"inventory_pnl", q.inventory_pnl},
             {"entry_mid", q.entry_mid},
             {"committed_capital", q.committed_capital},

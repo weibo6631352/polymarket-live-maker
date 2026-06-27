@@ -42,7 +42,28 @@ int main() {
     q.last_mid = 0.50;
     q.entry_mid = 0.50;
     q.last_accrued_at = "2026-06-26T00:00:00.000000+00:00";
+    q.complement_token_id = "888";  // NO 腿 token (双边记账)
     const pmm::MakerQuote mq = engine.db().create_maker_quote(q);
+
+    // 双边记账修复: complement_inventory (NO 腿) 单独持久化 + 启动 reconcile 对账链上真实。
+    {
+        pmm::AccrualUpdate u;  // 制造幻象: 账本写入链上不存在的 NO 库存 (= 手动平仓/崩溃后的残留)
+        u.accrued_rewards = mq.accrued_rewards;
+        u.realized_bleed = mq.realized_bleed;
+        u.fills = mq.fills;
+        u.last_mid = mq.last_mid;
+        u.last_accrued_at = mq.last_accrued_at;
+        u.inventory = 0.0;
+        u.complement_inventory = 100.0;
+        u.inventory_pnl = mq.inventory_pnl;
+        const pmm::MakerQuote after = engine.db().update_maker_quote_accrual(mq.id, u);
+        Check(near(after.complement_inventory, 100.0), "complement_inventory persists (new NO-leg column)");
+        Check(engine.reconcile_inventory({}) == 1, "reconcile: empty chain -> clears 1 phantom");
+        Check(near(engine.db().get_maker_quote(mq.id)->complement_inventory, 0.0), "phantom NO inv -> 0");
+        Check(engine.reconcile_inventory({{"888", 50.0}}) == 1, "reconcile: recovers real on-chain NO");
+        Check(near(engine.db().get_maker_quote(mq.id)->complement_inventory, 50.0), "real NO inv -> 50");
+        engine.reconcile_inventory({});  // 复位, 不影响后续测试
+    }
 
     // summary 反映该 active quote
     const auto sum = engine.get_maker_summary();

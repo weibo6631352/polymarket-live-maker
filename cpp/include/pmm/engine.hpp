@@ -71,6 +71,9 @@ public:
                                                           int recenter_ticks = 1,
                                                           const std::set<std::string>* force_recenter = nullptr);
 
+    // 启动对账: 把活跃 quote 的两腿持仓校正到链上真实持仓 (清幻象 + 找回真实仓)。返回校正的 quote 数。
+    int reconcile_inventory(const std::map<std::string, double>& chain_positions);
+
     nlohmann::json suggest_maker_half_spread(const std::string& slug_or_id, const std::string& outcome = "yes",
                                              double cancel_efficiency = 0.0, double poll_seconds = 60.0);
     std::vector<nlohmann::json> get_maker_quotes();

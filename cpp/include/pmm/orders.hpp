@@ -51,7 +51,8 @@ struct MakerQuote {
     double cancel_efficiency{0.0};
     double max_inventory{0.0};
     double skew_strength{0.0};
-    double inventory{0.0};
+    double inventory{0.0};             // YES 腿 (token_id) 持仓
+    double complement_inventory{0.0};  // NO 腿 (complement_token_id) 持仓; 单独持久化, 跨轮重试平仓
     double inventory_pnl{0.0};
     double entry_mid{0.0};
     double committed_capital{0.0};
@@ -92,6 +93,7 @@ struct AccrualUpdate {
     double last_mid{0.0};
     std::string last_accrued_at;
     double inventory{0.0};
+    double complement_inventory{0.0};  // NO 腿持仓 (跨轮持久化重试平仓)
     double inventory_pnl{0.0};
 };
 

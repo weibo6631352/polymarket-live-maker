@@ -14,6 +14,7 @@ namespace {
 
 constexpr char kGammaHost[] = "gamma-api.polymarket.com";
 constexpr char kClobHost[] = "clob.polymarket.com";
+constexpr char kDataApiHost[] = "data-api.polymarket.com";  // 链上真实持仓 (启动对账, 无鉴权)
 constexpr int kCacheTtlSeconds = 300;
 
 namespace ju = pmm::jsonutil;
@@ -199,7 +200,27 @@ PolymarketClient::PolymarketClient(Database& db, RateLimiter* rate_limiter, std:
     : db_(db),
       rate_limiter_(rate_limiter),
       gamma_(kGammaHost, pool_size),
-      clob_(kClobHost, pool_size) {}
+      clob_(kClobHost, pool_size),
+      data_api_(kDataApiHost, pool_size) {}
+
+// 链上真实持仓 (token -> 净 size); 启动对账用, 把账本校正到现实 (清幻象 + 找回真实仓)。无鉴权。
+std::map<std::string, double> PolymarketClient::chain_positions(const std::string& user) {
+    std::map<std::string, double> out;
+    if (user.empty()) return out;
+    try {
+        const net::HttpResponse r = data_api_.Get("/positions?user=" + user + "&sizeThreshold=0.5");
+        if (r.status == 0 || r.status >= 400) return out;
+        const json data = json::parse(r.body);
+        if (!data.is_array()) return out;
+        for (const auto& p : data) {
+            const std::string asset = p.value("asset", std::string{});
+            const double size = p.value("size", 0.0);
+            if (!asset.empty() && std::abs(size) >= 0.5) out[asset] = size;
+        }
+    } catch (...) {
+    }
+    return out;
+}
 
 json PolymarketClient::gamma_get(const std::string& path, const Params& params) {
     const net::HttpResponse r = gamma_.Get(path + build_query(params));

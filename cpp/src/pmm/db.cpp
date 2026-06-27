@@ -475,7 +475,8 @@ CREATE TABLE IF NOT EXISTS maker_quotes (
     last_mid REAL NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_accrued_at TEXT NOT NULL,
-    complement_token_id TEXT NOT NULL DEFAULT ''
+    complement_token_id TEXT NOT NULL DEFAULT '',
+    complement_inventory REAL NOT NULL DEFAULT 0
 );
 )SQL";
 
@@ -539,6 +540,7 @@ MakerQuote row_to_maker_quote(const Stmt& s) {
     q.created_at = s.col_text(23);
     q.last_accrued_at = s.col_text(24);
     q.complement_token_id = s.col_is_null(25) ? std::string{} : s.col_text(25);
+    q.complement_inventory = s.col_double(26);
     return q;
 }
 
@@ -555,6 +557,16 @@ void Database::init_orders_schema() {
     }
     if (!has_comp) {
         exec(conn(), "ALTER TABLE maker_quotes ADD COLUMN complement_token_id TEXT NOT NULL DEFAULT ''");
+    }
+    // 迁移: 补 complement_inventory 列 — NO 腿 (BUY-NO) 持仓单独持久化, 跨轮重试平仓 (双边记账修复)。
+    bool has_comp_inv = false;
+    {
+        Stmt s(conn(),
+               "SELECT 1 FROM pragma_table_info('maker_quotes') WHERE name = 'complement_inventory'");
+        has_comp_inv = s.step();
+    }
+    if (!has_comp_inv) {
+        exec(conn(), "ALTER TABLE maker_quotes ADD COLUMN complement_inventory REAL NOT NULL DEFAULT 0");
     }
 }
 
@@ -716,7 +728,8 @@ MakerQuote Database::update_maker_quote_accrual(int quote_id, const AccrualUpdat
     {
         Stmt s(conn(),
                "UPDATE maker_quotes SET accrued_rewards = ?, realized_bleed = ?, fills = ?, "
-               "last_mid = ?, last_accrued_at = ?, inventory = ?, inventory_pnl = ? WHERE id = ?");
+               "last_mid = ?, last_accrued_at = ?, inventory = ?, inventory_pnl = ?, "
+               "complement_inventory = ? WHERE id = ?");
         s.bind_double(1, u.accrued_rewards);
         s.bind_double(2, u.realized_bleed);
         s.bind_int(3, u.fills);
@@ -724,7 +737,8 @@ MakerQuote Database::update_maker_quote_accrual(int quote_id, const AccrualUpdat
         s.bind_text(5, u.last_accrued_at);
         s.bind_double(6, u.inventory);
         s.bind_double(7, u.inventory_pnl);
-        s.bind_int(8, quote_id);
+        s.bind_double(8, u.complement_inventory);
+        s.bind_int(9, quote_id);
         s.step();
     }
     return *get_maker_quote(quote_id);

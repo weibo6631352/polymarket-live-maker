@@ -3,6 +3,7 @@
 // 跑在复用的 PersistentHttps (经 HttpsPool 并发) 上。市场元数据缓存 5min (SQLite); 价格/订单簿从不缓存。
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -57,6 +58,9 @@ public:
     // 注入共享 TokenBucket (runner 让 engine 的读路径也走全局 req/s 预算)。
     void set_rate_limiter(RateLimiter* rl) noexcept { rate_limiter_ = rl; }
 
+    // 链上真实持仓 (token -> 净 size); 启动对账用 (清幻象 + 找回真实仓)。无鉴权, 失败返回空。
+    [[nodiscard]] std::map<std::string, double> chain_positions(const std::string& user);
+
 private:
     using Params = std::vector<std::pair<std::string, std::string>>;
     nlohmann::json gamma_get(const std::string& path, const Params& params = {});
@@ -68,6 +72,7 @@ private:
     RateLimiter* rate_limiter_;
     pmm::net::HttpsPool gamma_;
     pmm::net::HttpsPool clob_;
+    pmm::net::HttpsPool data_api_;
 };
 
 }  // namespace pmm
