@@ -618,22 +618,33 @@ std::vector<json> ClobSubmitter::poll_fills() {
         return out;
     }
     if (!data.is_array()) return out;
+    return extract_new_fills(data, last_trade_id_, own_taker_ids_, invert_side_);
+}
 
+std::vector<json> ClobSubmitter::extract_new_fills(const json& data, std::optional<std::string>& last_id,
+                                                   const std::set<std::string>& own_taker,
+                                                   bool invert_side) {
+    std::vector<json> out;
+    if (!data.is_array()) return out;
+    // 进入本轮时的旧游标 (上一轮的最新一笔)。break 必须对它比 —— 不能对循环里刚被推进的 last_id 比,
+    // 否则第 1 条就把 last_id 设成本轮最新, 第 2 条起永远不等于它 → 永不 break → 返回全部 trades,
+    // 把 runner 去重 (cap) 撑爆 → 旧成交被反复当新 → 库存账本错乱 → 仓位孤立。(根因: 实测两次孤立事故)
+    const std::optional<std::string> prev_id = last_id;
     bool seen_new = false;
     for (const auto& t : data) {  // newest-first
         std::string tid;
         if (const json* v = ju::find(t, "id")) tid = ju::to_str(*v);
         else if (const json* v2 = ju::find(t, "trade_id")) tid = ju::to_str(*v2);
-        if (!tid.empty() && last_trade_id_.has_value() && tid == *last_trade_id_) break;
+        if (!tid.empty() && prev_id.has_value() && tid == *prev_id) break;  // 到上轮最新一笔 → 停
         if (!seen_new && !tid.empty()) {
-            last_trade_id_ = tid;
+            last_id = tid;  // 游标推进到本轮最新
             seen_new = true;
         }
         // 排除自己的 flatten(taker) 腿
         bool own = false;
         for (const char* k : {"taker_order_id", "takerOrderId", "order_id", "orderID"}) {
             if (const json* v = ju::find(t, k)) {
-                if (own_taker_ids_.count(ju::to_str(*v)) != 0) {
+                if (own_taker.count(ju::to_str(*v)) != 0) {
                     own = true;
                     break;
                 }
@@ -642,7 +653,7 @@ std::vector<json> ClobSubmitter::poll_fills() {
         if (own) continue;
         std::string side;
         if (const json* v = ju::find(t, "side")) side = upper(ju::to_str(*v));
-        if (invert_side_) side = (side == "BUY") ? "SELL" : "BUY";
+        if (invert_side) side = (side == "BUY") ? "SELL" : "BUY";
         std::string token;
         if (const json* v = ju::find(t, "asset_id")) token = ju::to_str(*v);
         else if (const json* v2 = ju::find(t, "token_id")) token = ju::to_str(*v2);

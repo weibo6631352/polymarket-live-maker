@@ -180,6 +180,9 @@ target_link_libraries(pmm_clob_amounts_parity PRIVATE pmm_core)
 add_executable(pmm_orders_smoke tests/orders_smoke_main.cpp)
 target_link_libraries(pmm_orders_smoke PRIVATE pmm_core)
 
+add_executable(pmm_poll_fills_cursor tests/poll_fills_cursor_main.cpp)
+target_link_libraries(pmm_poll_fills_cursor PRIVATE pmm_core)
+
 add_executable(pmm_engine_smoke tests/engine_smoke_main.cpp)
 target_link_libraries(pmm_engine_smoke PRIVATE pmm_core)
 

@@ -82,6 +82,12 @@ public:
 
     // 自上次 poll 起的真实 maker 成交: 每条 {id, token_id, side, size, price}。
     std::vector<nlohmann::json> poll_fills() override;
+    // 纯函数 (可测): 从 newest-first 的 trades 数组取比 last_id 更新的成交, 排除 own taker。
+    // 副作用: 把 last_id 推进到本轮最新一笔。break 必须对"进入时的旧游标"比, 不能对循环里刚更新的。
+    static std::vector<nlohmann::json> extract_new_fills(const nlohmann::json& data,
+                                                         std::optional<std::string>& last_id,
+                                                         const std::set<std::string>& own_taker,
+                                                         bool invert_side);
     // 诊断: 用不同 query 打 /data/trades, 返回每种的 http 状态 + 原始 body 片段 (查 fill 检测用)。
     nlohmann::json debug_trades();
     // 钱包自由 USDC (kill-switch 用); 失败 nullopt。
