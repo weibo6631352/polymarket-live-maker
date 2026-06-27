@@ -24,7 +24,9 @@ RunnerConfig RunnerConfig::from_env() {
     c.risk_tolerance_days = f("LM_RISK_TOLERANCE_DAYS", 5.0);
     c.scan_top = i("LM_SCAN_TOP", 0);
     c.max_token_overlap = i("LM_MAX_TOKEN_OVERLAP", 1);
-    c.poll_seconds = f("LM_POLL_SECONDS", 20.0);
+    // 149 req/s 限流额度严重闲置 (20s 一轮 <1%)。WS 实时收到成交却要等到下一轮才平 → 最长 20s 裸库存。
+    // 降到 2s: 成交→平仓 ~2s (而非 ~20s), 报价更新鲜; 成交检测 1 req/2s, 远在额度内。
+    c.poll_seconds = f("LM_POLL_SECONDS", 2.0);
     c.discovery_interval_s = f("LM_DISCOVERY_INTERVAL_S", 600.0);
     c.cooldown_rounds = i("LM_COOLDOWN_ROUNDS", 3);
     c.max_loss = f("LM_MAX_LOSS_PER_DAY", 20.0);
