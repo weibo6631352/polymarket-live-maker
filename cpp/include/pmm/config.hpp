@@ -17,9 +17,12 @@ struct RunnerConfig {
     int scan_top{0};  // 0 = 扫描所有合格池 (不设上限)
     int half_spread_ticks{1};
     bool use_optimal_spread{false};
-    bool micro_center{true};    // micro-price 中心化 (预测策略, 门控+保守)
-    double micro_gate_c{0.2};   // 触发门 (¢): micro-price 领先 >= 此值才偏移
-    double micro_beta{0.5};     // 偏移领先的比例
+    // micro-price 中心化: 47K 信号实测 β≈0.001 (mid 受 tick 量化, 极少移动; 领先只预测罕见 tick 跨越的
+    // 方向 84%, 但幅度≈0)。最优偏移 = β×lead ≈ 0; 在 99.3% 不动样本上偏移会吃 binding-min 奖励代价 →
+    // 净负。故默认关 (数据不支持)。保留 flag+代码, 行情变了可 LM_MICRO_CENTER=1 重启。
+    bool micro_center{false};
+    double micro_gate_c{0.3};   // 触发门 (¢): 启用时只在最强信号 (84% 方向) 才动
+    double micro_beta{0.1};     // 启用时的保守偏移 (实测 β 远低于早先猜的 0.5)
     // 利润模型校准 κ: 真实结算/毛估 (实测 6-28 ≈ 0.237, 毛估高估 4.2×; 来自盘口快照低估真实竞争)。
     // 把竞争对手分 existing_qmin 充气 1/κ → 估计份额/奖励降到真实水平 → 最优半宽变宽 (少被逆选)。
     double reward_calib{0.237};
