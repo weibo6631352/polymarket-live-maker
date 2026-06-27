@@ -111,7 +111,8 @@ private:
 
     std::thread discovery_thread_;
     std::atomic<bool> discovery_stop_{false};
-    std::thread resync_thread_;
+    std::vector<std::thread> resync_threads_;  // 并发拉盘口 (吃满 /book 150/s; 单线程 40ms 串行只 ~25/s)
+    std::atomic<long> resync_count_{0};         // 累计 /book 拉取数 (算实际刷新率)
 
     std::unique_ptr<ws::MarketChannel> market_ch_;
     std::unique_ptr<ws::UserChannel> user_ch_;

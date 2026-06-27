@@ -82,7 +82,8 @@ LiveRunner::LiveRunner(RunnerConfig cfg, Engine* engine, rewards::RewardsClient*
 LiveRunner::~LiveRunner() {
     discovery_stop_.store(true);
     if (discovery_thread_.joinable()) discovery_thread_.join();
-    if (resync_thread_.joinable()) resync_thread_.join();
+    for (auto& _rt : resync_threads_) if (_rt.joinable()) _rt.join();
+    resync_threads_.clear();
 }
 
 rewards::RewardsClient& LiveRunner::scanner() { return *scanner_; }
@@ -172,6 +173,7 @@ void LiveRunner::run() {
         start_discovery_thread();
         double last_reeval = mono_now();
         double last_stats = mono_now();
+        long last_resync_count = 0;
         double next_poll = mono_now();
         while (!stop_.load()) {
             if (g_signal_stop.load()) trip_kill("signal");
@@ -185,7 +187,12 @@ void LiveRunner::run() {
             }
             const double now = mono_now();
             if (cfg_.stats_every_s > 0.0 && now - last_stats >= cfg_.stats_every_s) {
-                last_stats = now;  // (stats 日志略)
+                const long rc = resync_count_.load(std::memory_order_relaxed);
+                const double dt = now - last_stats;
+                std::fprintf(stderr, "stats: /book resync %.1f req/s (%ld in %.0fs)\n",
+                             dt > 0.0 ? (rc - last_resync_count) / dt : 0.0, rc - last_resync_count, dt);
+                last_resync_count = rc;
+                last_stats = now;
             }
             if (now - last_reeval >= cfg_.reeval_interval_s) {
                 tick_cooldowns();
@@ -289,23 +296,30 @@ void LiveRunner::start_ws() {
 
 void LiveRunner::start_book_resync() {
     if (!market_ch_ || cfg_.resync_workers <= 0 || !rate_limiter_) return;
-    resync_thread_ = std::thread([this] {
-        while (!discovery_stop_.load()) {
-            std::vector<std::string> toks;
-            {
-                std::lock_guard<std::mutex> lk(reflex_mu_);
-                for (const auto& [t, ref] : reflex_refs_) toks.push_back(t);
+    // 并发拉盘口: 单线程串行卡在 ~40ms 往返 = ~25/s, 够不到 /book 150/s 天花板。开 W 个 worker 并发,
+    // 限流器统一节流到 150/s, 把权威盘口刷新率拉满 (16 池 → ~9Hz/池)。
+    const int W = std::max(1, cfg_.resync_workers);
+    for (int w = 0; w < W; ++w) {
+        resync_threads_.emplace_back([this, w, W] {
+            while (!discovery_stop_.load()) {
+                std::vector<std::string> toks;
+                {
+                    std::lock_guard<std::mutex> lk(reflex_mu_);
+                    for (const auto& [t, ref] : reflex_refs_) toks.push_back(t);
+                }
+                if (toks.empty()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    continue;
+                }
+                // worker w 负责 token w, w+W, w+2W... (切片不重叠); rate-limiter 把全体节流到 150/s。
+                for (std::size_t i = static_cast<std::size_t>(w); i < toks.size();
+                     i += static_cast<std::size_t>(W)) {
+                    if (discovery_stop_.load()) break;
+                    resync_once(toks[i]);
+                }
             }
-            if (toks.empty()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                continue;
-            }
-            for (const auto& t : toks) {  // 一轮一 token/book (rate-limiter 节流)
-                if (discovery_stop_.load()) break;
-                resync_once(t);
-            }
-        }
-    });
+        });
+    }
 }
 
 void LiveRunner::resync_once(const std::string& token) {
@@ -314,6 +328,7 @@ void LiveRunner::resync_once(const std::string& token) {
         if (!book.empty() && market_ch_) {
             market_ch_->apply_rest_snapshot(token, book);
             compute_and_store_signals(token);  // 在新鲜权威盘口上算预测信号 (高频, 零额外请求)
+            resync_count_.fetch_add(1, std::memory_order_relaxed);
         }
     } catch (...) {
     }
@@ -842,7 +857,8 @@ std::optional<std::string> LiveRunner::kill_check() {
 void LiveRunner::shutdown() {
     discovery_stop_.store(true);
     if (discovery_thread_.joinable()) discovery_thread_.join();
-    if (resync_thread_.joinable()) resync_thread_.join();
+    for (auto& _rt : resync_threads_) if (_rt.joinable()) _rt.join();
+    resync_threads_.clear();
     if (market_ch_) market_ch_->stop();
     if (user_ch_) user_ch_->stop();
     if (events_) events_->close();
