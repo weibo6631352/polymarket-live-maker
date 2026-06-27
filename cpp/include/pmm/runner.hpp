@@ -22,6 +22,7 @@
 #include "pmm/config.hpp"
 #include "pmm/engine.hpp"
 #include "pmm/events.hpp"
+#include "pmm/orderbook.hpp"
 #include "pmm/portfolio.hpp"
 #include "pmm/ratelimit.hpp"
 #include "pmm/rewards.hpp"
@@ -123,7 +124,14 @@ private:
     std::map<std::string, std::pair<double, double>> reflex_refs_;  // token -> (mid, band)
     std::map<std::string, std::string> reflex_complement_;          // yes_token -> no_token (双边一并撤)
     std::set<std::string> reflex_cancelled_;
+    std::map<std::string, double> signal_v_;  // token -> max_spread_c (信号带宽); 与 reflex_refs_ 同锁
     std::mutex reflex_mu_;
+
+    // 预测信号: 在高频权威盘口 (REST resync) 上实时算 micro-price/OBI/μ̂, 存最新值供策略读取。
+    std::map<std::string, orderbook::BookSignals> signal_by_token_;
+    std::map<std::string, double> signal_log_at_;  // token -> 上次记标定日志的单调时刻 (节流)
+    std::mutex signal_mu_;
+    void compute_and_store_signals(const std::string& token);
 
     std::set<std::string> seen_fill_ids_;     // 已计成交 id (WS+REST 双源/跨轮去重)
     std::deque<std::string> seen_fill_fifo_;  // FIFO 上限淘汰

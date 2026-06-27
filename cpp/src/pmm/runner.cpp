@@ -311,7 +311,10 @@ void LiveRunner::start_book_resync() {
 void LiveRunner::resync_once(const std::string& token) {
     try {
         const json book = scanner().book(token);
-        if (!book.empty() && market_ch_) market_ch_->apply_rest_snapshot(token, book);
+        if (!book.empty() && market_ch_) {
+            market_ch_->apply_rest_snapshot(token, book);
+            compute_and_store_signals(token);  // 在新鲜权威盘口上算预测信号 (高频, 零额外请求)
+        }
     } catch (...) {
     }
 }
@@ -339,6 +342,7 @@ void LiveRunner::sync_ws_subscriptions() {
 void LiveRunner::refresh_reflex_refs() {
     std::map<std::string, std::pair<double, double>> refs;
     std::map<std::string, std::string> comp;
+    std::map<std::string, double> vmap;
     if (engine_ != nullptr) {
         try {
             for (const auto& q : engine_->get_maker_quotes()) {
@@ -347,6 +351,7 @@ void LiveRunner::refresh_reflex_refs() {
                 const std::string tok = q.value("token_id", std::string{});
                 refs[tok] = {q.value("last_mid", 0.0), band};
                 comp[tok] = q.value("complement_token_id", std::string{});
+                vmap[tok] = q.value("max_spread_c", 4.5);  // 信号带宽
             }
         } catch (...) {
             return;
@@ -355,6 +360,48 @@ void LiveRunner::refresh_reflex_refs() {
     std::lock_guard<std::mutex> lk(reflex_mu_);
     reflex_refs_ = std::move(refs);
     reflex_complement_ = std::move(comp);
+    signal_v_ = std::move(vmap);
+}
+
+// 在最新权威盘口 (REST resync 刚刷新) 上算预测信号, 存最新值 + 节流记标定日志。纯本地, 零额外请求。
+void LiveRunner::compute_and_store_signals(const std::string& token) {
+    if (market_ch_ == nullptr) return;
+    auto ob = market_ch_->get_book(token);
+    if (!ob || ob->bids.empty() || ob->asks.empty()) return;
+    double v = 4.5;
+    {
+        std::lock_guard<std::mutex> lk(reflex_mu_);
+        auto it = signal_v_.find(token);
+        if (it != signal_v_.end() && it->second > 0.0) v = it->second;
+    }
+    double bb = 0.0, ba = 0.0;
+    for (const auto& l : ob->bids)
+        if (l.size > 0.0 && l.price > bb) bb = l.price;
+    for (const auto& l : ob->asks)
+        if (l.size > 0.0 && (ba == 0.0 || l.price < ba)) ba = l.price;
+    if (bb <= 0.0 || ba <= 0.0) return;
+    const double mid = (bb + ba) / 2.0;
+    const orderbook::BookSignals sig = orderbook::compute_book_signals(*ob, mid, v);
+    if (!sig.valid) return;
+    {
+        std::lock_guard<std::mutex> lk(signal_mu_);
+        signal_by_token_[token] = sig;
+    }
+    // 标定日志: 每 token 节流 ~5s 记一次 (150Hz 全记会爆); mid/micro_price/obi + 下一周期 Δmid 供回归。
+    const double now_m = mono_now();
+    {
+        std::lock_guard<std::mutex> lk(signal_mu_);
+        auto it = signal_log_at_.find(token);
+        if (it != signal_log_at_.end() && now_m - it->second < 5.0) return;
+        signal_log_at_[token] = now_m;
+    }
+    event("signal", {{"token", token},
+                     {"mid", round_to(mid, 5)},
+                     {"micro_price", round_to(sig.micro_price, 5)},
+                     {"micro_lead_c", round_to((sig.micro_price - mid) * 100.0, 4)},
+                     {"obi1", round_to(sig.obi1, 4)},
+                     {"obi_band", round_to(sig.obi_band, 4)},
+                     {"depth", round_to(sig.depth, 1)}});
 }
 
 void LiveRunner::on_ws_price(const std::string& token, double mid) {
