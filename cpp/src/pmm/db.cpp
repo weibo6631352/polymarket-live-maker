@@ -474,7 +474,8 @@ CREATE TABLE IF NOT EXISTS maker_quotes (
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
     last_mid REAL NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    last_accrued_at TEXT NOT NULL
+    last_accrued_at TEXT NOT NULL,
+    complement_token_id TEXT NOT NULL DEFAULT ''
 );
 )SQL";
 
@@ -537,6 +538,7 @@ MakerQuote row_to_maker_quote(const Stmt& s) {
     q.last_mid = s.col_double(22);
     q.created_at = s.col_text(23);
     q.last_accrued_at = s.col_text(24);
+    q.complement_token_id = s.col_is_null(25) ? std::string{} : s.col_text(25);
     return q;
 }
 
@@ -544,6 +546,16 @@ MakerQuote row_to_maker_quote(const Stmt& s) {
 
 void Database::init_orders_schema() {
     exec(conn(), kOrdersSchema);
+    // 迁移: 旧 maker_quotes 表(无 complement_token_id 列)补列 — BUY-NO 双边做市。
+    bool has_comp = false;
+    {
+        Stmt s(conn(),
+               "SELECT 1 FROM pragma_table_info('maker_quotes') WHERE name = 'complement_token_id'");
+        has_comp = s.step();
+    }
+    if (!has_comp) {
+        exec(conn(), "ALTER TABLE maker_quotes ADD COLUMN complement_token_id TEXT NOT NULL DEFAULT ''");
+    }
 }
 
 LimitOrder Database::create_order(const LimitOrderInput& o) {
@@ -641,8 +653,9 @@ MakerQuote Database::create_maker_quote(const MakerQuoteInput& q) {
         Stmt s(conn(),
                "INSERT INTO maker_quotes (market_slug, market_condition_id, outcome, token_id, size, "
                "half_spread_c, max_spread_c, min_size, daily_rate, tick, cancel_efficiency, "
-               "max_inventory, skew_strength, entry_mid, committed_capital, last_mid, last_accrued_at) "
-               "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+               "max_inventory, skew_strength, entry_mid, committed_capital, last_mid, last_accrued_at, "
+               "complement_token_id) "
+               "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         s.bind_text(1, q.market_slug);
         s.bind_text(2, q.market_condition_id);
         s.bind_text(3, q.outcome);
@@ -660,6 +673,7 @@ MakerQuote Database::create_maker_quote(const MakerQuoteInput& q) {
         s.bind_double(15, q.committed_capital);
         s.bind_double(16, q.last_mid);
         s.bind_text(17, q.last_accrued_at);
+        s.bind_text(18, q.complement_token_id);
         s.step();
         id = sqlite3_last_insert_rowid(conn());
     }

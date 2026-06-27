@@ -40,7 +40,8 @@ struct MakerQuote {
     std::string market_slug;
     std::string market_condition_id;
     std::string outcome;
-    std::string token_id;
+    std::string token_id;            // YES (bid) 腿的 token
+    std::string complement_token_id; // NO (ask=BUY-NO) 腿的 token; 纯 USDC 双边做市
     double size{0.0};
     double half_spread_c{0.0};
     double max_spread_c{0.0};
@@ -68,6 +69,7 @@ struct MakerQuoteInput {
     std::string market_condition_id;
     std::string outcome;
     std::string token_id;
+    std::string complement_token_id;  // NO 腿 token (BUY-NO 双边)
     double size{0.0};
     double half_spread_c{0.0};
     double max_spread_c{0.0};

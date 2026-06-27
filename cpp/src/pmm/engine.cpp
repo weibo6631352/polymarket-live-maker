@@ -296,6 +296,14 @@ json Engine::place_maker_quote(const std::string& slug_or_id, const std::string&
     if (cap_shares <= 0.0) throw OrderRejectedError("max_inventory must be > 0");
 
     const std::string token_id = market.get_token_id(outcome);
+    // 互补 (NO) token: 二元市场里另一个 token — ask 腿改挂 BUY-NO 才能纯 USDC 双边。
+    std::string complement_token_id;
+    for (const auto& t : market.tokens) {
+        if (t.token_id != token_id && !t.token_id.empty()) {
+            complement_token_id = t.token_id;
+            break;
+        }
+    }
     const double mid = api_.get_midpoint(token_id);
     if (!(0.0 < mid && mid < 1.0)) throw OrderRejectedError("No valid midpoint to anchor the maker quote");
 
@@ -312,6 +320,7 @@ json Engine::place_maker_quote(const std::string& slug_or_id, const std::string&
     in.market_condition_id = market.condition_id;
     in.outcome = outcome;
     in.token_id = token_id;
+    in.complement_token_id = complement_token_id;
     in.size = size;
     in.half_spread_c = half_spread_c;
     in.max_spread_c = max_spread_c;
@@ -422,15 +431,18 @@ json Engine::place_maker_quote_live(const std::string& slug_or_id, const maker::
     json q = place_maker_quote(slug_or_id, outcome, popts);
     const double mid = q["entry_mid"].get<double>() != 0.0 ? q["entry_mid"].get<double>()
                                                            : q["last_mid"].get<double>();
-    const std::vector<maker::Order> orders = maker::compute_two_sided_quotes(
+    const std::string yes_token = q.value("token_id", std::string{});
+    const std::string no_token = q.value("complement_token_id", std::string{});
+    // 双边 = BUY-YES @ bid (yes_token) + BUY-NO @ (1-ask) (no_token)。纯 USDC, 不挂 SELL。
+    const std::vector<maker::Order> orders = maker::compute_two_sided_quotes_yes_no(
         mid, q["half_spread_c"].get<double>(), q["size"].get<double>(), q["tick"].get<double>(),
-        q["max_spread_c"].get<double>(), 0.0);
+        q["max_spread_c"].get<double>(), yes_token, no_token, 0.0);
     json acks = json::array();
     bool ok = true;
     for (const auto& o : orders) {
         json ack;
         try {
-            ack = submitter({{"action", "PLACE"}, {"token_id", q["token_id"]}, {"side", o.side},
+            ack = submitter({{"action", "PLACE"}, {"token_id", o.token_id}, {"side", o.side},
                              {"price", o.price}, {"size", o.size}});
         } catch (...) {
             ack = {{"status", "ERROR"}};
@@ -441,9 +453,10 @@ json Engine::place_maker_quote_live(const std::string& slug_or_id, const maker::
     q["submitted"] = acks;
     if (!ok) {
         // 把每条腿真实的 CLOB 应答 (http + errorMsg) 打出来 — 否则只知道"被拒"不知为何。
-        std::fprintf(stderr, "place_maker_quote_live REJECTED token=%s mid=%.4f acks=%s\n",
-                     q.value("token_id", std::string{}).c_str(), mid, acks.dump().c_str());
-        submitter({{"action", "CANCEL_ALL"}, {"token_id", q["token_id"]}});
+        std::fprintf(stderr, "place_maker_quote_live REJECTED yes=%s no=%s mid=%.4f acks=%s\n",
+                     yes_token.c_str(), no_token.c_str(), mid, acks.dump().c_str());
+        submitter({{"action", "CANCEL_ALL"}, {"token_id", yes_token}});
+        if (!no_token.empty()) submitter({{"action", "CANCEL_ALL"}, {"token_id", no_token}});
         cancel_maker_quote(q["id"].get<int>());
         throw OrderRejectedError("maker quote placement failed (rolled back)");
     }
@@ -467,52 +480,57 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
         const QuoteRead r = (it != reads.end()) ? it->second : QuoteRead{};
         if (!r.config_ok) continue;
         const double daily_rate = r.pool ? r.pool->daily : 0.0;
+        const std::string& no_token = quote.complement_token_id;
         auto fit = fills_by_token.find(quote.token_id);
+        auto nfit = no_token.empty() ? fills_by_token.end() : fills_by_token.find(no_token);
         const std::vector<RealFill> empty;
         const std::vector<RealFill>& fills = (fit != fills_by_token.end()) ? fit->second : empty;
+        const std::vector<RealFill>& no_fills = (nfit != fills_by_token.end()) ? nfit->second : empty;
 
-        // 1. RECONCILE — 池退出/结算 → cancel + flatten + exit
+        // 撤掉两条腿 (BUY-YES on token_id + BUY-NO on complement_token_id)。
+        auto cancel_both = [&]() -> bool {
+            bool okc = action_ok(submitter({{"action", "CANCEL_ALL"}, {"token_id", quote.token_id}}));
+            if (!no_token.empty())
+                okc = action_ok(submitter({{"action", "CANCEL_ALL"}, {"token_id", no_token}})) && okc;
+            return okc;
+        };
+
+        // 1. RECONCILE — 池退出/结算 → 撤两腿 + 卖掉两边持仓 + exit
         if (!r.pool || daily_rate <= 0.0) {
-            double rd_inv = 0.0, rd_pnl = 0.0, rd_bleed = 0.0;
+            double rd_pnl = 0.0, rd_bleed = 0.0, yes_inv = quote.inventory, no_inv = 0.0;
             int rn = 0;
-            for (const auto& rf : fills) {
-                const double rsgn = (to_lower(rf.side) == "buy") ? 1.0 : -1.0;
-                const double rsz = rf.size;
-                const double rfp = rsgn * (quote.last_mid - rf.price) * rsz;
-                rd_inv += rsgn * rsz;
-                rd_pnl += rfp;
-                rd_bleed += std::max(0.0, -rfp);
-                ++rn;
+            for (const auto& rf : fills) {  // YES 腿 (mid 空间)
+                const double sgn = (to_lower(rf.side) == "buy") ? 1.0 : -1.0;
+                const double fp = sgn * (quote.last_mid - rf.price) * rf.size;
+                yes_inv += sgn * rf.size; rd_pnl += fp; rd_bleed += std::max(0.0, -fp); ++rn;
             }
-            const double final_inv = quote.inventory + rd_inv;
-            const json cancel_res = submitter({{"action", "CANCEL_ALL"}, {"token_id", quote.token_id}});
-            const json flat_res = flatten_live(submitter, quote.token_id, final_inv);
+            for (const auto& rf : no_fills) {  // NO 腿 (NO mid = 1 - yes_mid)
+                const double sgn = (to_lower(rf.side) == "buy") ? 1.0 : -1.0;
+                const double fp = sgn * ((1.0 - quote.last_mid) - rf.price) * rf.size;
+                no_inv += sgn * rf.size; rd_pnl += fp; rd_bleed += std::max(0.0, -fp); ++rn;
+            }
+            const bool okc = cancel_both();
+            const bool fy = action_ok(flatten_live(submitter, quote.token_id, yes_inv));
+            const bool fn = no_token.empty() || action_ok(flatten_live(submitter, no_token, no_inv));
             credit_maker(rd_pnl);
-            if (!(action_ok(cancel_res) && action_ok(flat_res))) {
-                AccrualUpdate u;
-                u.accrued_rewards = quote.accrued_rewards;
-                u.realized_bleed = quote.realized_bleed + rd_bleed;
-                u.fills = quote.fills + rn;
-                u.last_mid = quote.last_mid;
-                u.last_accrued_at = unix_to_iso(now);
-                u.inventory = final_inv;
-                u.inventory_pnl = quote.inventory_pnl + rd_pnl;
-                db_.update_maker_quote_accrual(quote.id, u);
-                results.push_back({{"quote", maker_quote_to_dict(quote)},
-                                   {"exit_failed", "rewards_ended"}, {"mid", quote.last_mid}});
-                continue;
-            }
             AccrualUpdate u;
             u.accrued_rewards = quote.accrued_rewards;
             u.realized_bleed = quote.realized_bleed + rd_bleed;
             u.fills = quote.fills + rn;
             u.last_mid = quote.last_mid;
             u.last_accrued_at = unix_to_iso(now);
-            u.inventory = 0.0;
             u.inventory_pnl = quote.inventory_pnl + rd_pnl;
+            if (!(okc && fy && fn)) {
+                u.inventory = yes_inv;
+                db_.update_maker_quote_accrual(quote.id, u);
+                results.push_back({{"quote", maker_quote_to_dict(quote)},
+                                   {"exit_failed", "rewards_ended"}, {"mid", quote.last_mid}});
+                continue;
+            }
+            u.inventory = 0.0;
             const MakerQuote final_q = db_.update_maker_quote_accrual(quote.id, u);
             exit_maker_quote(final_q, quote.last_mid, "rewards_ended", results,
-                             maker_crossing_cost_c_ / 100.0 * std::abs(final_inv),
+                             maker_crossing_cost_c_ / 100.0 * (std::abs(yes_inv) + std::abs(no_inv)),
                              json{{"inventory_pnl_delta", rd_pnl}});
             continue;
         }
@@ -529,72 +547,91 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
                                                     existing_qmin);
         const double reward = ob::reward_accrual(share, daily_rate, seconds);
 
-        const double cap = quote.max_inventory > 0.0 ? quote.max_inventory : MAKER_CAP_MULT * quote.size;
-        double d_inv = 0.0, fill_pnl = 0.0, bleed = 0.0;
+        // 成交盈亏: YES 腿在 mid 空间; NO 腿在 (1-mid) 空间。两腿都是 BUY → 只做多。
+        double d_yes = 0.0, d_no = 0.0, fill_pnl = 0.0, bleed = 0.0;
         int n_fills = 0;
         for (const auto& f : fills) {
             const double sgn = (to_lower(f.side) == "buy") ? 1.0 : -1.0;
-            const double sz = f.size;
-            const double fp = sgn * (mid - f.price) * sz;
-            d_inv += sgn * sz;
-            fill_pnl += fp;
-            bleed += std::max(0.0, -fp);
-            ++n_fills;
+            const double fp = sgn * (mid - f.price) * f.size;
+            d_yes += sgn * f.size; fill_pnl += fp; bleed += std::max(0.0, -fp); ++n_fills;
         }
-        const double new_inventory = quote.inventory + d_inv;
-        const double held_mtm = quote.inventory * (mid - quote.last_mid);
-        const double pnl_delta = held_mtm + fill_pnl;
-        const double skew_ratio = cap > 0.0 ? std::max(-1.0, std::min(1.0, new_inventory / cap)) : 0.0;
+        for (const auto& f : no_fills) {
+            const double sgn = (to_lower(f.side) == "buy") ? 1.0 : -1.0;
+            const double fp = sgn * ((1.0 - mid) - f.price) * f.size;
+            d_no += sgn * f.size; fill_pnl += fp; bleed += std::max(0.0, -fp); ++n_fills;
+        }
+        const double yes_inv = quote.inventory + d_yes;
+        const double no_inv = d_no;
+        const double pnl_delta = quote.inventory * (mid - quote.last_mid) + fill_pnl;
 
-        // 4. DRIFT-EXIT
-        const double entry_mid = quote.entry_mid > 0.0 ? quote.entry_mid : mid;
-        if (std::abs(mid - entry_mid) >= quote.max_spread_c / 100.0) {
-            const json c = submitter({{"action", "CANCEL_ALL"}, {"token_id", quote.token_id}});
-            const json f = flatten_live(submitter, quote.token_id, new_inventory);
+        // 2. 任一腿被吃 → 失败安全: 撤两腿 + 卖掉两边持仓 + 退出该池
+        //    (v1 保守, 不在双币上做净额/skew; 被成交即退场, cooldown 后可重选)。
+        if (n_fills > 0) {
+            const bool okc = cancel_both();
+            const bool fy = action_ok(flatten_live(submitter, quote.token_id, yes_inv));
+            const bool fn = no_token.empty() || action_ok(flatten_live(submitter, no_token, no_inv));
             credit_maker(reward + pnl_delta);
-            if (!(action_ok(c) && action_ok(f))) {
-                AccrualUpdate u;
-                u.accrued_rewards = quote.accrued_rewards + reward;
-                u.realized_bleed = quote.realized_bleed + bleed;
-                u.fills = quote.fills + n_fills;
-                u.last_mid = mid;
-                u.last_accrued_at = unix_to_iso(now);
-                u.inventory = new_inventory;
-                u.inventory_pnl = quote.inventory_pnl + pnl_delta;
-                db_.update_maker_quote_accrual(quote.id, u);
-                results.push_back({{"quote", maker_quote_to_dict(quote)}, {"exit_failed", "drift_exit"},
-                                   {"mid", mid}, {"inventory", round_to(new_inventory, 4)}});
-                continue;
-            }
             AccrualUpdate u;
             u.accrued_rewards = quote.accrued_rewards + reward;
             u.realized_bleed = quote.realized_bleed + bleed;
             u.fills = quote.fills + n_fills;
             u.last_mid = mid;
             u.last_accrued_at = unix_to_iso(now);
-            u.inventory = 0.0;
             u.inventory_pnl = quote.inventory_pnl + pnl_delta;
+            if (!(okc && fy && fn)) {
+                u.inventory = yes_inv;
+                db_.update_maker_quote_accrual(quote.id, u);
+                results.push_back({{"quote", maker_quote_to_dict(quote)}, {"exit_failed", "filled_exit"},
+                                   {"mid", mid}, {"inventory", round_to(yes_inv, 4)}});
+                continue;
+            }
+            u.inventory = 0.0;
             const MakerQuote final_q = db_.update_maker_quote_accrual(quote.id, u);
-            exit_maker_quote(final_q, mid, "drift_exit", results,
-                             maker_crossing_cost_c_ / 100.0 * std::abs(new_inventory),
+            exit_maker_quote(final_q, mid, "filled_exit", results,
+                             maker_crossing_cost_c_ / 100.0 * (std::abs(yes_inv) + std::abs(no_inv)),
                              json{{"reward", reward}, {"inventory_pnl_delta", pnl_delta},
                                   {"share", share}, {"seconds", seconds}});
             continue;
         }
 
-        // 5. RE-CENTER
-        const double max_skew = std::max(0.0, quote.half_spread_c / (quote.tick * 100.0) - 1.0);
-        const double skew = std::max(-max_skew, std::min(max_skew, quote.skew_strength * skew_ratio));
+        // 3. DRIFT-EXIT — mid 漂出 max_spread → 撤两腿 + exit (无成交, 无持仓)。
+        const double entry_mid = quote.entry_mid > 0.0 ? quote.entry_mid : mid;
+        if (std::abs(mid - entry_mid) >= quote.max_spread_c / 100.0) {
+            const bool okc = cancel_both();
+            credit_maker(reward + pnl_delta);
+            AccrualUpdate u;
+            u.accrued_rewards = quote.accrued_rewards + reward;
+            u.realized_bleed = quote.realized_bleed + bleed;
+            u.fills = quote.fills + n_fills;
+            u.last_mid = mid;
+            u.last_accrued_at = unix_to_iso(now);
+            u.inventory_pnl = quote.inventory_pnl + pnl_delta;
+            if (!okc) {
+                u.inventory = quote.inventory;
+                db_.update_maker_quote_accrual(quote.id, u);
+                results.push_back({{"quote", maker_quote_to_dict(quote)}, {"exit_failed", "drift_exit"},
+                                   {"mid", mid}});
+                continue;
+            }
+            u.inventory = 0.0;
+            const MakerQuote final_q = db_.update_maker_quote_accrual(quote.id, u);
+            exit_maker_quote(final_q, mid, "drift_exit", results, 0.0,
+                             json{{"reward", reward}, {"inventory_pnl_delta", pnl_delta},
+                                  {"share", share}, {"seconds", seconds}});
+            continue;
+        }
+
+        // 4. RE-CENTER — mid 移动 >= recenter_ticks → 撤两腿 + 重挂 BUY-YES + BUY-NO。
         json submitted = json::array();
         const bool forced = (force_recenter != nullptr) && force_recenter->count(quote.token_id) != 0;
         if (forced || std::abs(mid - quote.last_mid) >= std::max(1, recenter_ticks) * quote.tick) {
-            submitter({{"action", "CANCEL_ALL"}, {"token_id", quote.token_id}});
-            std::vector<maker::Order> orders = maker::compute_two_sided_quotes(
-                mid, quote.half_spread_c, quote.size, quote.tick, quote.max_spread_c, skew);
+            cancel_both();
+            std::vector<maker::Order> orders = maker::compute_two_sided_quotes_yes_no(
+                mid, quote.half_spread_c, quote.size, quote.tick, quote.max_spread_c, quote.token_id,
+                no_token, 0.0);
             for (const auto& o : orders) {
-                if (new_inventory >= cap && o.side != "SELL") continue;
-                if (new_inventory <= -cap && o.side != "BUY") continue;
-                submitted.push_back(submitter({{"action", "PLACE"}, {"token_id", quote.token_id},
+                if (o.token_id.empty()) continue;
+                submitted.push_back(submitter({{"action", "PLACE"}, {"token_id", o.token_id},
                                                {"side", o.side}, {"price", o.price}, {"size", o.size}}));
             }
         }
@@ -606,12 +643,12 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
         u.fills = quote.fills + n_fills;
         u.last_mid = mid;
         u.last_accrued_at = unix_to_iso(now);
-        u.inventory = new_inventory;
+        u.inventory = quote.inventory;  // 无成交 → 库存不变 (常为 0)
         u.inventory_pnl = quote.inventory_pnl + pnl_delta;
         const MakerQuote updated = db_.update_maker_quote_accrual(quote.id, u);
         results.push_back({{"quote", maker_quote_to_dict(updated)},
                            {"reward", round_to(reward, 6)},
-                           {"inventory", round_to(new_inventory, 4)},
+                           {"inventory", round_to(quote.inventory, 4)},
                            {"inventory_pnl_delta", round_to(pnl_delta, 6)},
                            {"share", round_to(share, 6)},
                            {"seconds", round_to(seconds, 2)},
@@ -720,6 +757,7 @@ json maker_quote_to_dict(const MakerQuote& q) {
             {"market_condition_id", q.market_condition_id},
             {"outcome", q.outcome},
             {"token_id", q.token_id},
+            {"complement_token_id", q.complement_token_id},
             {"size", q.size},
             {"half_spread_c", q.half_spread_c},
             {"max_spread_c", q.max_spread_c},

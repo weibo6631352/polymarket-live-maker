@@ -337,12 +337,15 @@ void LiveRunner::sync_ws_subscriptions() {
 
 void LiveRunner::refresh_reflex_refs() {
     std::map<std::string, std::pair<double, double>> refs;
+    std::map<std::string, std::string> comp;
     if (engine_ != nullptr) {
         try {
             for (const auto& q : engine_->get_maker_quotes()) {
                 const double tick = q.value("tick", 0.01) != 0.0 ? q.value("tick", 0.01) : 0.01;
                 const double band = std::max(1, cfg_.recenter_ticks) * tick;
-                refs[q.value("token_id", std::string{})] = {q.value("last_mid", 0.0), band};
+                const std::string tok = q.value("token_id", std::string{});
+                refs[tok] = {q.value("last_mid", 0.0), band};
+                comp[tok] = q.value("complement_token_id", std::string{});
             }
         } catch (...) {
             return;
@@ -350,9 +353,11 @@ void LiveRunner::refresh_reflex_refs() {
     }
     std::lock_guard<std::mutex> lk(reflex_mu_);
     reflex_refs_ = std::move(refs);
+    reflex_complement_ = std::move(comp);
 }
 
 void LiveRunner::on_ws_price(const std::string& token, double mid) {
+    std::string no_token;
     {
         std::lock_guard<std::mutex> lk(reflex_mu_);
         auto it = reflex_refs_.find(token);
@@ -360,9 +365,13 @@ void LiveRunner::on_ws_price(const std::string& token, double mid) {
         const auto [ref_mid, band] = it->second;
         if (std::abs(mid - ref_mid) < band) return;
         reflex_cancelled_.insert(token);  // 慢 I/O 前先占住
+        auto cit = reflex_complement_.find(token);
+        if (cit != reflex_complement_.end()) no_token = cit->second;
     }
     try {
         locked_submit({{"action", "CANCEL_ALL"}, {"token_id", token}});
+        // YES mid 漂 → NO mid 反向漂同幅, BUY-NO 腿同样过时, 一并撤掉。
+        if (!no_token.empty()) locked_submit({{"action", "CANCEL_ALL"}, {"token_id", no_token}});
         event("reflex_cancel", {{"token", token}, {"mid", mid}});
     } catch (...) {
         std::lock_guard<std::mutex> lk(reflex_mu_);
@@ -611,12 +620,14 @@ void LiveRunner::exit_held(const std::string& cond, const json& quote, const std
     static const std::set<std::string> kCooldownReasons = {
         "jump_risk_rose", "empty_band", "reward_collapsed", "daily_cut", "one_sided", "fast_book"};
     const std::string token = quote.value("token_id", std::string{});
+    const std::string no_token = quote.value("complement_token_id", std::string{});
     const int qid = quote.value("id", 0);
     const double inv = quote.value("inventory", 0.0);
     if (use_live_path() && submitter_ != nullptr) {
         locked_submit({{"action", "CANCEL_ALL"}, {"token_id", token}});
+        if (!no_token.empty()) locked_submit({{"action", "CANCEL_ALL"}, {"token_id", no_token}});  // BUY-NO 腿
         if (cfg_.live) {
-            // FLATTEN 真实库存
+            // FLATTEN 真实库存 (持有的是 YES 份额, 卖出平仓)
             if (std::abs(inv) >= 1e-9) {
                 const std::string side = inv > 0 ? "SELL" : "BUY";
                 locked_submit({{"action", "FLATTEN"}, {"token_id", token}, {"side", side}, {"size", std::abs(inv)}});
@@ -778,8 +789,11 @@ void LiveRunner::shutdown() {
         try {
             for (const auto& q : engine_->get_maker_quotes()) {
                 const std::string token = q.value("token_id", std::string{});
+                const std::string no_token = q.value("complement_token_id", std::string{});
                 if (use_live_path()) {
                     locked_submit({{"action", "CANCEL_ALL"}, {"token_id", token}});
+                    if (!no_token.empty())
+                        locked_submit({{"action", "CANCEL_ALL"}, {"token_id", no_token}});  // BUY-NO 腿
                     if (cfg_.live) {
                         const double inv = q.value("inventory", 0.0);
                         if (std::abs(inv) >= 1e-9) {

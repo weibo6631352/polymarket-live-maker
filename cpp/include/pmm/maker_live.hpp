@@ -32,6 +32,7 @@ struct Order {
     std::string side;  // "BUY" / "SELL"
     double price{0.0};
     double size{0.0};
+    std::string token_id;  // 该腿挂在哪个 token (双边 BUY-YES/BUY-NO 用; 单 token 路径留空)
 };
 
 // 一次 poll 的计划 (对应 Python plan()/step() 返回的 dict)。
@@ -55,6 +56,13 @@ struct MakerPlan {
 [[nodiscard]] std::vector<Order> compute_two_sided_quotes(double mid, double half_spread_c, double size,
                                                           double tick, double max_spread_c,
                                                           double skew_ticks = 0.0);
+
+// 纯 USDC 双边: bid 腿 = BUY-YES @ bid (yes_token); ask 腿 = BUY-NO @ (1-ask) (no_token)。
+// 因 BUY-NO@q ≡ SELL-YES@(1-q) (YES+NO=$1), 两腿都是 BUY、只花 USDC、不需持有份额。
+// 复用 compute_two_sided_quotes 的价格/skew/取整逻辑, 把 SELL-YES 腿映射成 BUY-NO。
+[[nodiscard]] std::vector<Order> compute_two_sided_quotes_yes_no(
+    double mid, double half_spread_c, double size, double tick, double max_spread_c,
+    const std::string& yes_token_id, const std::string& no_token_id, double skew_ticks = 0.0);
 
 // mid 是否移动到值得撤单重定心 (>= 一个 tick)。
 [[nodiscard]] bool plan_requote(double mid_prev, double mid_now, double half_spread_c, double tick);

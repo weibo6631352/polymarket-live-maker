@@ -36,7 +36,27 @@ std::vector<Order> compute_two_sided_quotes(double mid, double half_spread_c, do
     const double shift = skew_ticks * tick;
     const double bid = std::max(tick, std::nearbyint((mid - offset - shift) / tick) * tick);
     const double ask = std::min(1.0 - tick, std::nearbyint((mid + offset - shift) / tick) * tick);
-    return {Order{"BUY", round_to(bid, 4), size}, Order{"SELL", round_to(ask, 4), size}};
+    return {Order{"BUY", round_to(bid, 4), size, std::string{}},
+            Order{"SELL", round_to(ask, 4), size, std::string{}}};
+}
+
+std::vector<Order> compute_two_sided_quotes_yes_no(double mid, double half_spread_c, double size,
+                                                   double tick, double max_spread_c,
+                                                   const std::string& yes_token_id,
+                                                   const std::string& no_token_id, double skew_ticks) {
+    const std::vector<Order> yes =
+        compute_two_sided_quotes(mid, half_spread_c, size, tick, max_spread_c, skew_ticks);
+    std::vector<Order> out;
+    out.reserve(yes.size());
+    for (const auto& o : yes) {
+        if (o.side == "SELL") {
+            // SELL-YES @ ask  ≡  BUY-NO @ (1-ask)  (YES+NO=$1) — 全 USDC, 不需份额。
+            out.push_back(Order{"BUY", round_to(1.0 - o.price, 4), o.size, no_token_id});
+        } else {
+            out.push_back(Order{"BUY", o.price, o.size, yes_token_id});
+        }
+    }
+    return out;
 }
 
 bool plan_requote(double mid_prev, double mid_now, double /*half_spread_c*/, double tick) {

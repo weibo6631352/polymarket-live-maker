@@ -121,6 +121,7 @@ private:
     std::map<std::string, double> refresh_at_;
 
     std::map<std::string, std::pair<double, double>> reflex_refs_;  // token -> (mid, band)
+    std::map<std::string, std::string> reflex_complement_;          // yes_token -> no_token (双边一并撤)
     std::set<std::string> reflex_cancelled_;
     std::mutex reflex_mu_;
 };
