@@ -716,13 +716,41 @@ json ClobSubmitter::query_rewards(const std::string& date) {
         throttle(/*low_priority=*/true);
         const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
         out["markets_http"] = r.status;
+        // 解析汇总 (响应 8000+ 市场/几百 KB, 不回原始): 真实 accrued 总额 + top earners。
+        double accrued = 0.0;
+        int n_earning = 0;
+        json top = json::array();
         try {
-            out["markets"] = json::parse(r.body);
+            const json j = json::parse(r.body);
+            const json* data = ju::find(j, "data");
+            if (data != nullptr && data->is_array()) {
+                for (const auto& m : *data) {
+                    double e = 0.0;
+                    if (const json* earr = ju::find(m, "earnings")) {
+                        if (earr->is_array())
+                            for (const auto& x : *earr)
+                                if (const json* ev = ju::find(x, "earnings")) e += ju::to_double(*ev);
+                    }
+                    if (e > 1e-9) {
+                        ++n_earning;
+                        accrued += e;
+                        if (top.size() < 8) {
+                            const json* q = ju::find(m, "question");
+                            const json* pct = ju::find(m, "earning_percentage");
+                            top.push_back({{"earn", std::nearbyint(e * 1e4) / 1e4},
+                                           {"pct", pct != nullptr ? ju::to_double(*pct) : 0.0},
+                                           {"q", q != nullptr ? ju::to_str(*q).substr(0, 40) : ""}});
+                        }
+                    }
+                }
+            }
         } catch (...) {
-            out["markets_raw"] = r.body.substr(0, 300);
         }
+        out["accrued_total"] = std::nearbyint(accrued * 1e4) / 1e4;
+        out["earning_markets"] = n_earning;
+        out["top_earners"] = top;
     }
-    // 2) /rewards/user/percentages — 实时占比 {condition_id: %}。
+    // 2) /rewards/user/percentages — 实时占比 {condition_id: %}; 只回条数 + 非零项。
     {
         const std::string path = "/rewards/user/percentages";
         const std::string query = path + "?maker_address=" + maker_lc + "&signature_type=" + st;
@@ -730,11 +758,15 @@ json ClobSubmitter::query_rewards(const std::string& date) {
         throttle(/*low_priority=*/true);
         const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
         out["percentages_http"] = r.status;
+        int live = 0;
         try {
-            out["percentages"] = json::parse(r.body);
+            const json j = json::parse(r.body);
+            if (j.is_object())
+                for (auto it = j.begin(); it != j.end(); ++it)
+                    if (it.value().is_number() && ju::to_double(it.value()) > 0.0) ++live;
         } catch (...) {
-            out["percentages_raw"] = r.body.substr(0, 300);
         }
+        out["live_pct_markets"] = live;
     }
     return out;
 }
