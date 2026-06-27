@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <map>
@@ -133,6 +134,17 @@ private:
     std::map<std::string, double> signal_log_at_;  // token -> 上次记标定日志的单调时刻 (节流)
     std::mutex signal_mu_;
     void compute_and_store_signals(const std::string& token);
+
+    // 事件驱动主循环: 盘口移动 (REST resync) / WS reflex 立刻唤醒主循环跑决策 (实时响应, 不等定时器);
+    // poll_seconds 仅作兜底心跳。
+    std::condition_variable loop_cv_;
+    std::mutex loop_mu_;
+    std::atomic<bool> loop_wake_{false};
+    void wake_loop() {
+        loop_wake_.store(true);
+        std::lock_guard<std::mutex> lk(loop_mu_);
+        loop_cv_.notify_one();
+    }
 
     std::set<std::string> seen_fill_ids_;     // 已计成交 id (WS+REST 双源/跨轮去重)
     std::deque<std::string> seen_fill_fifo_;  // FIFO 上限淘汰

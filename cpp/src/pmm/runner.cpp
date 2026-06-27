@@ -212,18 +212,15 @@ void LiveRunner::run() {
                 last_reeval = now;
             }
             poll_once();
-            next_poll += cfg_.poll_seconds;
-            double delay = next_poll - mono_now();
-            if (delay < 0.0) {
-                next_poll = mono_now();  // 超预算 → 重锚, 不睡
-                delay = 0.0;
-            }
-            // 可中断睡眠: 切片 (≤0.2s) 轮询 stop_/信号, SIGTERM 后 ~0.2s 内醒来走关停。
-            // (旧实现 sleeper_(delay) 整睡, 信号要等满一个 poll 周期才被察觉。)
-            while (delay > 0.0 && !stop_.load() && !g_signal_stop.load()) {
-                const double slice = delay < 0.2 ? delay : 0.2;
-                sleeper_(slice);
-                delay -= slice;
+            (void)next_poll;
+            // 事件驱动: 等"盘口移动 (REST resync) / WS reflex"唤醒 → 立刻再跑一轮决策 (实时响应);
+            // 或 poll_seconds 心跳超时 (兜底查成交/累计奖励)。CV 自动合并密集事件, 由 poll_once 时延限频。
+            // 信号/stop 也唤醒 → SIGTERM 后立刻走关停。
+            {
+                std::unique_lock<std::mutex> lk(loop_mu_);
+                loop_cv_.wait_for(lk, std::chrono::duration<double>(std::max(0.01, cfg_.poll_seconds)),
+                                  [this] { return loop_wake_.load() || stop_.load() || g_signal_stop.load(); });
+                loop_wake_.store(false);
             }
         }
     } catch (...) {
@@ -407,6 +404,16 @@ void LiveRunner::compute_and_store_signals(const std::string& token) {
         if (l.size > 0.0 && (ba == 0.0 || l.price < ba)) ba = l.price;
     if (bb <= 0.0 || ba <= 0.0) return;
     const double mid = (bb + ba) / 2.0;
+    // 事件驱动: REST 拉到的盘口越过 recenter 带 → 立刻唤醒主循环重挂 (实时响应, 不等 poll 心跳)。
+    bool moved = false;
+    {
+        std::lock_guard<std::mutex> lk(reflex_mu_);
+        auto rit = reflex_refs_.find(token);
+        if (rit != reflex_refs_.end() && rit->second.first > 0.0 &&
+            std::abs(mid - rit->second.first) >= rit->second.second)
+            moved = true;
+    }
+    if (moved) wake_loop();
     const orderbook::BookSignals sig = orderbook::compute_book_signals(*ob, mid, v);
     if (!sig.valid) return;
     {
@@ -447,6 +454,7 @@ void LiveRunner::on_ws_price(const std::string& token, double mid) {
         // YES mid 漂 → NO mid 反向漂同幅, BUY-NO 腿同样过时, 一并撤掉。
         if (!no_token.empty()) locked_submit({{"action", "CANCEL_ALL"}, {"token_id", no_token}});
         event("reflex_cancel", {{"token", token}, {"mid", mid}});
+        wake_loop();  // 事件驱动: WS 撤单后立刻唤醒主循环在新 mid 重挂 (不留无报价空窗)
     } catch (...) {
         std::lock_guard<std::mutex> lk(reflex_mu_);
         reflex_cancelled_.erase(token);
