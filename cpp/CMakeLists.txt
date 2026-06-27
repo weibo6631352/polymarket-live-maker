@@ -206,4 +206,8 @@ target_link_libraries(live-maker PRIVATE pmm_core)
 add_executable(review-report apps/review_main.cpp)
 target_link_libraries(review-report PRIVATE pmm_core)
 
+# ---- live 烟测: order-smoke (受控验证 C++ V2 签名被 CLOB 接受; 远离 mid 挂单+撤单) ----
+add_executable(order-smoke apps/order_smoke_main.cpp)
+target_link_libraries(order-smoke PRIVATE pmm_core)
+
 message(STATUS "pmm scaffold: crypto reuse + models + db (sqlite3) + smoke checks")
