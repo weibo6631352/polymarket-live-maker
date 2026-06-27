@@ -371,7 +371,11 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
             if (min_days_to_resolution > 0.0) {
                 std::string ql = p->question;
                 for (char& ch : ql) ch = static_cast<char>((ch >= 'A' && ch <= 'Z') ? ch + 32 : ch);
-                static const char* kCatalyst[] = {"fdv", "launch", " ipo", "debut", "airdrop", "listing"};
+                // R3+: 代币/产品上线 + 影视/赛事首映 + 估值里程碑 = 近期暴力跳变 (实测漏网: gpt-released /
+                // spider-man-opening / stripe-valuation)。end_date 远但催化剂近, 日期过滤抓不到。
+                static const char* kCatalyst[] = {"fdv",       "launch",  " ipo",      "debut",
+                                                  "airdrop",   "listing", "release",   "premiere",
+                                                  "valuation", "opening weekend"};
                 bool catalyst = false;
                 for (const char* kw : kCatalyst)
                     if (ql.find(kw) != std::string::npos) {

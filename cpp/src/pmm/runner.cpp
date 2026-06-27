@@ -834,6 +834,24 @@ void LiveRunner::shutdown() {
                     }
                 }
             }
+            // 终极保险 (关停先撤单): 列出 CLOB 上所有挂单, 撤掉任何残留的 —— 防撤单竞态/漏网单留在
+            // 盘口, 软件关了之后被成交造成失控亏损。无论 tracked 与否, 一律扫掉。
+            if (use_live_path() && submitter_ != nullptr) {
+                try {
+                    const std::vector<json> open = submitter_->list_open_orders();
+                    int swept = 0;
+                    for (const auto& o : open) {
+                        std::string oid = o.value("id", std::string{});
+                        if (oid.empty()) oid = o.value("orderID", o.value("order_id", std::string{}));
+                        if (!oid.empty()) {
+                            submitter_->cancel_order(oid);
+                            ++swept;
+                        }
+                    }
+                    std::fprintf(stderr, "shutdown: swept %d residual open order(s) off the book\n", swept);
+                } catch (...) {
+                }
+            }
         } catch (...) {
         }
         engine_->close();
