@@ -708,7 +708,9 @@ json ClobSubmitter::query_rewards(const std::string& date) {
     // 1) /rewards/user/markets — 真实已赚 earnings + earning_percentage + rewards_config (按 date)。
     {
         const std::string path = "/rewards/user/markets";
-        std::string query = path + "?maker_address=" + maker_lc + "&signature_type=" + st;
+        // order_by=earnings DESC + 大 page_size: 把我们有收益的市场顶到首页 (否则埋在 8000+ 个市场里翻不到)。
+        std::string query = path + "?maker_address=" + maker_lc + "&signature_type=" + st +
+                            "&order_by=earnings&position=DESC&page_size=500";
         if (!date.empty()) query += "&date=" + date;
         const std::string ts = std::to_string(now_unix());
         throttle(/*low_priority=*/true);
