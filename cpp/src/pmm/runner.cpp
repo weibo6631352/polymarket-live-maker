@@ -560,6 +560,7 @@ void LiveRunner::reselect() {
     p.waterfill = cfg_.waterfill;        // 注水配资 (边际 κ×奖励/$ 均衡)
     p.reward_calib = cfg_.reward_calib;  // 利润校准 κ
     p.compet_aversion = cfg_.compet_aversion;  // 竞争度惩罚 (挤池降权)
+    p.max_competitiveness = cfg_.max_competitiveness;  // 硬剔除拥挤池 (churn源)
     p.cooldown = cd;
     {
         std::lock_guard<std::mutex> lk(report_mu_);

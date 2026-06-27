@@ -134,6 +134,11 @@ std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,
     for (const auto& p : scan_report.pools) {
         if (cd.count(p.condition_id) != 0 || cd.count(p.token) != 0) continue;
         if (params.require_safe && !(p.jump_verdict == "SAFE" && !p.empty_band)) continue;
+        // 硬剔除拥挤池: PM market_competitiveness > 上限 → 跳过。实测拥挤池(Tyler 2.85/Romania 2-4)= 新闻驱动
+        // churn, 成交快过结算→平仓"余额不足"失败→仓位累积成大孤立 (实测 $427 Tyler)。只留清静池(<上限)才稳定。
+        if (params.max_competitiveness > 0.0 && p.competitiveness >= 0.0 &&
+            p.competitiveness > params.max_competitiveness)
+            continue;
         cands.push_back(&p);
     }
 
