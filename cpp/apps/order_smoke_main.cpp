@@ -33,16 +33,27 @@ int main(int argc, char** argv) {
     }
     std::printf("signer: %s\n", sub.signer_address().c_str());
 
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](clock::time_point a, clock::time_point b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+
     std::printf("=== PLACE BUY size=%g @ %g on %s (far below mid -> must NOT fill) ===\n",
                 size, price, tok.c_str());
+    const auto t0 = clock::now();
     const nlohmann::json placed =
         sub({{"action", "PLACE"}, {"token_id", tok}, {"side", "BUY"}, {"price", price}, {"size", size}});
-    std::printf("%s\n", placed.dump(2).c_str());
+    const auto t1 = clock::now();
+    std::printf("%s\nPLACE latency: %lld ms (sign + tick/neg-risk fetch + CLOB POST)\n",
+                placed.dump(2).c_str(), static_cast<long long>(ms(t0, t1)));
 
     std::this_thread::sleep_for(std::chrono::seconds(3));
 
     std::printf("=== CANCEL_ALL on %s ===\n", tok.c_str());
+    const auto t2 = clock::now();
     const nlohmann::json cancelled = sub({{"action", "CANCEL_ALL"}, {"token_id", tok}});
-    std::printf("%s\n", cancelled.dump(2).c_str());
+    const auto t3 = clock::now();
+    std::printf("%s\nCANCEL latency: %lld ms\n", cancelled.dump(2).c_str(),
+                static_cast<long long>(ms(t2, t3)));
     return 0;
 }
