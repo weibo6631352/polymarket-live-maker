@@ -124,6 +124,9 @@ private:
     std::map<std::string, std::string> reflex_complement_;          // yes_token -> no_token (双边一并撤)
     std::set<std::string> reflex_cancelled_;
     std::mutex reflex_mu_;
+
+    std::set<std::string> seen_fill_ids_;     // 已计成交 id (WS+REST 双源/跨轮去重)
+    std::deque<std::string> seen_fill_fifo_;  // FIFO 上限淘汰
 };
 
 }  // namespace pmm

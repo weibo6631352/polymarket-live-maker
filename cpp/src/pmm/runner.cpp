@@ -655,17 +655,31 @@ void LiveRunner::tick_cooldowns() {
 FillsByToken LiveRunner::poll_fills() {
     std::vector<json> fills;
     try {
-        if (user_ch_) {
-            fills = user_ch_->poll_fills();
-        } else if (submitter_ != nullptr) {
+        // REST /data/trades (按 funder maker_address) 是权威成交源 — 每轮都查。
+        if (submitter_ != nullptr) {
             std::lock_guard<std::mutex> lk(submitter_mu_);
             fills = submitter_->poll_fills();
+        }
+        // WS user channel 低延迟补充, 合并; runner 级按 id 去重防双源/跨轮重复计数。
+        if (user_ch_) {
+            auto ws = user_ch_->poll_fills();
+            fills.insert(fills.end(), ws.begin(), ws.end());
         }
     } catch (...) {
         return {};
     }
     FillsByToken out;
     for (const auto& f : fills) {
+        const std::string id = f.value("id", std::string{});
+        if (!id.empty()) {
+            if (seen_fill_ids_.count(id) != 0) continue;  // 已计过这笔成交
+            seen_fill_ids_.insert(id);
+            seen_fill_fifo_.push_back(id);
+            if (seen_fill_fifo_.size() > 5000) {
+                seen_fill_ids_.erase(seen_fill_fifo_.front());
+                seen_fill_fifo_.pop_front();
+            }
+        }
         RealFill rf;
         rf.side = f.value("side", std::string{});
         rf.size = f.value("size", 0.0);
@@ -803,6 +817,20 @@ void LiveRunner::shutdown() {
                     }
                 }
                 engine_->cancel_maker_quote(q.value("id", 0));
+            }
+            // 关停最后再查一次成交, 平掉 poll 间隙 / 撤单竞态里被吃出来的库存 (REST 权威)。
+            if (use_live_path() && cfg_.live) {
+                const FillsByToken late = poll_fills();
+                for (const auto& [tok, fl] : late) {
+                    double net = 0.0;
+                    for (const auto& f : fl) net += (f.side == "BUY" ? 1.0 : -1.0) * f.size;
+                    if (std::abs(net) >= 1e-9) {
+                        std::fprintf(stderr, "shutdown: late fill net %.4f on %s — flattening\n", net,
+                                     tok.c_str());
+                        const std::string side = net > 0 ? "SELL" : "BUY";
+                        locked_submit({{"action", "FLATTEN"}, {"token_id", tok}, {"side", side}, {"size", std::abs(net)}});
+                    }
+                }
             }
         } catch (...) {
         }

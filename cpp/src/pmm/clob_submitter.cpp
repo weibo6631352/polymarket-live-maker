@@ -584,7 +584,9 @@ nlohmann::json ClobSubmitter::operator()(const nlohmann::json& action) noexcept 
 
 std::vector<json> ClobSubmitter::poll_fills() {
     const std::string path = "/data/trades";
-    const std::string query = path + "?maker_address=" + creds_.signer_lc + "&next_cursor=MA==";
+    // 必须按 ORDER MAKER 查 (sig_type=1 时 = funder/proxy), 不是 signer。
+    // 之前用 signer_lc → 查不到自己的成交 (maker 是 funder), poll_fills 永远空 → 漏单。
+    const std::string query = path + "?maker_address=" + creds_.maker + "&next_cursor=MA==";
     const std::string ts = std::to_string(now_unix());
     throttle(/*low_priority=*/true);
     const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
