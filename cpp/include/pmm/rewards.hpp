@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -68,6 +69,9 @@ struct PoolReport {
     std::optional<double> daily_vol_c;
     std::optional<double> recent_vol_c;  // 近窗波动 (过滤用); 不入 parity JSON
     std::optional<double> days_wiped;
+    // B: PM 官方权威数据 (来自 /rewards/markets/multi, 选池用); 不入 parity JSON。
+    double competitiveness{-1.0};   // PM 竞争度 (越高越拥挤); <0 = 未知
+    double remaining_reward{-1.0};  // 池子剩余额度 ($); <0 = 未知, 0..tiny = 快发完
 };
 
 // ---- 纯函数 ----
@@ -88,6 +92,8 @@ public:
     explicit RewardsClient(RateLimiter* rate_limiter = nullptr, std::size_t pool_size = SCAN_WORKERS);
 
     [[nodiscard]] std::vector<nlohmann::json> sampling_markets(int max_pages = 100);
+    // B: /rewards/markets/multi → {condition_id: (市场竞争度, 池剩余额度$)}; 选池用 PM 权威数据。
+    [[nodiscard]] std::map<std::string, std::pair<double, double>> reward_markets_multi(int max_pages = 4);
     [[nodiscard]] nlohmann::json book(const std::string& token_id);
     [[nodiscard]] std::vector<orderbook::PricePoint> prices_history(const std::string& token_id,
                                                                     const std::string& interval = "max",

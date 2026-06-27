@@ -302,6 +302,48 @@ json RewardsClient::get(const std::string& path) {
     }
 }
 
+std::map<std::string, std::pair<double, double>> RewardsClient::reward_markets_multi(int max_pages) {
+    std::map<std::string, std::pair<double, double>> out;
+    std::string cursor;
+    for (int i = 0; i < max_pages; ++i) {
+        std::string path = "/rewards/markets/multi?page_size=500";
+        if (!cursor.empty()) path += "&next_cursor=" + cursor;
+        json data;
+        try {
+            data = get(path);
+        } catch (...) {
+            break;  // 失败不致命: 选池退回不带这层增强
+        }
+        const json* d = data.is_object() ? ju::find(data, "data") : nullptr;
+        const json page = (d != nullptr) ? *d : (data.is_array() ? data : json::array());
+        if (!page.is_array() || page.empty()) break;
+        for (const auto& m : page) {
+            const json* cv = ju::find(m, "condition_id");
+            if (cv == nullptr) continue;
+            const std::string cond = ju::to_str(*cv);
+            if (cond.empty()) continue;
+            double compet = 0.0;
+            if (const json* c = ju::find(m, "market_competitiveness")) compet = ju::to_double(*c);
+            double remaining = -1.0;
+            if (const json* rc = ju::find(m, "rewards_config")) {
+                if (rc->is_array() && !rc->empty()) {
+                    remaining = 0.0;
+                    for (const auto& cfg : *rc)
+                        if (const json* rem = ju::find(cfg, "remaining_reward_amount"))
+                            remaining += ju::to_double(*rem);
+                }
+            }
+            out[cond] = {compet, remaining};
+        }
+        std::string nxt;
+        if (data.is_object())
+            if (const json* n = ju::find(data, "next_cursor")) nxt = ju::to_str(*n);
+        if (nxt.empty() || nxt == "LTE=" || nxt == cursor) break;
+        cursor = nxt;
+    }
+    return out;
+}
+
 std::vector<json> RewardsClient::sampling_markets(int max_pages) {
     std::vector<json> out;
     std::string cursor;
@@ -440,8 +482,15 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
         for (auto& t : ths) t.join();
     }
 
+    // B: PM 官方权威 竞争度 + 池剩余额度 (失败则退回不带这层增强)。
+    std::map<std::string, std::pair<double, double>> multi;
+    try {
+        multi = client.reward_markets_multi();
+    } catch (...) {
+    }
     std::vector<PoolReport> scored;
     int vol_dropped = 0;
+    int depleted_dropped = 0;
     for (auto& r : results) {
         if (!r) continue;
         // 波动率过滤: 实现日波动 > vol_mult×奖励带宽 的池太跳, 逆选择重 → 剔除。
@@ -454,11 +503,21 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
             ++vol_dropped;
             continue;
         }
+        // B: 接 PM 权威数据。剔除快发完的池 (剩余已知且 <$1 = 没价值); 竞争度附上供选池/感知。
+        auto mit = multi.find(r->condition_id);
+        if (mit != multi.end()) {
+            r->competitiveness = mit->second.first;
+            r->remaining_reward = mit->second.second;
+            if (r->remaining_reward >= 0.0 && r->remaining_reward < 1.0) {
+                ++depleted_dropped;
+                continue;
+            }
+        }
         scored.push_back(std::move(*r));
     }
-    if (vol_dropped > 0)
-        std::fprintf(stderr, "scan: vol-filter dropped %d jumpy pool(s) (daily_vol > %.1f x band)\n",
-                     vol_dropped, max_vol_mult);
+    if (vol_dropped > 0 || depleted_dropped > 0)
+        std::fprintf(stderr, "scan: dropped %d jumpy (vol>%.1fx band) + %d depleted (remaining<$1) pool(s)\n",
+                     vol_dropped, max_vol_mult, depleted_dropped);
 
     // 排序: SAFE 先, 再 非空簿 高毛年化。
     auto verdict_rank = [](const std::string& v) -> int {
@@ -473,7 +532,11 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
         const int ra = verdict_rank(a.jump_verdict);
         const int rb = verdict_rank(b.jump_verdict);
         if (ra != rb) return ra < rb;
-        return a.gross_ann_pct > b.gross_ann_pct;  // -gross 升序 = gross 降序
+        if (a.gross_ann_pct != b.gross_ann_pct) return a.gross_ann_pct > b.gross_ann_pct;  // 毛年化降序
+        // B: 毛收益相近时, 优先 PM 竞争度更低 (更不拥挤) 的池; 竞争度未知(-1)排后。
+        const double ca = a.competitiveness < 0.0 ? 1e18 : a.competitiveness;
+        const double cb = b.competitiveness < 0.0 ? 1e18 : b.competitiveness;
+        return ca < cb;
     });
 
     int safe_count = 0;
