@@ -49,7 +49,9 @@ RunnerConfig RunnerConfig::from_env() {
     c.min_hold_s = f("LM_MIN_HOLD_S", 300.0);
     c.min_wallet_usdc = f("LM_MIN_WALLET_USDC", 0.0);
     c.use_optimal_spread = flag_ne("LM_OPTIMAL_SPREAD", "0", "1");  // 默认开: 高波动自动放宽
-    c.recenter_ticks = i("LM_RECENTER_TICKS", 2);  // 别 1tick 抖动就撤重挂 (空窗丢奖励)
+    // R2(数学家): mid 仅 0.5¢ 偏移 share 即掉 ~36%, 且 mid 单调漂(重挂会"粘住"不抖) → 早重挂找回份额。
+    c.recenter_ticks = i("LM_RECENTER_TICKS", 1);
+    c.min_days_to_resolution = f("LM_MIN_DAYS_TO_RESOLUTION", 10.0);  // R2: 剔除近结算催化剂池
     c.crossing_cost_c = f("LM_CROSSING_COST_C", 0.0);
     return c;
 }

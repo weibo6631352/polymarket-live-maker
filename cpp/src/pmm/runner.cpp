@@ -396,7 +396,8 @@ void LiveRunner::start_discovery_thread() {
 
 void LiveRunner::rediscover() {
     try {
-        rewards::ScanResult res = rewards::scan(scanner(), cfg_.min_daily, cfg_.scan_top, true);
+        rewards::ScanResult res = rewards::scan(scanner(), cfg_.min_daily, cfg_.scan_top, true,
+                                                cfg_.min_days_to_resolution);
         {
             std::lock_guard<std::mutex> lk(report_mu_);
             report_ = std::move(res);

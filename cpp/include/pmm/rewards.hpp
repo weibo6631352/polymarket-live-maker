@@ -33,6 +33,7 @@ struct RewardConfig {
     std::string token;
     std::string question;
     std::string condition_id;
+    double end_date_unix{0.0};  // 市场结算时间 (unix); 0=未知。近结算池 = 灾难性事件风险, 剔除。
 };
 
 // classify_jump_risk 的输出。
@@ -108,6 +109,6 @@ struct ScanResult {
 };
 
 [[nodiscard]] ScanResult scan(RewardsClient& client, double min_daily = MIN_DAILY, int top = 30,
-                              bool with_jump_risk = true);
+                              bool with_jump_risk = true, double min_days_to_resolution = 0.0);
 
 }  // namespace pmm::rewards

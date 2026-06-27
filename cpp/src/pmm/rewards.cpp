@@ -6,6 +6,8 @@
 #include <cctype>
 #include <cfenv>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
 #include <format>
 #include <limits>
 #include <optional>
@@ -121,6 +123,18 @@ std::optional<RewardConfig> parse_rewards(const json& market) {
     if (const json* v = ju::find(market, "question")) q = ju::to_str(*v);
     c.question = pmm::strutil::utf8_prefix(q, 80);  // 按码点截断 (不切坏 UTF-8 → 不会让 json.dump 抛)
     if (const json* v = ju::find(market, "condition_id")) c.condition_id = ju::to_str(*v);
+    // 结算时间 end_date_iso ("YYYY-MM-DDTHH:MM:SSZ") → unix, 给近结算过滤用。
+    if (const json* v = ju::find(market, "end_date_iso")) {
+        const std::string ed = ju::to_str(*v);
+        std::tm tm{};
+        if (std::sscanf(ed.c_str(), "%d-%d-%dT%d:%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+                        &tm.tm_hour, &tm.tm_min, &tm.tm_sec) >= 3) {
+            tm.tm_year -= 1900;
+            tm.tm_mon -= 1;
+            const std::time_t t = timegm(&tm);
+            if (t > 0) c.end_date_unix = static_cast<double>(t);
+        }
+    }
     return c;
 }
 
@@ -336,8 +350,10 @@ std::vector<orderbook::PricePoint> RewardsClient::prices_history(const std::stri
 // scan
 // ---------------------------------------------------------------------------
 
-ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump_risk) {
+ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump_risk,
+                double min_days_to_resolution) {
     const std::vector<json> markets = client.sampling_markets();
+    const double now = static_cast<double>(std::time(nullptr));
 
     int total_reward_pools = 0;
     std::vector<RewardConfig> pools;
@@ -345,7 +361,12 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
         auto p = parse_rewards(m);
         if (p) {
             ++total_reward_pools;
-            if (p->daily >= min_daily) pools.push_back(*p);
+            if (p->daily < min_daily) continue;
+            // 近结算过滤 (R2 金融家): 临近结算 = 灾难性跳变/pin 风险, 被动做市必被碾, 且奖励流短。
+            if (min_days_to_resolution > 0.0 && p->end_date_unix > 0.0 &&
+                (p->end_date_unix - now) / 86400.0 < min_days_to_resolution)
+                continue;
+            pools.push_back(*p);
         }
     }
     std::sort(pools.begin(), pools.end(),
