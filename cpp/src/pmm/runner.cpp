@@ -820,22 +820,8 @@ void LiveRunner::shutdown() {
                 }
                 engine_->cancel_maker_quote(q.value("id", 0));
             }
-            // 关停最后再查一次成交, 平掉 poll 间隙 / 撤单竞态里被吃出来的库存 (REST 权威)。
-            if (use_live_path() && cfg_.live) {
-                const FillsByToken late = poll_fills();
-                for (const auto& [tok, fl] : late) {
-                    double net = 0.0;
-                    for (const auto& f : fl) net += (f.side == "BUY" ? 1.0 : -1.0) * f.size;
-                    if (std::abs(net) >= 1e-9) {
-                        std::fprintf(stderr, "shutdown: late fill net %.4f on %s — flattening\n", net,
-                                     tok.c_str());
-                        const std::string side = net > 0 ? "SELL" : "BUY";
-                        locked_submit({{"action", "FLATTEN"}, {"token_id", tok}, {"side", side}, {"size", std::abs(net)}});
-                    }
-                }
-            }
-            // 终极保险 (关停先撤单): 列出 CLOB 上所有挂单, 撤掉任何残留的 —— 防撤单竞态/漏网单留在
-            // 盘口, 软件关了之后被成交造成失控亏损。无论 tracked 与否, 一律扫掉。
+            // 安全收尾第 1 步 —— 先撤掉 CLOB 上所有挂单 (无论 tracked 与否), 这样平仓期间不会再有新成交。
+            // 防撤单竞态/漏网单留在盘口, 软件关了之后被成交造成失控亏损。
             if (use_live_path() && submitter_ != nullptr) {
                 try {
                     const std::vector<json> open = submitter_->list_open_orders();
@@ -851,6 +837,37 @@ void LiveRunner::shutdown() {
                     std::fprintf(stderr, "shutdown: swept %d residual open order(s) off the book\n", swept);
                 } catch (...) {
                 }
+            }
+            // 安全收尾第 2 步 —— 平掉 poll 间隙/撤单竞态/跳变里被吃出的库存, 并校验+重试。
+            // fire-and-forget 会在跳变薄盘口漏平 → 孤立仓位 (实测: 13:16 全市场跳变扫掉 7 池大单,
+            // 发了平仓单却没等成交确认就退出 → 留 4 条腿)。改为最多 4 轮重试 (轮间等 1s 让盘口从跳变
+            // 恢复), 平不掉的最后大声告警, 绝不静默带仓退出。
+            if (use_live_path() && cfg_.live) {
+                std::vector<std::pair<std::string, double>> residual;  // token -> 未平净额
+                for (const auto& [tok, fl] : poll_fills()) {
+                    double net = 0.0;
+                    for (const auto& f : fl) net += (f.side == "BUY" ? 1.0 : -1.0) * f.size;
+                    if (std::abs(net) >= 1e-9) residual.emplace_back(tok, net);
+                }
+                for (int round = 1; round <= 4 && !residual.empty(); ++round) {
+                    std::vector<std::pair<std::string, double>> still;
+                    for (const auto& [tok, net] : residual) {
+                        const std::string side = net > 0 ? "SELL" : "BUY";
+                        const json res = locked_submit(
+                            {{"action", "FLATTEN"}, {"token_id", tok}, {"side", side}, {"size", std::abs(net)}});
+                        const std::string st = res.value("status", std::string{});
+                        std::fprintf(stderr, "shutdown: flatten net %.4f on %s (round %d): %s\n", net,
+                                     tok.c_str(), round, st.c_str());
+                        if (st != "FLATTENED") still.emplace_back(tok, net);  // 没平掉 → 下轮重试
+                    }
+                    residual.swap(still);
+                    if (!residual.empty() && round < 4)
+                        std::this_thread::sleep_for(std::chrono::seconds(1));  // 等盘口从跳变恢复
+                }
+                for (const auto& [tok, net] : residual)
+                    std::fprintf(stderr,
+                                 "shutdown: WARN ORPHAN net %.4f on %s — could NOT flatten; MANUAL FLATTEN NEEDED\n",
+                                 net, tok.c_str());
             }
         } catch (...) {
         }
