@@ -93,7 +93,7 @@ private:
     std::unique_ptr<rewards::RewardsClient> owned_scanner_;
     ISubmitter* submitter_{nullptr};
     std::unique_ptr<ISubmitter> owned_submitter_;
-    std::unique_ptr<TokenBucket> rate_limiter_;
+    std::unique_ptr<RateLimiter> rate_limiter_;
     std::function<void(double)> sleeper_;
     std::unique_ptr<EventLog> events_;
     std::mutex submitter_mu_;  // 串行化 submitter 访问 (反射 + poll 线程)

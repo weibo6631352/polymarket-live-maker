@@ -195,7 +195,7 @@ std::vector<Market> parse_market_list(const json& data) {
 // PolymarketClient
 // ---------------------------------------------------------------------------
 
-PolymarketClient::PolymarketClient(Database& db, TokenBucket* rate_limiter, std::size_t pool_size)
+PolymarketClient::PolymarketClient(Database& db, RateLimiter* rate_limiter, std::size_t pool_size)
     : db_(db),
       rate_limiter_(rate_limiter),
       gamma_(kGammaHost, pool_size),
@@ -217,7 +217,7 @@ json PolymarketClient::gamma_get(const std::string& path, const Params& params) 
 
 json PolymarketClient::clob_get(const std::string& path, const Params& params) {
     if (rate_limiter_ != nullptr) {
-        rate_limiter_->acquire(1.0, std::nullopt, /*low_priority=*/true);
+        rate_limiter_->acquire(path, "GET");  // 按端点分类 (官方 per-endpoint 限额)
     }
     const net::HttpResponse r = clob_.Get(path + build_query(params));
     if (r.status == 0) throw ApiError("CLOB API request failed");

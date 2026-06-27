@@ -28,7 +28,7 @@ namespace pmm {
 class PolymarketClient {
 public:
     // rate_limiter 可为空 (= 不限速)。pool_size = 每 host 最大并发连接。
-    explicit PolymarketClient(Database& db, TokenBucket* rate_limiter = nullptr,
+    explicit PolymarketClient(Database& db, RateLimiter* rate_limiter = nullptr,
                               std::size_t pool_size = 8);
 
     // ---- 市场解析 (slug 或 condition_id) ----
@@ -55,7 +55,7 @@ public:
                                                          const std::string& outcome);
 
     // 注入共享 TokenBucket (runner 让 engine 的读路径也走全局 req/s 预算)。
-    void set_rate_limiter(TokenBucket* rl) noexcept { rate_limiter_ = rl; }
+    void set_rate_limiter(RateLimiter* rl) noexcept { rate_limiter_ = rl; }
 
 private:
     using Params = std::vector<std::pair<std::string, std::string>>;
@@ -65,7 +65,7 @@ private:
     void set_cached(const std::string& key, const nlohmann::json& data);
 
     Database& db_;
-    TokenBucket* rate_limiter_;
+    RateLimiter* rate_limiter_;
     pmm::net::HttpsPool gamma_;
     pmm::net::HttpsPool clob_;
 };

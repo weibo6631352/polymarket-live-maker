@@ -83,7 +83,7 @@ struct PoolReport {
 // ---- HTTP 客户端 (CLOB reward-pool / book / history) ----
 class RewardsClient {
 public:
-    explicit RewardsClient(TokenBucket* rate_limiter = nullptr, std::size_t pool_size = SCAN_WORKERS);
+    explicit RewardsClient(RateLimiter* rate_limiter = nullptr, std::size_t pool_size = SCAN_WORKERS);
 
     [[nodiscard]] std::vector<nlohmann::json> sampling_markets(int max_pages = 100);
     [[nodiscard]] nlohmann::json book(const std::string& token_id);
@@ -93,7 +93,7 @@ public:
 
 private:
     nlohmann::json get(const std::string& path);  // 经 rate_limiter (low priority) + 池
-    TokenBucket* rate_limiter_;
+    RateLimiter* rate_limiter_;
     pmm::net::HttpsPool clob_;
 };
 

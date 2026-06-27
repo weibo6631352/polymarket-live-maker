@@ -37,6 +37,19 @@ inline constexpr double SINGLE_SIDED_DIVISOR = 3.0;
 // in-band 奖励分: 现存竞争 makers 的绑定 Qmin (经 binding_qmin 折叠)。
 [[nodiscard]] double book_inband_qmin(const OrderBook& book, double mid, double max_spread_c);
 
+// 盘口预测信号 (从全深度盘口算, 纯本地零请求)。micro_price 领先 mid; obi>0=上行压力。
+struct BookSignals {
+    double micro_price{0.0};  // (b0*A0 + a0*B0)/(A0+B0): 按对侧 size 加权的"公允值", 领先 mid
+    double obi1{0.0};         // 顶档不平衡 (B0-A0)/(B0+A0) ∈ [-1,1]; 薄盘口噪声大
+    double obi_band{0.0};     // 带内 W(s) 加权不平衡; 更稳健
+    double depth{0.0};        // 带内总加权深度 (信号质量门: 太小则不可信)
+    bool valid{false};        // 双边非空才 true
+};
+[[nodiscard]] BookSignals compute_book_signals(const OrderBook& book, double mid, double max_spread_c);
+
+// 短程期望漂移 μ̂ (¢/cycle): v1 只用 micro-price 领先 × shrink λ, clamp 到 ±s_cents。
+[[nodiscard]] double mu_hat(const BookSignals& sig, double mid, double s_cents, double lambda);
+
 // price 处某侧"前方"挂单量 (better_size, at_level_size) — 队列位置/成交概率粗估。
 [[nodiscard]] std::pair<double, double> depth_ahead(const OrderBook& book, double price,
                                                     const std::string& side);

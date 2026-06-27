@@ -149,6 +149,41 @@ double book_inband_qmin(const OrderBook& book, double mid, double max_spread_c) 
     return binding_qmin(bid_score, ask_score, mid);
 }
 
+BookSignals compute_book_signals(const OrderBook& book, double mid, double max_spread_c) {
+    BookSignals s;
+    s.micro_price = mid;
+    if (book.bids.empty() || book.asks.empty()) return s;
+    // best bid = 最高价; best ask = 最低价 (不假设输入已排序)。
+    const OrderBookLevel* bb = nullptr;
+    for (const auto& l : book.bids)
+        if (l.size > 0.0 && (bb == nullptr || l.price > bb->price)) bb = &l;
+    const OrderBookLevel* ba = nullptr;
+    for (const auto& l : book.asks)
+        if (l.size > 0.0 && (ba == nullptr || l.price < ba->price)) ba = &l;
+    if (bb == nullptr || ba == nullptr) return s;
+    const double b0 = bb->size, a0 = ba->size;
+    // micro-price: 按对侧 size 加权 → 被推向 size 更小(将被吃)的那侧, 领先 mid。
+    if (a0 + b0 > 0.0) s.micro_price = (bb->price * a0 + ba->price * b0) / (a0 + b0);
+    s.obi1 = (b0 + a0 > 0.0) ? (b0 - a0) / (b0 + a0) : 0.0;
+    // 带内 W(s) 加权不平衡 (复用 book_inband_qmin 的两个累加器)。
+    double bid_score = 0.0, ask_score = 0.0;
+    for (const auto& l : book.bids) bid_score += l.size * inband_weight((mid - l.price) * 100.0, max_spread_c);
+    for (const auto& l : book.asks) ask_score += l.size * inband_weight((l.price - mid) * 100.0, max_spread_c);
+    s.depth = bid_score + ask_score;
+    s.obi_band = (s.depth > 0.0) ? (bid_score - ask_score) / s.depth : 0.0;
+    s.valid = true;
+    return s;
+}
+
+double mu_hat(const BookSignals& sig, double mid, double s_cents, double lambda) {
+    if (!sig.valid) return 0.0;
+    const double delta_c = (sig.micro_price - mid) * 100.0;  // micro-price 领先 mid (¢)
+    double mu = lambda * delta_c;
+    if (mu > s_cents) mu = s_cents;     // 超过自身缓冲 → 是 pull 事件, 不是 skew
+    if (mu < -s_cents) mu = -s_cents;
+    return mu;
+}
+
 std::pair<double, double> depth_ahead(const OrderBook& book, double price, const std::string& side) {
     constexpr double eps = 1e-9;
     const bool is_bid = (lower(side) == "bid" || lower(side) == "buy");

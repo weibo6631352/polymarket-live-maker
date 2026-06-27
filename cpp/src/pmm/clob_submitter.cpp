@@ -158,7 +158,7 @@ OrderAmounts get_market_order_amounts(bool is_buy, double amount, double price, 
 // ClobSubmitter
 // ---------------------------------------------------------------------------
 
-ClobSubmitter::ClobSubmitter(TokenBucket* rate_limiter, std::string endpoint)
+ClobSubmitter::ClobSubmitter(RateLimiter* rate_limiter, std::string endpoint)
     : rate_limiter_(rate_limiter), endpoint_(std::move(endpoint)) {
     // 末尾斜杠去掉。
     while (!endpoint_.empty() && endpoint_.back() == '/') endpoint_.pop_back();
@@ -221,13 +221,15 @@ void ClobSubmitter::close() {
     if (warmer_) warmer_->stop();
 }
 
-void ClobSubmitter::throttle(bool low_priority) {
-    if (rate_limiter_ != nullptr) rate_limiter_->acquire(1.0, std::nullopt, low_priority);
+void ClobSubmitter::throttle(bool /*low_priority*/) {
+    // per-endpoint 限速已移到 http() (那里有 path+method 可分类)。保留空壳兼容现有调用点。
 }
 
 ClobSubmitter::Resp ClobSubmitter::http(const char* method, const std::string& path,
                                         const std::vector<std::string>& headers,
                                         const std::string& body) {
+    // per-endpoint 限速 (取 token 阻塞) 必须在拿 curl 锁之前, 否则等额度时会卡住别的请求。
+    if (rate_limiter_ != nullptr) rate_limiter_->acquire(path, method);
     std::lock_guard<std::mutex> lk(curl_mu_);  // 持久 handle 非线程安全
     Resp r;
     CURL* c = static_cast<CURL*>(curl_);

@@ -71,7 +71,7 @@ LiveRunner::LiveRunner(RunnerConfig cfg, Engine* engine, rewards::RewardsClient*
           if (s > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(s));
       }) {
     if (cfg_.max_req_per_sec > 0.0) {
-        rate_limiter_ = std::make_unique<TokenBucket>(cfg_.max_req_per_sec, std::nullopt, cfg_.write_reserve);
+        rate_limiter_ = std::make_unique<RateLimiter>();  // per-endpoint 限额 (官方文档)
     }
     if (scanner_ == nullptr) {
         owned_scanner_ = std::make_unique<rewards::RewardsClient>(rate_limiter_.get());

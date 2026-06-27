@@ -270,12 +270,12 @@ std::optional<PoolReport> score_pool(const RewardConfig& pool, const json& book,
 // RewardsClient
 // ---------------------------------------------------------------------------
 
-RewardsClient::RewardsClient(TokenBucket* rate_limiter, std::size_t pool_size)
+RewardsClient::RewardsClient(RateLimiter* rate_limiter, std::size_t pool_size)
     : rate_limiter_(rate_limiter), clob_(kClobHost, pool_size) {}
 
 json RewardsClient::get(const std::string& path) {
     if (rate_limiter_ != nullptr) {
-        rate_limiter_->acquire(1.0, std::nullopt, /*low_priority=*/true);
+        rate_limiter_->acquire(path, "GET");  // 按端点分类 (/book 150/s, /sampling 50/s, ...)
     }
     const net::HttpResponse r = clob_.Get(path);
     if (r.status == 0) throw ApiError("Polymarket CLOB API request failed");

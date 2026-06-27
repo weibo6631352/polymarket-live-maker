@@ -67,7 +67,7 @@ struct LiveCredentials {
 
 class ClobSubmitter : public pmm::ISubmitter {
 public:
-    explicit ClobSubmitter(TokenBucket* rate_limiter = nullptr,
+    explicit ClobSubmitter(RateLimiter* rate_limiter = nullptr,
                            std::string endpoint = "https://clob.polymarket.com");
     ~ClobSubmitter() override;
     ClobSubmitter(const ClobSubmitter&) = delete;
@@ -119,7 +119,7 @@ private:
     bool derive_api_creds(std::string& err);
     void warm_ping();
 
-    TokenBucket* rate_limiter_;
+    RateLimiter* rate_limiter_;
     std::string endpoint_;
     LiveCredentials creds_;
     double expiry_s_{0.0};
