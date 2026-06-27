@@ -18,10 +18,13 @@ RunnerConfig RunnerConfig::from_env() {
     c.live = flag_eq("PM_TRADER_LIVE", "1", "0");
     c.dry_live = flag_ne("LM_DRY_LIVE", "0", "1");
     c.capital = f("LM_CAPITAL", 200.0);
-    c.min_daily = f("LM_MIN_DAILY", 80.0);
+    // 优化后默认 (顾问): 小账户去小而无人争的池 (不是大而拥挤的 $80 池)。
+    c.min_daily = f("LM_MIN_DAILY", 15.0);
+    c.half_spread_ticks = i("LM_HALF_SPREAD_TICKS", 1);
+    c.risk_tolerance_days = f("LM_RISK_TOLERANCE_DAYS", 5.0);
     c.scan_top = i("LM_SCAN_TOP", 0);
     c.max_token_overlap = i("LM_MAX_TOKEN_OVERLAP", 1);
-    c.poll_seconds = f("LM_POLL_SECONDS", 60.0);
+    c.poll_seconds = f("LM_POLL_SECONDS", 20.0);
     c.discovery_interval_s = f("LM_DISCOVERY_INTERVAL_S", 600.0);
     c.cooldown_rounds = i("LM_COOLDOWN_ROUNDS", 3);
     c.max_loss = f("LM_MAX_LOSS_PER_DAY", 20.0);
@@ -35,17 +38,18 @@ RunnerConfig RunnerConfig::from_env() {
     c.resync_workers = i("LM_BOOK_RESYNC_WORKERS", 8);
     c.reeval_enabled = flag_ne("LM_REEVAL", "0", "1");
     c.reeval_interval_s = f("LM_REEVAL_INTERVAL_S", 300.0);
-    c.min_pool_reward = f("LM_MIN_POOL_REWARD", 0.5);
-    c.chop_aversion = f("LM_CHOP_AVERSION", 0.7);
-    c.size_share_cap = f("LM_SIZE_SHARE_CAP", 0.33);
+    // 真 $1/天发放门槛: 0.5 会选到发 $0 的池; 对封顶份额判 1.5 留余量。
+    c.min_pool_reward = f("LM_MIN_POOL_REWARD", 1.5);
+    c.chop_aversion = f("LM_CHOP_AVERSION", 1.5);  // 在线波动=逆选择, 多躲
+    c.size_share_cap = f("LM_SIZE_SHARE_CAP", 0.30);
     c.quality_floor_frac = f("LM_QUALITY_FLOOR_FRAC", 0.10);
-    c.max_pool_frac = f("LM_MAX_POOL_FRAC", 0.25);
-    c.order_expiry_s = f("LM_ORDER_EXPIRY_S", 0.0);
-    c.max_mid_vel_cps = f("LM_MAX_MID_VEL_CPS", 4.0);
-    c.min_hold_s = f("LM_MIN_HOLD_S", 600.0);
+    c.max_pool_frac = f("LM_MAX_POOL_FRAC", 0.12);  // 份额对规模是凹的→分散胜过梭哈
+    c.order_expiry_s = f("LM_ORDER_EXPIRY_S", 120.0);  // GTD 死人开关: 进程挂了挂单自动过期
+    c.max_mid_vel_cps = f("LM_MAX_MID_VEL_CPS", 1.0);  // 入场护栏: 别挂进快速/逆向的盘
+    c.min_hold_s = f("LM_MIN_HOLD_S", 300.0);
     c.min_wallet_usdc = f("LM_MIN_WALLET_USDC", 0.0);
-    c.use_optimal_spread = flag_eq("LM_OPTIMAL_SPREAD", "1", "0");
-    c.recenter_ticks = i("LM_RECENTER_TICKS", 1);
+    c.use_optimal_spread = flag_ne("LM_OPTIMAL_SPREAD", "0", "1");  // 默认开: 高波动自动放宽
+    c.recenter_ticks = i("LM_RECENTER_TICKS", 2);  // 别 1tick 抖动就撤重挂 (空窗丢奖励)
     c.crossing_cost_c = f("LM_CROSSING_COST_C", 0.0);
     return c;
 }

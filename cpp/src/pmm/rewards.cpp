@@ -208,11 +208,18 @@ std::optional<PoolReport> score_pool(const RewardConfig& pool, const json& book,
     if (!best_bid || !best_ask) return std::nullopt;
 
     const double mid = (*best_bid + *best_ask) / 2.0;
+    // P2(选池): 极端价 (mid<0.10 / >0.90) — pin 风险 + 逆选择最重, 且 binding_qmin 强制双边、
+    // 资本效率最差。小账户直接剔除这类池。
+    if (mid < 0.10 || mid > 0.90) return std::nullopt;
     const double c = pool.max_spread;
     const auto [bscore, bnot] = inband_score(bids, mid, c, true);
     const auto [ascore, anot] = inband_score(asks, mid, c, false);
     const double min_side = pmm::orderbook::binding_qmin(bscore, ascore, mid);  // 官方绑定 Qmin
-    const double share = reward_share(pool.min_size, pool.tick, c, min_side);
+    const double raw_share = reward_share(pool.min_size, pool.tick, c, min_side);
+    // P0(选池): 份额封顶。快照份额对薄盘口系统性高估 (薄=会吸引farmer→你一挂上份额就被稀释),
+    // 高估恰好最大在它排第一的池。顶到 ~0.40, 与部署份额上限 0.30 一致, 砍掉幻想分。
+    constexpr double SHARE_CEIL = 0.40;
+    const double share = raw_share < SHARE_CEIL ? raw_share : SHARE_CEIL;
     const double capital = pool.min_size;
     const double reward_per_day = share * pool.daily;
     const double gross_ann = capital > 0.0 ? (reward_per_day * 365.0 / capital * 100.0) : 0.0;
@@ -235,7 +242,7 @@ std::optional<PoolReport> score_pool(const RewardConfig& pool, const json& book,
     r.inband_notional = round_int(bnot + anot);
     r.share = roundn(share, 4);
     r.min_side_score = roundn(min_side, 4);
-    r.empty_band = share >= EMPTY_BAND_SHARE;
+    r.empty_band = raw_share >= EMPTY_BAND_SHARE;  // 空带检测用未封顶的原始份额
     r.reward_per_day = roundn(reward_per_day, 2);
     r.gross_ann_pct = round_int(gross_ann);
     r.jump_verdict = jump.verdict;

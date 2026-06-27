@@ -43,23 +43,33 @@ std::vector<Order> compute_two_sided_quotes(double mid, double half_spread_c, do
 std::vector<Order> compute_two_sided_quotes_yes_no(double mid, double half_spread_c, double size,
                                                    double tick, double max_spread_c,
                                                    const std::string& yes_token_id,
-                                                   const std::string& no_token_id, double skew_ticks) {
-    const std::vector<Order> yes =
-        compute_two_sided_quotes(mid, half_spread_c, size, tick, max_spread_c, skew_ticks);
-    std::vector<Order> out;
-    out.reserve(yes.size());
-    for (const auto& o : yes) {
-        if (o.side == "SELL") {
-            // SELL-YES @ ask  ≡  BUY-NO @ (1-ask)  (YES+NO=$1) — 全 USDC, 不需份额。
-            // 夹到 [tick, 1-tick]: 防 ask 取整到 0 时 1-ask=1.0 越界。
-            const double no_price =
-                std::min(1.0 - tick, std::max(tick, round_to(1.0 - o.price, 4)));
-            out.push_back(Order{"BUY", no_price, o.size, no_token_id});
-        } else {
-            out.push_back(Order{"BUY", o.price, o.size, yes_token_id});
-        }
+                                                   const std::string& no_token_id, double best_bid,
+                                                   double best_ask, double skew_ticks) {
+    if (!(0.0 < mid && mid < 1.0)) {
+        throw std::invalid_argument(std::format("mid must be in (0, 1), got {}", mid));
     }
-    return out;
+    const double v = max_spread_c;  // 奖励带宽度 (分)
+    const double shift = skew_ticks * tick;
+    // 奖励目标点: 离中点 clamp(half_spread, 0.15·v, 0.55·v) 分。太紧=易被扫, 太深=0 奖励。
+    const double s_target = std::min(std::max(half_spread_c, 0.15 * v), 0.55 * v) / 100.0;
+    const double edge = 0.55 * v / 100.0;  // band edge: 最深仍计奖励的位置
+    const auto to_tick = [tick](double p) { return std::nearbyint(p / tick) * tick; };
+
+    // YES bid 腿: 目标 mid-s_target; 有盘口则退到 best_bid-tick 之后; 但不深过 band edge; 夹 [tick,..]。
+    double bid = to_tick(mid - s_target - shift);
+    if (best_bid > 0.0) bid = std::min(bid, best_bid - tick);
+    bid = std::max(bid, to_tick(mid - edge));
+    bid = std::max(bid, tick);
+
+    // YES ask-等价腿 (→ BUY-NO @ 1-ask): 目标 mid+s_target; 有盘口则抬到 best_ask+tick 之前。
+    double ask = to_tick(mid + s_target - shift);
+    if (best_ask > 0.0) ask = std::max(ask, best_ask + tick);
+    ask = std::min(ask, to_tick(mid + edge));
+    ask = std::min(ask, 1.0 - tick);
+
+    const double no_price = std::min(1.0 - tick, std::max(tick, round_to(1.0 - ask, 4)));
+    return {Order{"BUY", round_to(bid, 4), size, yes_token_id},
+            Order{"BUY", no_price, size, no_token_id}};
 }
 
 bool plan_requote(double mid_prev, double mid_now, double /*half_spread_c*/, double tick) {

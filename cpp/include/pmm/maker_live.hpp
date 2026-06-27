@@ -59,10 +59,13 @@ struct MakerPlan {
 
 // 纯 USDC 双边: bid 腿 = BUY-YES @ bid (yes_token); ask 腿 = BUY-NO @ (1-ask) (no_token)。
 // 因 BUY-NO@q ≡ SELL-YES@(1-q) (YES+NO=$1), 两腿都是 BUY、只花 USDC、不需持有份额。
-// 复用 compute_two_sided_quotes 的价格/skew/取整逻辑, 把 SELL-YES 腿映射成 BUY-NO。
+// 盘口感知 (P0): 给了 YES 盘口顶部 (best_bid/best_ask, 0=未知则退化为纯中点) 时,
+// bid 腿躲到 best_bid 之后、ask 腿(=BUY-NO)抬到 best_ask 之前, 都夹在奖励带内 (≤0.55·v),
+// 这样既拿奖励又**不顶在盘口最前被秒扫**。
 [[nodiscard]] std::vector<Order> compute_two_sided_quotes_yes_no(
     double mid, double half_spread_c, double size, double tick, double max_spread_c,
-    const std::string& yes_token_id, const std::string& no_token_id, double skew_ticks = 0.0);
+    const std::string& yes_token_id, const std::string& no_token_id, double best_bid = 0.0,
+    double best_ask = 0.0, double skew_ticks = 0.0);
 
 // mid 是否移动到值得撤单重定心 (>= 一个 tick)。
 [[nodiscard]] bool plan_requote(double mid_prev, double mid_now, double half_spread_c, double tick);

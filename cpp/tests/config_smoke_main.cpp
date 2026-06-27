@@ -31,8 +31,13 @@ int main() {
     Check(c.quality_floor_frac == 0.25, "LM_QUALITY_FLOOR_FRAC=0.25");
     Check(c.recenter_ticks == 2, "LM_RECENTER_TICKS=2");
 
-    // 未设置的取默认值
-    Check(c.min_daily == 80.0, "default min_daily=80");
+    // 未设置的取默认值 (优化后: min_daily 80→15, 详见 config.cpp)
+    Check(c.min_daily == 15.0, "default min_daily=15");
+    Check(c.min_pool_reward == 1.5, "default min_pool_reward=1.5");
+    Check(c.max_pool_frac == 0.12, "default max_pool_frac=0.12");
+    Check(c.use_optimal_spread, "default use_optimal_spread=on");
+    Check(c.order_expiry_s == 120.0, "default order_expiry_s=120");
+    Check(c.risk_tolerance_days == 5.0, "default risk_tolerance_days=5");
     Check(c.max_req_per_sec == 149.0, "default max_req_per_sec=149");
     Check(c.cooldown_rounds == 3, "default cooldown_rounds=3");
     Check(c.dry_live, "default dry_live=true (LM_DRY_LIVE unset)");

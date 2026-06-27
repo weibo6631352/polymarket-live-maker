@@ -433,10 +433,20 @@ json Engine::place_maker_quote_live(const std::string& slug_or_id, const maker::
                                                            : q["last_mid"].get<double>();
     const std::string yes_token = q.value("token_id", std::string{});
     const std::string no_token = q.value("complement_token_id", std::string{});
+    // 盘口感知 (P0): 取 YES 盘口顶部, 让两腿躲在盘口后面、不顶在最前被扫。
+    double bb = 0.0, ba = 0.0;
+    try {
+        const OrderBook yb = api_.get_order_book(yes_token);
+        for (const auto& l : yb.bids)
+            if (l.size > 0.0 && l.price > bb) bb = l.price;
+        for (const auto& l : yb.asks)
+            if (l.size > 0.0 && (ba == 0.0 || l.price < ba)) ba = l.price;
+    } catch (...) {
+    }
     // 双边 = BUY-YES @ bid (yes_token) + BUY-NO @ (1-ask) (no_token)。纯 USDC, 不挂 SELL。
     const std::vector<maker::Order> orders = maker::compute_two_sided_quotes_yes_no(
         mid, q["half_spread_c"].get<double>(), q["size"].get<double>(), q["tick"].get<double>(),
-        q["max_spread_c"].get<double>(), yes_token, no_token, 0.0);
+        q["max_spread_c"].get<double>(), yes_token, no_token, bb, ba, 0.0);
     json acks = json::array();
     bool ok = true;
     for (const auto& o : orders) {
@@ -637,9 +647,14 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
         const bool forced = (force_recenter != nullptr) && force_recenter->count(quote.token_id) != 0;
         if (forced || std::abs(mid - quote.last_mid) >= std::max(1, recenter_ticks) * quote.tick) {
             cancel_both();
+            double bb = 0.0, ba = 0.0;  // 盘口感知 (P0): 重挂也躲在盘口后
+            for (const auto& l : book.bids)
+                if (l.size > 0.0 && l.price > bb) bb = l.price;
+            for (const auto& l : book.asks)
+                if (l.size > 0.0 && (ba == 0.0 || l.price < ba)) ba = l.price;
             std::vector<maker::Order> orders = maker::compute_two_sided_quotes_yes_no(
                 mid, quote.half_spread_c, quote.size, quote.tick, quote.max_spread_c, quote.token_id,
-                no_token, 0.0);
+                no_token, bb, ba, 0.0);
             for (const auto& o : orders) {
                 if (o.token_id.empty()) continue;
                 submitted.push_back(submitter({{"action", "PLACE"}, {"token_id", o.token_id},
