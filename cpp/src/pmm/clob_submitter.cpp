@@ -748,6 +748,7 @@ json ClobSubmitter::query_rewards(const std::string& date) {
         double accrued = 0.0;
         int n_earning = 0;
         json top = json::array();
+        json by_market = json::array();  // 全部 earners {cond, earn, pct} — 供校准 per-pool 联结
         try {
             const json j = json::parse(r.body);
             const json* data = ju::find(j, "data");
@@ -762,11 +763,17 @@ json ClobSubmitter::query_rewards(const std::string& date) {
                     if (e > 1e-9) {
                         ++n_earning;
                         accrued += e;
+                        const json* cv = ju::find(m, "condition_id");
+                        const json* pct = ju::find(m, "earning_percentage");
+                        const double pctv = pct != nullptr ? ju::to_double(*pct) : 0.0;
+                        if (by_market.size() < 300)
+                            by_market.push_back({{"cond", cv != nullptr ? ju::to_str(*cv) : ""},
+                                                 {"earn", std::nearbyint(e * 1e4) / 1e4},
+                                                 {"pct", pctv}});
                         if (top.size() < 8) {
                             const json* q = ju::find(m, "question");
-                            const json* pct = ju::find(m, "earning_percentage");
                             top.push_back({{"earn", std::nearbyint(e * 1e4) / 1e4},
-                                           {"pct", pct != nullptr ? ju::to_double(*pct) : 0.0},
+                                           {"pct", pctv},
                                            {"q", q != nullptr ? ju::to_str(*q).substr(0, 40) : ""}});
                         }
                     }
@@ -777,6 +784,7 @@ json ClobSubmitter::query_rewards(const std::string& date) {
         out["accrued_total"] = std::nearbyint(accrued * 1e4) / 1e4;
         out["earning_markets"] = n_earning;
         out["top_earners"] = top;
+        out["by_market"] = by_market;
     }
     // 2) /rewards/user/percentages — 实时占比 {condition_id: %}; 只回条数 + 非零项。
     {
