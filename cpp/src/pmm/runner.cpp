@@ -928,11 +928,16 @@ std::optional<std::string> LiveRunner::kill_check() {
         if (now - last_usdc_check_ >= 15.0) {
             last_usdc_check_ = now;
             if (auto bal = submitter_->usdc_balance(); bal && *bal >= 0.0) last_usdc_ = *bal;
+            // 真实净值 = USDC + 链上持仓市值: 持仓不算亏 (只有逆向跌价才算) → 不会因正常成交持仓误杀。
+            if (engine_ != nullptr)
+                last_pos_value_ = engine_->api().chain_position_value(pmm::env::str("POLYMARKET_FUNDER"));
         }
-        if (last_usdc_ > 0.0 && last_usdc_ < *usdc_start_ - cfg_.max_loss) {
-            char buf[160];
-            std::snprintf(buf, sizeof(buf), "real-USDC-drawdown (now $%.2f < baseline $%.2f - maxloss $%.0f)",
-                          last_usdc_, *usdc_start_, cfg_.max_loss);
+        const double equity = last_usdc_ + last_pos_value_;
+        if (last_usdc_ > 0.0 && equity < *usdc_start_ - cfg_.max_loss) {
+            char buf[180];
+            std::snprintf(buf, sizeof(buf),
+                          "real-equity-drawdown (now $%.2f [usdc %.2f+pos %.2f] < baseline $%.2f - maxloss $%.0f)",
+                          equity, last_usdc_, last_pos_value_, *usdc_start_, cfg_.max_loss);
             return std::string(buf);
         }
     }

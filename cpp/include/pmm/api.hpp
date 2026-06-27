@@ -60,6 +60,8 @@ public:
 
     // 链上真实持仓 (token -> 净 size); 启动对账用 (清幻象 + 找回真实仓)。无鉴权, 失败返回空。
     [[nodiscard]] std::map<std::string, double> chain_positions(const std::string& user);
+    // 链上持仓总市值 (Σ size×curPrice); 急停用真实净值 = USDC + 此值。失败返回 0。
+    [[nodiscard]] double chain_position_value(const std::string& user);
 
 private:
     using Params = std::vector<std::pair<std::string, std::string>>;

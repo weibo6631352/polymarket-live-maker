@@ -153,8 +153,9 @@ private:
 
     // 现实对账急停 (账本损坏也刹得住): 真实 USDC 较启动跌破 max_loss → KILL。用链上真实余额, 不信内部账本。
     // 真实 USDC 只随成交/持仓变 (挂单不锁), 故"跌幅 = 已实现亏 + 未平持仓成本" → 既抓亏损也抓失控累积。
-    std::optional<double> usdc_start_;  // 启动时真实 USDC 基线
+    std::optional<double> usdc_start_;  // 启动时真实净值基线 (= 启动 USDC, 此时无持仓)
     double last_usdc_{0.0};             // 上次查到的真实 USDC (节流缓存)
+    double last_pos_value_{0.0};        // 上次查到的链上持仓市值 (净值 = USDC + 此值)
     double last_usdc_check_{0.0};       // 上次查询单调时刻 (节流 ~15s)
     // 防churn熔断 (现实, 用原始成交): 某 token 60s 内被吃 > K 次 = 趋势反复扫我们 → KILL。账本无关。
     std::map<std::string, std::deque<double>> fill_times_;

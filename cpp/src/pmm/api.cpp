@@ -222,6 +222,25 @@ std::map<std::string, double> PolymarketClient::chain_positions(const std::strin
     return out;
 }
 
+// 链上真实持仓总市值 (Σ size×curPrice); 急停用真实净值 = USDC + 此值 (持仓不算亏, 只有逆向跌价才算)。
+double PolymarketClient::chain_position_value(const std::string& user) {
+    if (user.empty()) return 0.0;
+    double total = 0.0;
+    try {
+        const net::HttpResponse r = data_api_.Get("/positions?user=" + user + "&sizeThreshold=0.5");
+        if (r.status == 0 || r.status >= 400) return 0.0;
+        const json data = json::parse(r.body);
+        if (!data.is_array()) return 0.0;
+        for (const auto& p : data) {
+            const double size = p.value("size", 0.0);
+            const double cur = p.value("curPrice", 0.0);
+            if (std::abs(size) >= 0.5 && cur > 0.0) total += size * cur;
+        }
+    } catch (...) {
+    }
+    return total;
+}
+
 json PolymarketClient::gamma_get(const std::string& path, const Params& params) {
     const net::HttpResponse r = gamma_.Get(path + build_query(params));
     if (r.status == 0) throw ApiError("Gamma API request failed");
