@@ -55,6 +55,7 @@ RunnerConfig RunnerConfig::from_env() {
     c.micro_beta = f("LM_MICRO_BETA", 0.1);
     c.reward_calib = f("LM_REWARD_CALIB", 0.237);  // 利润校准 κ (真实/毛估; 实测 ~0.237)
     c.waterfill = flag_ne("LM_WATERFILL", "0", "1");  // 注水配资 (默认开)
+    c.compet_aversion = f("LM_COMPET_AVERSION", 0.3);  // 竞争度惩罚 (挤池降权)
     // R2(数学家): mid 仅 0.5¢ 偏移 share 即掉 ~36%, 且 mid 单调漂(重挂会"粘住"不抖) → 早重挂找回份额。
     c.recenter_ticks = i("LM_RECENTER_TICKS", 1);
     c.min_days_to_resolution = f("LM_MIN_DAYS_TO_RESOLUTION", 10.0);  // R2: 剔除近结算催化剂池

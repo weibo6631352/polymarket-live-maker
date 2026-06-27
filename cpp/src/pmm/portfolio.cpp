@@ -111,14 +111,18 @@ std::string cluster_key(const std::string& question) {
 }
 
 double risk_adjusted_score(const rewards::PoolReport& p, double risk_tolerance_days,
-                           double chop_aversion) {
+                           double chop_aversion, double compet_aversion) {
     const double reward = p.reward_per_day;  // PoolReport 总有 reward_per_day (= share*daily, 已 round)
     const double days_wiped = p.days_wiped.value_or(9999.0);  // None(无历史) → 9999
     const double jump_disc = 1.0 + days_wiped / risk_tolerance_days;
     const double vol = p.daily_vol_c.value_or(0.0);  // 0/None → 无 chop 惩罚
     const double band = p.max_spread_c;
     const double chop_disc = 1.0 + chop_aversion * (band > 0.0 ? (vol / band) : 0.0);
-    return reward / (jump_disc * chop_disc);
+    // 竞争度惩罚: PM 官方 market_competitiveness (实测 0.46–4.2, 越高越挤 = 我们份额被稀释越狠)。
+    // 拥挤池降权 → 偏好清静池 (实测好选 0x551db8 comp0.47, 烂选 0xdf2020 comp4.2 小池)。<0=未知, 不罚。
+    const double comp_disc =
+        (compet_aversion > 0.0 && p.competitiveness >= 0.0) ? (1.0 + compet_aversion * p.competitiveness) : 1.0;
+    return reward / (jump_disc * chop_disc * comp_disc);
 }
 
 std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,
@@ -137,7 +141,8 @@ std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,
     std::vector<std::pair<const rewards::PoolReport*, double>> scored;
     scored.reserve(cands.size());
     for (const auto* p : cands) {
-        scored.push_back({p, risk_adjusted_score(*p, params.risk_tolerance_days, params.chop_aversion)});
+        scored.push_back({p, risk_adjusted_score(*p, params.risk_tolerance_days, params.chop_aversion,
+                                                  params.compet_aversion)});
     }
     std::stable_sort(scored.begin(), scored.end(),
                      [](const auto& a, const auto& b) { return a.second > b.second; });
