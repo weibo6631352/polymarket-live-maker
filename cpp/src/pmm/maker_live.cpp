@@ -67,7 +67,8 @@ std::vector<Order> compute_two_sided_quotes_yes_no(double mid, double half_sprea
     ask = std::min(ask, to_tick(mid + edge));
     ask = std::min(ask, 1.0 - tick);
 
-    const double no_price = std::min(1.0 - tick, std::max(tick, round_to(1.0 - ask, 4)));
+    // NO 价先 snap 回 tick 网格再 round (否则 1-ask 的浮点残差会破坏 0.001 这类细 tick → 被拒)。
+    const double no_price = std::min(1.0 - tick, std::max(tick, round_to(to_tick(1.0 - ask), 4)));
     return {Order{"BUY", round_to(bid, 4), size, yes_token_id},
             Order{"BUY", no_price, size, no_token_id}};
 }
