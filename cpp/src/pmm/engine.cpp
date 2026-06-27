@@ -97,6 +97,14 @@ Account Engine::get_account() {
     return *a;
 }
 
+void Engine::sync_capital(double capital) {
+    // 现金 = capital − 活跃报价已占用。否则改 LM_CAPITAL/充值后, 持久化账本的旧现金值不变,
+    // place 的 cap>cash 校验会用旧(常被历史 run 耗干的)值, 把新资金全卡住 (实测耗到 $2.87)。
+    require_account();
+    const double committed = committed_maker_capital();
+    db_.update_cash(std::max(0.0, capital - committed));
+}
+
 Account Engine::require_account() {
     return get_account();
 }

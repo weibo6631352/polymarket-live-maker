@@ -108,6 +108,7 @@ void LiveRunner::ensure_engine() {
     }
     try {
         engine_->get_account();  // 新库抛 NotInitializedError
+        engine_->sync_capital(cfg_.capital);  // 已有库: 把可用现金同步到当前 capital (改本金/充值后跟上)
     } catch (const NotInitializedError&) {
         engine_->init_account(cfg_.capital);  // 全新: cash = budget
     }

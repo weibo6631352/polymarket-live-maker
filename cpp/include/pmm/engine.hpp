@@ -53,6 +53,8 @@ public:
     // ---- account ----
     Account init_account(double balance = 10000.0);
     Account get_account();
+    // 把可用现金重置为 capital - 活跃报价已占用 (改 LM_CAPITAL / 充值后内部预算才会跟上)。
+    void sync_capital(double capital);
     void reset();
 
     // ---- maker quotes: paper ----
