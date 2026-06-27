@@ -153,6 +153,90 @@ std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,
     for (const auto& ps : elig) total_score += ps.second;
     if (total_score == 0.0) total_score = 1.0;
 
+    // 4*. 注水配资 (waterfill): 先按分数+去相关选池、每池下 min_size, 再把剩余资本按"边际 κ×奖励/美元"
+    //     注水。奖励份额对 size 是凹的 (share=ours/(ours+E) 饱和) → 边际递减 → 注水均衡边际 = 最大化组合奖励。
+    //     取代"capital ∝ score"(无视凹性, 会过度配资到已饱和的高分池)。+7.9% (量化备忘), 现按校准净值。
+    if (params.waterfill) {
+        const double infl = 1.0 / std::max(params.reward_calib, 1e-6);  // 竞争充气 = 校准真实份额
+        struct WF {
+            const rewards::PoolReport* p;
+            double hs, per_share, size, cap, max_size, score;
+        };
+        std::vector<WF> wf;
+        std::vector<std::set<std::string>> chosen_tokens;
+        std::set<std::string> chosen_clusters;
+        double spent = 0.0;
+        for (const auto& [p, score] : elig) {  // 4a. 选池 (分数序, 去相关) + min_size 起步
+            const double hs = p->tick * 100.0 * params.half_spread_ticks;
+            const double per_share = ob::committed_capital(p->min_size, hs) / p->min_size;
+            const double min_cap = ob::committed_capital(p->min_size, hs);
+            if (min_cap <= 0.0 || spent + min_cap > params.capital) continue;
+            const std::string cluster = cluster_key(p->question);
+            if (!cluster.empty() && chosen_clusters.count(cluster) != 0) continue;
+            const std::set<std::string> toks = significant_tokens(p->question);
+            bool corr = false;
+            for (const auto& ct : chosen_tokens)
+                if (static_cast<long>(intersection_size(toks, ct)) > params.max_token_overlap) {
+                    corr = true;
+                    break;
+                }
+            if (corr) continue;
+            const double rp = params.loss_budget > 0.0 ? params.loss_budget / static_cast<double>(elig.size()) : 1e18;
+            const double max_size = std::max(deploy_size(*p, hs, params.capital, params.size_share_cap, rp), p->min_size);
+            wf.push_back({p, hs, per_share, p->min_size, min_cap, max_size, score});
+            spent += min_cap;
+            chosen_tokens.push_back(toks);
+            if (!cluster.empty()) chosen_clusters.insert(cluster);
+        }
+        const double chunk = std::max(1.0, params.capital * 0.005);  // 4b. 注水剩余资本
+        auto marg = [&](const WF& a) -> double {  // 边际 κ×奖励/美元 (再投 ~chunk 的奖励增量/资本增量)
+            if (a.size >= a.max_size - 1e-9 || a.per_share <= 1e-9) return 0.0;
+            const double dsize = std::min(chunk / a.per_share, a.max_size - a.size);
+            const double s0 = ob::maker_reward_share(a.size, a.hs, a.p->max_spread_c, a.p->min_side_score * infl);
+            const double s1 = ob::maker_reward_share(a.size + dsize, a.hs, a.p->max_spread_c, a.p->min_side_score * infl);
+            return (s1 - s0) * a.p->daily / (dsize * a.per_share);
+        };
+        while (params.capital - spent > chunk && !wf.empty()) {
+            int bi = -1;
+            double bm = 0.0;
+            for (std::size_t i = 0; i < wf.size(); ++i) {
+                const double m = marg(wf[i]);
+                if (m > bm) {
+                    bm = m;
+                    bi = static_cast<int>(i);
+                }
+            }
+            if (bi < 0) break;  // 全部到顶
+            WF& a = wf[static_cast<std::size_t>(bi)];
+            const double dsize = std::min(chunk / a.per_share, a.max_size - a.size);
+            const double dcap = dsize * a.per_share;
+            if (dcap <= 1e-9) break;
+            a.size += dsize;
+            a.cap += dcap;
+            spent += dcap;
+        }
+        std::vector<SelectedPool> out;  // 4c. 构建
+        for (const auto& a : wf) {
+            const double share = ob::maker_reward_share(a.size, a.hs, a.p->max_spread_c, a.p->min_side_score * infl);
+            SelectedPool sp;
+            sp.question = a.p->question;
+            sp.condition_id = a.p->condition_id;
+            sp.token = a.p->token;
+            sp.daily = a.p->daily;
+            sp.share = round_to(share, 4);
+            sp.min_size = a.p->min_size;
+            sp.size = round_to(a.size, 2);
+            sp.tick = a.p->tick;
+            sp.max_spread_c = a.p->max_spread_c;
+            sp.half_spread_c = a.hs;
+            sp.committed_capital = round_to(a.cap, 2);
+            sp.est_daily_reward = round_to(share * a.p->daily, 4);  // 校准份额 × daily
+            sp.risk_adj_score = round_to(a.score, 4);
+            out.push_back(std::move(sp));
+        }
+        return out;
+    }
+
     // 4. 贪心配资 (相关性/簇去重 + 预算)
     std::vector<SelectedPool> selected;
     std::vector<std::set<std::string>> chosen_tokens;

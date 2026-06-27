@@ -88,6 +88,23 @@ int main() {
         Approx(sel2[i].est_daily_reward, want_edr[i], ("lb edr[" + std::to_string(i) + "]").c_str());
     }
 
+    // ---- 注水配资 (waterfill): 按边际 κ×奖励/$ 注水, 取代退化到 min_size; 利用满预算、份额封顶、集中高边际 ----
+    P::SelectParams wfp;
+    wfp.waterfill = true;
+    wfp.reward_calib = 0.237;
+    const auto selw = P::select_pools(report, wfp);
+    Approx(selw.empty() ? 0 : 1, 1, "wf selects pools");
+    double wf_tot = 0.0, wf_maxsh = 0.0;
+    for (const auto& s : selw) {
+        wf_tot += s.committed_capital;
+        wf_maxsh = std::max(wf_maxsh, s.share);
+    }
+    Approx(wf_tot > 4 * 98.0 ? 1 : 0, 1, "wf deploys > 4*min_size (utilizes budget, not min_size degrade)");
+    Approx(wf_tot <= 1000.0 + 1.0 ? 1 : 0, 1, "wf total committed <= capital");
+    Approx(wf_maxsh <= 0.34 ? 1 : 0, 1, "wf respects share cap (~0.33)");
+    Approx(selw.front().committed_capital >= selw.back().committed_capital ? 1 : 0, 1,
+           "wf concentrates capital in higher-marginal (top) pool");
+
     // ---- 助手 ----
     const auto toks = P::significant_tokens("Will the Fed cut rates in December?");
     const std::set<std::string> want_toks = {"cut", "december", "fed", "rates"};

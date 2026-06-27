@@ -520,6 +520,8 @@ void LiveRunner::reselect() {
     p.quality_floor_frac = cfg_.quality_floor_frac;
     p.max_pool_frac = cfg_.max_pool_frac;
     p.max_token_overlap = cfg_.max_token_overlap;
+    p.waterfill = cfg_.waterfill;        // 注水配资 (边际 κ×奖励/$ 均衡)
+    p.reward_calib = cfg_.reward_calib;  // 利润校准 κ
     p.cooldown = cd;
     {
         std::lock_guard<std::mutex> lk(report_mu_);

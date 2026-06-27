@@ -43,6 +43,8 @@ struct SelectParams {
     double loss_budget{0.0};
     double quality_floor_frac{0.10};
     double max_pool_frac{0.25};
+    bool waterfill{false};        // true: 注水配资 (边际 κ×奖励/$ 均衡); false: capital∝score (旧, parity)
+    double reward_calib{1.0};     // 利润校准 κ (注水按真实份额; 竞争充气 1/κ)
     std::set<std::string> cooldown;
 };
 

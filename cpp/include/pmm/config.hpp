@@ -23,6 +23,7 @@ struct RunnerConfig {
     // 利润模型校准 κ: 真实结算/毛估 (实测 6-28 ≈ 0.237, 毛估高估 4.2×; 来自盘口快照低估真实竞争)。
     // 把竞争对手分 existing_qmin 充气 1/κ → 估计份额/奖励降到真实水平 → 最优半宽变宽 (少被逆选)。
     double reward_calib{0.237};
+    bool waterfill{true};       // 注水配资 (边际 κ×奖励/$ 均衡; 取代 capital∝score)
     int recenter_ticks{1};
     double min_days_to_resolution{10.0};  // 剔除 N 天内结算的池 (近结算=催化剂风险); 0=关
     double max_vol_mult{2.5};  // 剔除 实现日波动 > N×奖励带宽 的跳池; 0=关
