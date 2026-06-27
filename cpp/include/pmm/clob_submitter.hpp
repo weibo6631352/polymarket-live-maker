@@ -92,7 +92,7 @@ public:
     nlohmann::json debug_trades();
     // 真实奖励感知: /rewards/user/markets (按 date 查真实 earnings + earning_percentage + 配置) +
     // /rewards/user/percentages (实时占比 {cond:%})。date 空 = 当天。L2 鉴权, 只读。
-    nlohmann::json query_rewards(const std::string& date = "");
+    nlohmann::json query_rewards(const std::string& date = "") override;
     // 钱包自由 USDC (kill-switch 用); 失败 nullopt。
     std::optional<double> usdc_balance() override;
     // L2 creds (WS user channel 用)。

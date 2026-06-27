@@ -22,6 +22,11 @@ public:
     // live 专用 (dry-run 默认空实现)。
     virtual std::vector<nlohmann::json> poll_fills() { return {}; }
     virtual std::optional<double> usdc_balance() { return std::nullopt; }
+    // 真实奖励感知 (汇总: accrued_total + earning_markets + live_pct_markets); dry-run 默认空。
+    virtual nlohmann::json query_rewards(const std::string& date = "") {
+        (void)date;
+        return nullptr;
+    }
     virtual nlohmann::json api_creds() { return nlohmann::json::object(); }
     virtual std::vector<nlohmann::json> list_open_orders() { return {}; }
     virtual void cancel_order(const std::string& order_id) { (void)order_id; }

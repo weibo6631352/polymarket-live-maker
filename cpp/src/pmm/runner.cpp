@@ -198,6 +198,17 @@ void LiveRunner::run() {
                 tick_cooldowns();
                 reevaluate_held();
                 reselect();
+                // 真实奖励感知: 查 PM 官方的真实 accrued + 实时占比, 记进 events (对照我们的毛估算)。
+                if (use_live_path() && submitter_ != nullptr) {
+                    try {
+                        const json rw = submitter_->query_rewards();
+                        if (rw.is_object())
+                            event("reward_real", {{"accrued_total", rw.value("accrued_total", 0.0)},
+                                                  {"earning_markets", rw.value("earning_markets", 0)},
+                                                  {"live_pct_markets", rw.value("live_pct_markets", 0)}});
+                    } catch (...) {
+                    }
+                }
                 last_reeval = now;
             }
             poll_once();
