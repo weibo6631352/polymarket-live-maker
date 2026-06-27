@@ -477,7 +477,17 @@ json ClobSubmitter::flatten(const std::string& token_id, const std::string& side
         return {{"status", "ERROR"}, {"error", "flatten_no_price"}, {"token_id", token_id},
                 {"side", side}, {"size", size}};
     }
-    const double px = *mkt_px;
+    // 扫单价: 比触价再激进 ~8 档, 让 FAK 跨过多个盘口档位吃满 (薄盘口只挂触价 FAK 也只吃到顶档)。
+    double tick_d = 0.01;
+    try {
+        tick_d = std::stod(tick);
+    } catch (...) {
+    }
+    double px = *mkt_px;
+    if (is_buy)
+        px = std::min(1.0 - tick_d, px + 8.0 * tick_d);  // 空头回补: 抬价扫 ask
+    else
+        px = std::max(tick_d, px - 8.0 * tick_d);  // 平多头: 压价扫 bid
     const OrderAmounts amt = is_buy ? get_market_order_amounts(true, size * px, px, rc)  // 空头回补: amount=USDC
                                     : get_market_order_amounts(false, size, px, rc);     // 多头平仓: amount=shares
     const bool neg_risk = fetch_neg_risk(token_id);
@@ -518,7 +528,7 @@ json ClobSubmitter::flatten(const std::string& token_id, const std::string& side
     w.timestamp_ms = ord.timestamp_ms;
     w.signature = to_hex(sig.data(), 65);
     w.owner = creds_.api_key;
-    w.order_type = "FOK";  // 平仓全成或全不成
+    w.order_type = "FAK";  // fill-and-kill: 吃掉可成交的, 余量取消 (薄盘口不会全不成→不孤立仓位)
     const std::string body = wire::BuildOrderV2Body(w);
 
     const std::string ts = std::to_string(now_s);
