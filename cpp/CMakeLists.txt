@@ -210,4 +210,8 @@ target_link_libraries(review-report PRIVATE pmm_core)
 add_executable(order-smoke apps/order_smoke_main.cpp)
 target_link_libraries(order-smoke PRIVATE pmm_core)
 
+# ---- 只读校验: balance-check (打印签名地址 + 查 CLOB 抵押余额; 零下单) ----
+add_executable(balance-check apps/balance_check_main.cpp)
+target_link_libraries(balance-check PRIVATE pmm_core)
+
 message(STATUS "pmm scaffold: crypto reuse + models + db (sqlite3) + smoke checks")
