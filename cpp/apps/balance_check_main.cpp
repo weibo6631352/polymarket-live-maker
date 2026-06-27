@@ -43,5 +43,11 @@ int main(int argc, char** argv) {
         // 诊断: /data/trades 各 query 变体的 http+count+body (定位 fill 检测查不到的原因)。
         std::printf("debug_trades:\n%s\n", sub.debug_trades().dump(2).c_str());
     }
+    if (argc > 1 && std::string(argv[1]) == "rewards") {
+        // 真实奖励感知: /rewards/user/markets (真实 earnings + earning_percentage) + /rewards/user/percentages。
+        const std::string date = (argc > 2) ? std::string(argv[2]) : "";
+        std::printf("query_rewards(date=%s):\n%s\n", date.empty() ? "today" : date.c_str(),
+                    sub.query_rewards(date).dump(2).c_str());
+    }
     return 0;
 }

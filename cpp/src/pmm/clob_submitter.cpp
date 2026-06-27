@@ -700,6 +700,43 @@ json ClobSubmitter::debug_trades() {
     return out;
 }
 
+json ClobSubmitter::query_rewards(const std::string& date) {
+    std::string maker_lc = creds_.maker;
+    for (char& c : maker_lc) c = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
+    const std::string st = std::to_string(creds_.signature_type);
+    json out;
+    // 1) /rewards/user/markets — 真实已赚 earnings + earning_percentage + rewards_config (按 date)。
+    {
+        const std::string path = "/rewards/user/markets";
+        std::string query = path + "?maker_address=" + maker_lc + "&signature_type=" + st;
+        if (!date.empty()) query += "&date=" + date;
+        const std::string ts = std::to_string(now_unix());
+        throttle(/*low_priority=*/true);
+        const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
+        out["markets_http"] = r.status;
+        try {
+            out["markets"] = json::parse(r.body);
+        } catch (...) {
+            out["markets_raw"] = r.body.substr(0, 300);
+        }
+    }
+    // 2) /rewards/user/percentages — 实时占比 {condition_id: %}。
+    {
+        const std::string path = "/rewards/user/percentages";
+        const std::string query = path + "?maker_address=" + maker_lc + "&signature_type=" + st;
+        const std::string ts = std::to_string(now_unix());
+        throttle(/*low_priority=*/true);
+        const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
+        out["percentages_http"] = r.status;
+        try {
+            out["percentages"] = json::parse(r.body);
+        } catch (...) {
+            out["percentages_raw"] = r.body.substr(0, 300);
+        }
+    }
+    return out;
+}
+
 std::optional<double> ClobSubmitter::usdc_balance() {
     const std::string path = "/balance-allowance";
     const std::string query = path + "?asset_type=COLLATERAL&signature_type=" +
