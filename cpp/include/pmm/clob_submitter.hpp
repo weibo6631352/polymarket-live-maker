@@ -82,6 +82,8 @@ public:
 
     // 自上次 poll 起的真实 maker 成交: 每条 {id, token_id, side, size, price}。
     std::vector<nlohmann::json> poll_fills() override;
+    // 诊断: 用不同 query 打 /data/trades, 返回每种的 http 状态 + 原始 body 片段 (查 fill 检测用)。
+    nlohmann::json debug_trades();
     // 钱包自由 USDC (kill-switch 用); 失败 nullopt。
     std::optional<double> usdc_balance() override;
     // L2 creds (WS user channel 用)。

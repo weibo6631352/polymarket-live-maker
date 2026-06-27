@@ -645,6 +645,36 @@ std::vector<json> ClobSubmitter::poll_fills() {
     return out;
 }
 
+json ClobSubmitter::debug_trades() {
+    const std::string path = "/data/trades";
+    std::string maker_lc = creds_.maker;
+    for (char& c : maker_lc) c = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
+    const std::string ts = std::to_string(now_unix());
+    const std::vector<std::pair<std::string, std::string>> variants = {
+        {"maker=funder_asis", path + "?maker_address=" + creds_.maker},
+        {"maker=funder_lc", path + "?maker_address=" + maker_lc},
+        {"maker=signer", path + "?maker_address=" + creds_.signer_lc},
+        {"taker=funder_lc", path + "?taker_address=" + maker_lc},
+        {"nofilter", path},
+    };
+    json out = json::array();
+    for (const auto& [label, query] : variants) {
+        throttle(/*low_priority=*/true);
+        const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
+        std::size_t n = 0;
+        try {
+            const json j = json::parse(r.body);
+            if (j.is_array())
+                n = j.size();
+            else if (const json* d = ju::find(j, "data"))
+                n = d->is_array() ? d->size() : 0;
+        } catch (...) {
+        }
+        out.push_back({{"variant", label}, {"http", r.status}, {"count", n}, {"body", r.body.substr(0, 200)}});
+    }
+    return out;
+}
+
 std::optional<double> ClobSubmitter::usdc_balance() {
     const std::string path = "/balance-allowance";
     const std::string query = path + "?asset_type=COLLATERAL&signature_type=" +
