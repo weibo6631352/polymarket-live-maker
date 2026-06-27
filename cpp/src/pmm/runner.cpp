@@ -6,6 +6,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <thread>
 
@@ -449,20 +450,40 @@ void LiveRunner::reselect() {
     // ADD 新选中 (不超预算)
     double committed = 0.0;
     for (const auto& [cond, m] : placed_) committed += m.value("committed_capital", 0.0);
+    int n_want = static_cast<int>(want.size());
+    int n_placed = 0, n_lowrew = 0, n_budget = 0, n_failed = 0;
     for (const auto& [cond, s] : want) {
         if (placed_.count(cond) != 0) continue;
-        if (s.value("est_daily_reward", 0.0) < cfg_.min_pool_reward) continue;
+        if (s.value("est_daily_reward", 0.0) < cfg_.min_pool_reward) {
+            ++n_lowrew;
+            continue;
+        }
         const double cap = s.value("committed_capital", 0.0);
-        if (committed + cap > cfg_.capital + 1e-6) continue;
+        if (committed + cap > cfg_.capital + 1e-6) {
+            ++n_budget;
+            continue;
+        }
         try {
             place(cond, s);
             committed += cap;
             placed_[cond] = s;
             placed_at_[cond] = mono_now();
+            ++n_placed;
             event("place", {{"cond", cond}, {"daily", s.value("daily", 0.0)}, {"committed", cap}});
+        } catch (const std::exception& e) {
+            // 下单失败绝不能静默吞掉: 操作者会以为在做市, 其实一单没下。记 stderr + 事件。
+            ++n_failed;
+            std::fprintf(stderr, "place FAILED %s: %s\n", cond.c_str(), e.what());
+            event("place_failed", {{"cond", cond}, {"committed", cap}, {"error", e.what()}});
         } catch (...) {
+            ++n_failed;
+            std::fprintf(stderr, "place FAILED %s: <unknown>\n", cond.c_str());
+            event("place_failed", {{"cond", cond}, {"committed", cap}, {"error", "unknown"}});
         }
     }
+    // 每轮选池小结: 选中多少 / 真下多少 / 各种跳过原因 — 否则 0 下单时无从判断卡在哪。
+    std::fprintf(stderr, "reselect: want=%d placed=%d (skip low_reward=%d over_budget=%d failed=%d)\n",
+                 n_want, n_placed, n_lowrew, n_budget, n_failed);
     sync_ws_subscriptions();
 }
 
