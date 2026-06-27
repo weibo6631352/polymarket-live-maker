@@ -177,6 +177,24 @@ void LiveRunner::run() {
                 std::fprintf(stderr, "startup reconcile: corrected %d quote(s) to on-chain truth\n", fixed);
         }
     }
+    // 成交游标预热: 把已存在的成交标记为"已见"。否则重启后 in-memory seen_fill_ids 被清空 → poll_fills 把
+    // 旧成交(尤其手动平仓的大额 SELL)当新成交重复计数 → 库存跑飞成巨额幻象 → 假亏 → 假急停 (实测 NO=-1756)。
+    if (use_live_path() && submitter_ != nullptr) {
+        try {
+            std::lock_guard<std::mutex> lk(submitter_mu_);
+            const auto existing = submitter_->poll_fills();  // 推进 submitter 内部游标到最新
+            for (const auto& f : existing) {
+                const std::string id = f.value("id", std::string{});
+                if (!id.empty()) {
+                    seen_fill_ids_.insert(id);
+                    seen_fill_fifo_.push_back(id);
+                }
+            }
+            std::fprintf(stderr, "primed fill cursor: %zu existing trade(s) marked seen (no re-count)\n",
+                         existing.size());
+        } catch (...) {
+        }
+    }
     try {
         if (auto reason = kill_check()) {
             trip_kill(*reason);
