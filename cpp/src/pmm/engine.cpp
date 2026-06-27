@@ -440,6 +440,7 @@ json Engine::place_maker_quote_live(const std::string& slug_or_id, const maker::
     json acks = json::array();
     bool ok = true;
     for (const auto& o : orders) {
+        if (o.token_id.empty()) continue;  // 互补 token 缺失 (非二元市场) → 跳过该腿, 不发空 token 单
         json ack;
         try {
             ack = submitter({{"action", "PLACE"}, {"token_id", o.token_id}, {"side", o.side},
@@ -521,6 +522,10 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
             u.last_accrued_at = unix_to_iso(now);
             u.inventory_pnl = quote.inventory_pnl + rd_pnl;
             if (!(okc && fy && fn)) {
+                if (!fn && std::abs(no_inv) >= 1e-9)
+                    std::fprintf(stderr,
+                                 "WARN orphaned NO inventory %.4f on %s (flatten failed) — flatten manually\n",
+                                 no_inv, no_token.c_str());
                 u.inventory = yes_inv;
                 db_.update_maker_quote_accrual(quote.id, u);
                 results.push_back({{"quote", maker_quote_to_dict(quote)},
@@ -579,6 +584,12 @@ std::vector<json> Engine::accrue_maker_rewards_live(const maker::Submitter& subm
             u.last_accrued_at = unix_to_iso(now);
             u.inventory_pnl = quote.inventory_pnl + pnl_delta;
             if (!(okc && fy && fn)) {
+                // NO 腿 flatten 失败时 no_inv 无列持久化 → 真实 NO 份额会被孤立。先大声告警 (人工/监督处理),
+                // 完整修复 = 给 maker_quotes 加 complement_inventory 列并重试。YES 腿经 inventory 已会重试。
+                if (!fn && std::abs(no_inv) >= 1e-9)
+                    std::fprintf(stderr,
+                                 "WARN orphaned NO inventory %.4f on %s (flatten failed) — flatten manually\n",
+                                 no_inv, no_token.c_str());
                 u.inventory = yes_inv;
                 db_.update_maker_quote_accrual(quote.id, u);
                 results.push_back({{"quote", maker_quote_to_dict(quote)}, {"exit_failed", "filled_exit"},

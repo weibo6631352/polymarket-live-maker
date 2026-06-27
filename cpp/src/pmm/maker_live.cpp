@@ -51,7 +51,10 @@ std::vector<Order> compute_two_sided_quotes_yes_no(double mid, double half_sprea
     for (const auto& o : yes) {
         if (o.side == "SELL") {
             // SELL-YES @ ask  ≡  BUY-NO @ (1-ask)  (YES+NO=$1) — 全 USDC, 不需份额。
-            out.push_back(Order{"BUY", round_to(1.0 - o.price, 4), o.size, no_token_id});
+            // 夹到 [tick, 1-tick]: 防 ask 取整到 0 时 1-ask=1.0 越界。
+            const double no_price =
+                std::min(1.0 - tick, std::max(tick, round_to(1.0 - o.price, 4)));
+            out.push_back(Order{"BUY", no_price, o.size, no_token_id});
         } else {
             out.push_back(Order{"BUY", o.price, o.size, yes_token_id});
         }
