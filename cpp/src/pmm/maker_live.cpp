@@ -93,7 +93,6 @@ LiveMakerBot::LiveMakerBot(const MakerBotConfig& cfg, Submitter submitter)
     : token_id_(cfg.token_id),
       external_fills_(cfg.external_fills),
       max_spread_c_(cfg.max_spread_c),
-      min_size_(cfg.min_size),
       tick_(cfg.tick),
       half_spread_c_(cfg.half_spread_c.value_or(cfg.tick * 100.0)),
       size_(cfg.size.value_or(cfg.min_size)),

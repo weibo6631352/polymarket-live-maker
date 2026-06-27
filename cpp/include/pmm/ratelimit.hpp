@@ -1,8 +1,8 @@
 // pmm/ratelimit.hpp — 线程安全 token-bucket 限速 (port of pm_trader/ratelimit.py)
 //
-// CLOB 全局 per-key 请求上限 (~149 req/s)。做市环的读 (book/mid) 与写 (cancel/place) 共享这一预算,
-// 单个共享桶为每个请求节流。acquire 阻塞调用线程直到有 token, 故 N 个并发 poller 自动节流到全局速率。
-// 低优先级 (读) 调用保留 reserve 个 token 给高优先级 (cancel/place), 后者永不排在读洪流后面。
+// 限流。生产用的是 RateLimiter (本文件末): 按端点独立桶 (/book 150/s、/data/trades 50/s、写 200/s …),
+// 见官方 docs/api-reference/rate-limits。TokenBucket 是底层通用令牌桶 (含一个可选的 reserve/低优先级机制,
+// 现在 RateLimiter 不用, 仅作通用工具 + 单测覆盖)。acquire 阻塞到有 token, 故 N 个并发 poller 自动节流。
 #pragma once
 
 #include <algorithm>

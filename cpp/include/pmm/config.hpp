@@ -45,7 +45,6 @@ struct RunnerConfig {
     double event_poll_every_s{10.0};
     double stats_every_s{60.0};
     double max_req_per_sec{149.0};
-    double write_reserve{20.0};
     bool ws_enabled{false};  // dataclass 默认 false (单测无网络); from_env 打开
     int resync_workers{8};
 

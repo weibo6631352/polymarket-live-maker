@@ -115,7 +115,6 @@ private:
                                                       const std::string& path,
                                                       const std::string& body,
                                                       const std::string& ts) const;
-    void throttle(bool low_priority = false);
 
     nlohmann::json place(const std::string& token_id, const std::string& side, double price,
                          double size);

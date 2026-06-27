@@ -111,7 +111,6 @@ private:
     std::string token_id_;
     bool external_fills_;
     double max_spread_c_;
-    double min_size_;
     double tick_;
     double half_spread_c_;
     double size_;

@@ -48,6 +48,8 @@ struct BookSignals {
 [[nodiscard]] BookSignals compute_book_signals(const OrderBook& book, double mid, double max_spread_c);
 
 // 短程期望漂移 μ̂ (¢/cycle): v1 只用 micro-price 领先 × shrink λ, clamp 到 ±s_cents。
+// [待接线, 非废弃] 预测策略的短程漂移估计 μ̂ (¢/cycle): micro-price 中心化 / 方向 skew / 预测撤单的输入
+// (见量化备忘的预测层设计)。策略层尚未实现, 故暂无生产调用者; compute_book_signals 已在用。
 [[nodiscard]] double mu_hat(const BookSignals& sig, double mid, double s_cents, double lambda);
 
 // price 处某侧"前方"挂单量 (better_size, at_level_size) — 队列位置/成交概率粗估。

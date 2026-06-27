@@ -35,7 +35,6 @@ RunnerConfig RunnerConfig::from_env() {
     c.event_poll_every_s = f("LM_EVENT_POLL_EVERY_S", 10.0);
     c.stats_every_s = f("LM_STATS_EVERY_S", 60.0);
     c.max_req_per_sec = f("LM_MAX_REQ_PER_SEC", 149.0);
-    c.write_reserve = f("LM_WRITE_RESERVE", 20.0);
     c.ws_enabled = flag_ne("LM_WS", "0", "1");
     c.resync_workers = i("LM_BOOK_RESYNC_WORKERS", 8);
     c.reeval_enabled = flag_ne("LM_REEVAL", "0", "1");

@@ -223,10 +223,6 @@ void ClobSubmitter::close() {
     if (warmer_) warmer_->stop();
 }
 
-void ClobSubmitter::throttle(bool /*low_priority*/) {
-    // per-endpoint 限速已移到 http() (那里有 path+method 可分类)。保留空壳兼容现有调用点。
-}
-
 ClobSubmitter::Resp ClobSubmitter::http(const char* method, const std::string& path,
                                         const std::vector<std::string>& headers,
                                         const std::string& body) {
@@ -325,14 +321,12 @@ bool ClobSubmitter::derive_api_creds(std::string& err) {
 }
 
 void ClobSubmitter::warm_ping() {
-    throttle(/*low_priority=*/true);
     (void)http("GET", "/time", {"Content-Type: application/json"}, "");
 }
 
 std::string ClobSubmitter::fetch_tick_size(const std::string& token_id) {
     const auto it = tick_cache_.find(token_id);
     if (it != tick_cache_.end() && it->second.second > mono_now()) return it->second.first;
-    throttle(/*low_priority=*/true);
     const Resp r = http("GET", "/tick-size?token_id=" + token_id, {"Content-Type: application/json"}, "");
     std::string tick = "0.01";
     try {
@@ -347,7 +341,6 @@ std::string ClobSubmitter::fetch_tick_size(const std::string& token_id) {
 bool ClobSubmitter::fetch_neg_risk(const std::string& token_id) {
     const auto it = neg_risk_cache_.find(token_id);
     if (it != neg_risk_cache_.end()) return it->second;
-    throttle(/*low_priority=*/true);
     const Resp r = http("GET", "/neg-risk?token_id=" + token_id, {"Content-Type: application/json"}, "");
     bool neg = false;
     try {
@@ -361,7 +354,6 @@ bool ClobSubmitter::fetch_neg_risk(const std::string& token_id) {
 
 std::optional<double> ClobSubmitter::fetch_marketable_price(const std::string& token_id,
                                                             const std::string& side) {
-    throttle(/*low_priority=*/true);
     const Resp r =
         http("GET", "/price?token_id=" + token_id + "&side=" + side, {"Content-Type: application/json"}, "");
     try {
@@ -427,7 +419,6 @@ json ClobSubmitter::place(const std::string& token_id, const std::string& side, 
     const std::string body = wire::BuildOrderV2Body(w);
 
     const std::string ts = std::to_string(now_s);
-    throttle();
     const Resp r = http("POST", "/order", l2_headers("POST", "/order", body, ts), body);
 
     json out;
@@ -460,7 +451,6 @@ json ClobSubmitter::place(const std::string& token_id, const std::string& side, 
 json ClobSubmitter::cancel_all(const std::string& token_id) {
     const std::string body = json{{"market", ""}, {"asset_id", token_id}}.dump();
     const std::string ts = std::to_string(now_unix());
-    throttle();
     const Resp r =
         http("DELETE", "/cancel-market-orders", l2_headers("DELETE", "/cancel-market-orders", body, ts), body);
     // 网络/超时 (status 0) 或非 2xx → ERROR: 绝不谎报撤单成功 (否则陈旧单留着被挑选, 正是快撤要防的)。
@@ -536,7 +526,6 @@ json ClobSubmitter::flatten(const std::string& token_id, const std::string& side
     const std::string body = wire::BuildOrderV2Body(w);
 
     const std::string ts = std::to_string(now_s);
-    throttle();
     const Resp r = http("POST", "/order", l2_headers("POST", "/order", body, ts), body);
 
     std::string status, order_id;
@@ -551,7 +540,7 @@ json ClobSubmitter::flatten(const std::string& token_id, const std::string& side
     std::string st_lc = status;
     for (char& ch : st_lc) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     const bool filled = ok_resp && (st_lc == "matched" || st_lc == "delayed");
-    if (!filled) {  // FOK 未成 → 仓位存活, fail closed
+    if (!filled) {  // FAK 一点没成 (跳变/空盘口) → 仓位存活, fail closed; 下轮重试
         return {{"status", "ERROR"}, {"error", "flatten_unfilled"}, {"token_id", token_id},
                 {"side", side},      {"size", size},                {"http", r.status},
                 {"resp", r.body}};
@@ -604,7 +593,6 @@ std::vector<json> ClobSubmitter::poll_fills() {
     for (char& c : maker_lc) c = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
     const std::string query = path + "?maker_address=" + maker_lc;
     const std::string ts = std::to_string(now_unix());
-    throttle(/*low_priority=*/true);
     const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
 
     std::vector<json> out;
@@ -684,7 +672,6 @@ json ClobSubmitter::debug_trades() {
     };
     json out = json::array();
     for (const auto& [label, query] : variants) {
-        throttle(/*low_priority=*/true);
         const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
         std::size_t n = 0;
         try {
@@ -713,7 +700,6 @@ json ClobSubmitter::query_rewards(const std::string& date) {
                             "&order_by=earnings&position=DESC&page_size=500";
         if (!date.empty()) query += "&date=" + date;
         const std::string ts = std::to_string(now_unix());
-        throttle(/*low_priority=*/true);
         const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
         out["markets_http"] = r.status;
         // 解析汇总 (响应 8000+ 市场/几百 KB, 不回原始): 真实 accrued 总额 + top earners。
@@ -755,7 +741,6 @@ json ClobSubmitter::query_rewards(const std::string& date) {
         const std::string path = "/rewards/user/percentages";
         const std::string query = path + "?maker_address=" + maker_lc + "&signature_type=" + st;
         const std::string ts = std::to_string(now_unix());
-        throttle(/*low_priority=*/true);
         const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
         out["percentages_http"] = r.status;
         int live = 0;
@@ -776,7 +761,6 @@ std::optional<double> ClobSubmitter::usdc_balance() {
     const std::string query = path + "?asset_type=COLLATERAL&signature_type=" +
                               std::to_string(creds_.signature_type);
     const std::string ts = std::to_string(now_unix());
-    throttle(/*low_priority=*/true);
     const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
     try {
         const json j = json::parse(r.body);
@@ -796,7 +780,6 @@ json ClobSubmitter::api_creds() {
 std::vector<json> ClobSubmitter::list_open_orders() {
     const std::string path = "/data/orders";
     const std::string ts = std::to_string(now_unix());
-    throttle(/*low_priority=*/true);
     const Resp r = http("GET", path, l2_headers("GET", path, "", ts), "");
     std::vector<json> out;
     try {
@@ -814,7 +797,6 @@ std::vector<json> ClobSubmitter::list_open_orders() {
 void ClobSubmitter::cancel_order(const std::string& order_id) {
     const std::string body = json{{"orderID", order_id}}.dump();
     const std::string ts = std::to_string(now_unix());
-    throttle();
     (void)http("DELETE", "/order", l2_headers("DELETE", "/order", body, ts), body);
 }
 

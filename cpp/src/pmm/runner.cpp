@@ -63,14 +63,8 @@ double jget(const json& j, const char* key, double def) {
 
 LiveRunner::LiveRunner(RunnerConfig cfg, Engine* engine, rewards::RewardsClient* scanner,
                        ISubmitter* submitter)
-    : cfg_(std::move(cfg)),
-      engine_(engine),
-      scanner_(scanner),
-      submitter_(submitter),
-      sleeper_([](double s) {
-          if (s > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(s));
-      }) {
-    if (cfg_.max_req_per_sec > 0.0) {
+    : cfg_(std::move(cfg)), engine_(engine), scanner_(scanner), submitter_(submitter) {
+    if (cfg_.max_req_per_sec > 0.0) {  // >0 = 启用限流 (值已无意义: RateLimiter 用 per-endpoint 硬编码速率)
         rate_limiter_ = std::make_unique<RateLimiter>();  // per-endpoint 限额 (官方文档)
     }
     if (scanner_ == nullptr) {
@@ -174,7 +168,6 @@ void LiveRunner::run() {
         double last_reeval = mono_now();
         double last_stats = mono_now();
         long last_resync_count = 0;
-        double next_poll = mono_now();
         while (!stop_.load()) {
             if (g_signal_stop.load()) trip_kill("signal");
             // 收到信号/kill 立刻退出: 不再多跑一次 poll_once + 整睡一个 poll 周期。
@@ -190,7 +183,8 @@ void LiveRunner::run() {
                 const long rc = resync_count_.load(std::memory_order_relaxed);
                 const double dt = now - last_stats;
                 std::fprintf(stderr, "stats: /book resync %.1f req/s (%ld in %.0fs)\n",
-                             dt > 0.0 ? (rc - last_resync_count) / dt : 0.0, rc - last_resync_count, dt);
+                             dt > 0.0 ? static_cast<double>(rc - last_resync_count) / dt : 0.0,
+                             rc - last_resync_count, dt);
                 last_resync_count = rc;
                 last_stats = now;
             }
@@ -212,7 +206,6 @@ void LiveRunner::run() {
                 last_reeval = now;
             }
             poll_once();
-            (void)next_poll;
             // 事件驱动: 等"盘口移动 (REST resync) / WS reflex"唤醒 → 立刻再跑一轮决策 (实时响应);
             // 或 poll_seconds 心跳超时 (兜底查成交/累计奖励)。CV 自动合并密集事件, 由 poll_once 时延限频。
             // 信号/stop 也唤醒 → SIGTERM 后立刻走关停。

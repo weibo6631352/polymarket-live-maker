@@ -7,7 +7,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
-#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -61,7 +60,6 @@ public:
     [[nodiscard]] const std::map<std::string, nlohmann::json>& placed() const { return placed_; }
     [[nodiscard]] std::map<std::string, int>& cooldown() { return cooldown_; }
     [[nodiscard]] bool stopped() const { return stop_.load(); }
-    void set_sleeper(std::function<void(double)> s) { sleeper_ = std::move(s); }
     void set_last_scan_ok(double t) { last_scan_ok_ = t; }
     void ensure_engine();  // 公开: 测试先 init account
 
@@ -96,7 +94,6 @@ private:
     ISubmitter* submitter_{nullptr};
     std::unique_ptr<ISubmitter> owned_submitter_;
     std::unique_ptr<RateLimiter> rate_limiter_;
-    std::function<void(double)> sleeper_;
     std::unique_ptr<EventLog> events_;
     std::mutex submitter_mu_;  // 串行化 submitter 访问 (反射 + poll 线程)
 
@@ -119,7 +116,6 @@ private:
     std::unique_ptr<ws::UserChannel> user_ch_;
 
     std::map<std::string, double> poll_evt_at_;
-    std::optional<double> stats_at_;
     std::map<std::string, std::deque<std::pair<double, double>>> mid_hist_;  // token -> (ts, mid)
     std::map<std::string, double> refresh_at_;
 
@@ -129,7 +125,10 @@ private:
     std::map<std::string, double> signal_v_;  // token -> max_spread_c (信号带宽); 与 reflex_refs_ 同锁
     std::mutex reflex_mu_;
 
-    // 预测信号: 在高频权威盘口 (REST resync) 上实时算 micro-price/OBI/μ̂, 存最新值供策略读取。
+    // 预测信号: 在高频权威盘口 (REST resync) 上实时算 micro-price/OBI/μ̂, 存最新值。
+    // [待接线, 非废弃] signal_by_token_ 是"预测策略"读取的实时信号源 (micro-price 中心化 / 方向 skew /
+    // 预测撤单, 见量化备忘)。策略层尚未实现, 故现在只写不读; compute_book_signals 本身已在用 (盘口移动
+    // 唤醒 + 标定日志)。实现策略时从这里读 μ̂。
     std::map<std::string, orderbook::BookSignals> signal_by_token_;
     std::map<std::string, double> signal_log_at_;  // token -> 上次记标定日志的单调时刻 (节流)
     std::mutex signal_mu_;
