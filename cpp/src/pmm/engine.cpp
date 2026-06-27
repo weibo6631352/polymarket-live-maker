@@ -440,6 +440,9 @@ json Engine::place_maker_quote_live(const std::string& slug_or_id, const maker::
     }
     q["submitted"] = acks;
     if (!ok) {
+        // 把每条腿真实的 CLOB 应答 (http + errorMsg) 打出来 — 否则只知道"被拒"不知为何。
+        std::fprintf(stderr, "place_maker_quote_live REJECTED token=%s mid=%.4f acks=%s\n",
+                     q.value("token_id", std::string{}).c_str(), mid, acks.dump().c_str());
         submitter({{"action", "CANCEL_ALL"}, {"token_id", q["token_id"]}});
         cancel_maker_quote(q["id"].get<int>());
         throw OrderRejectedError("maker quote placement failed (rolled back)");
