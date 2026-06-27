@@ -84,7 +84,8 @@ struct PoolReport {
                                           double min_size, double kill_days = JUMP_KILL_DAYS,
                                           double watch_days = JUMP_WATCH_DAYS);
 [[nodiscard]] std::optional<PoolReport> score_pool(const RewardConfig& pool, const nlohmann::json& book,
-                                                   const std::vector<orderbook::PricePoint>& history);
+                                                   const std::vector<orderbook::PricePoint>& history,
+                                                   double reward_calib = 1.0);
 
 // ---- HTTP 客户端 (CLOB reward-pool / book / history) ----
 class RewardsClient {
@@ -118,6 +119,6 @@ struct ScanResult {
 
 [[nodiscard]] ScanResult scan(RewardsClient& client, double min_daily = MIN_DAILY, int top = 30,
                               bool with_jump_risk = true, double min_days_to_resolution = 0.0,
-                              double max_vol_mult = 0.0);
+                              double max_vol_mult = 0.0, double reward_calib = 1.0);
 
 }  // namespace pmm::rewards

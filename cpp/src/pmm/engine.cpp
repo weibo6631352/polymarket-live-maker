@@ -722,7 +722,10 @@ json Engine::suggest_maker_half_spread(const std::string& slug_or_id, const std:
     const double mid = api_.get_midpoint(token_id);
     if (!(0.0 < mid && mid < 1.0)) throw OrderRejectedError("No valid midpoint to anchor the maker quote");
 
-    const double existing_qmin = ob::book_inband_qmin(book, mid, pool->max_spread);
+    // 利润校准: 真实竞争 ≈ 盘口快照竞争 / κ (毛估高估真实份额 4.2×)。充气 existing_qmin → 份额/奖励降到
+    // 真实水平 → optimal_half_spread 求出更宽的最优半宽 (之前高估奖励 4.2× → 挂太紧 → 多被逆选)。
+    const double existing_qmin =
+        ob::book_inband_qmin(book, mid, pool->max_spread) / std::max(reward_calib_, 1e-6);
     std::vector<ob::PricePoint> history;
     try {
         history = api_.prices_history(token_id);

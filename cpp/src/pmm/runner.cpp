@@ -140,6 +140,7 @@ void LiveRunner::run() {
     ensure_engine();
     engine_->set_maker_crossing_cost_c(cfg_.crossing_cost_c);
     engine_->set_micro_center(cfg_.micro_center, cfg_.micro_gate_c, cfg_.micro_beta);
+    engine_->set_reward_calib(cfg_.reward_calib);  // 利润校准 κ (真实/毛估 ~0.237)
     if (rate_limiter_) engine_->api().set_rate_limiter(rate_limiter_.get());
 
     if (cfg_.live) {
@@ -197,10 +198,21 @@ void LiveRunner::run() {
                 if (use_live_path() && submitter_ != nullptr) {
                     try {
                         const json rw = submitter_->query_rewards();
+                        // 实时校准监控: bot 毛估率 Σ(share×daily) vs 真实结算率 → 实测 κ (供调参/未来自校准)。
+                        double gross_rate = 0.0;
+                        for (const auto& q : engine_->get_maker_quotes()) {
+                            const std::string tk = q.value("token_id", std::string{});
+                            const std::string cd = q.value("market_condition_id", std::string{});
+                            auto eit = share_ewma_.find(tk);
+                            if (eit != share_ewma_.end() && placed_.count(cd))
+                                gross_rate += eit->second * jget(placed_[cd], "daily", 0.0);
+                        }
                         if (rw.is_object())
                             event("reward_real", {{"accrued_total", rw.value("accrued_total", 0.0)},
+                                                  {"official_total", rw.value("official_total", 0.0)},
                                                   {"earning_markets", rw.value("earning_markets", 0)},
-                                                  {"live_pct_markets", rw.value("live_pct_markets", 0)}});
+                                                  {"live_pct_markets", rw.value("live_pct_markets", 0)},
+                                                  {"gross_rate_per_day", round_to(gross_rate, 2)}});
                     } catch (...) {
                     }
                 }
@@ -473,7 +485,8 @@ void LiveRunner::start_discovery_thread() {
 void LiveRunner::rediscover() {
     try {
         rewards::ScanResult res = rewards::scan(scanner(), cfg_.min_daily, cfg_.scan_top, true,
-                                                cfg_.min_days_to_resolution, cfg_.max_vol_mult);
+                                                cfg_.min_days_to_resolution, cfg_.max_vol_mult,
+                                                cfg_.reward_calib);
         {
             std::lock_guard<std::mutex> lk(report_mu_);
             report_ = std::move(res);

@@ -86,6 +86,8 @@ public:
         micro_gate_c_ = gate_c;
         micro_beta_ = beta;
     }
+    // 利润校准 κ: 真实奖励是毛估的 κ 倍 (实测 ~0.237)。竞争对手分充气 1/κ → 估计份额/奖励降到真实水平。
+    void set_reward_calib(double k) { reward_calib_ = (k > 1e-6 && k <= 1.0) ? k : 1.0; }
     // 注入实时 WS book 源 (新鲜且连接活时优先于 REST; nullptr = 总走 REST)。
     void set_book_source(ws::MarketChannel* s) noexcept { book_source_ = s; }
 
@@ -128,6 +130,7 @@ private:
     bool micro_center_{false};   // micro-price 中心化开关 (预测策略)
     double micro_gate_c_{0.2};   // 触发门: micro-price 领先 >= 此值(¢) 才偏移 (强信号=净正)
     double micro_beta_{0.5};     // 偏移领先的比例 (保守)
+    double reward_calib_{1.0};   // 利润校准 κ (真实/毛估); 1.0=不校准 (默认, 测试); runner 设为 ~0.237
     ws::MarketChannel* book_source_{nullptr};  // 实时 WS book (可选); nullptr = REST
 };
 

@@ -222,7 +222,8 @@ JumpRisk classify_jump_risk(const std::vector<double>& prices, double reward_per
 }
 
 std::optional<PoolReport> score_pool(const RewardConfig& pool, const json& book,
-                                     const std::vector<orderbook::PricePoint>& history) {
+                                     const std::vector<orderbook::PricePoint>& history,
+                                     double reward_calib) {
     const json* bids_p = ju::find(book, "bids");
     const json* asks_p = ju::find(book, "asks");
     const json bids = (bids_p != nullptr) ? *bids_p : json::array();
@@ -240,7 +241,10 @@ std::optional<PoolReport> score_pool(const RewardConfig& pool, const json& book,
     const auto [bscore, bnot] = inband_score(bids, mid, c, true);
     const auto [ascore, anot] = inband_score(asks, mid, c, false);
     const double min_side = pmm::orderbook::binding_qmin(bscore, ascore, mid);  // 官方绑定 Qmin
-    const double raw_share = reward_share(pool.min_size, pool.tick, c, min_side);
+    // 利润校准 κ: 真实竞争 ≈ 快照 / κ (实测高估份额 4.2×; 你一挂上就被 farmer 稀释)。充气 → 份额降到真实
+    // 水平。这是 SHARE_CEIL=0.40 拍脑袋封顶的"用数学说话"版 (κ 从真实结算反解)。
+    const double min_side_calib = min_side / std::max(reward_calib, 1e-6);
+    const double raw_share = reward_share(pool.min_size, pool.tick, c, min_side_calib);
     // P0(选池): 份额封顶。快照份额对薄盘口系统性高估 (薄=会吸引farmer→你一挂上份额就被稀释),
     // 高估恰好最大在它排第一的池。顶到 ~0.40, 与部署份额上限 0.30 一致, 砍掉幻想分。
     constexpr double SHARE_CEIL = 0.40;
@@ -405,7 +409,7 @@ std::vector<orderbook::PricePoint> RewardsClient::prices_history(const std::stri
 // ---------------------------------------------------------------------------
 
 ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump_risk,
-                double min_days_to_resolution, double max_vol_mult) {
+                double min_days_to_resolution, double max_vol_mult, double reward_calib) {
     const std::vector<json> markets = client.sampling_markets();
     const double now = static_cast<double>(std::time(nullptr));
 
@@ -462,7 +466,7 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
                 history.clear();
             }
         }
-        return score_pool(p, bk, history);
+        return score_pool(p, bk, history, reward_calib);
     };
 
     std::vector<std::optional<PoolReport>> results(pools.size());
