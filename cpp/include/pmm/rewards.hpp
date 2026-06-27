@@ -42,6 +42,7 @@ struct JumpRisk {
     int days{0};
     std::optional<double> max_jump_c;
     std::optional<double> daily_vol_c;
+    std::optional<double> recent_vol_c;  // 最近 ~7 天波动 (抓 calm-before-catalyst); 过滤用, 不入 parity JSON
     std::optional<double> days_wiped;  // None = inf (reward<=0)
 };
 
@@ -65,6 +66,7 @@ struct PoolReport {
     std::string jump_verdict;
     std::optional<double> max_jump_c;
     std::optional<double> daily_vol_c;
+    std::optional<double> recent_vol_c;  // 近窗波动 (过滤用); 不入 parity JSON
     std::optional<double> days_wiped;
 };
 

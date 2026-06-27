@@ -105,8 +105,10 @@ RoundConfig round_config(const std::string& tick_size) {
 }
 
 double round_normal(double x, int n) { return std::nearbyint(x * pow10i(n)) / pow10i(n); }
-double round_down(double x, int n) { return std::floor(x * pow10i(n)) / pow10i(n); }
-double round_up(double x, int n) { return std::ceil(x * pow10i(n)) / pow10i(n); }
+// +eps/-eps 吸收浮点残差: 否则 10.2 的 double 表示 (10.19999...) 被 floor 成 10.19999 → 隐含价 0.5099995
+// 破坏 0.001 tick → 下单被拒 (实测 NO 腿反复被拒)。eps 远大于 FP 误差、远小于 1 个最小计价单位, 不动真值。
+double round_down(double x, int n) { return std::floor(x * pow10i(n) + 1e-6) / pow10i(n); }
+double round_up(double x, int n) { return std::ceil(x * pow10i(n) - 1e-6) / pow10i(n); }
 
 std::int64_t to_token_decimals(double x) {
     return static_cast<std::int64_t>(std::nearbyint(1'000'000.0 * x));

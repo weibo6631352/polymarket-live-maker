@@ -191,7 +191,17 @@ JumpRisk classify_jump_risk(const std::vector<double>& prices, double reward_per
     const double mean = sum / static_cast<double>(moves.size());
     double var_sum = 0.0;
     for (double m : moves) var_sum += (m - mean) * (m - mean);
-    const double vol = std::sqrt(var_sum / static_cast<double>(moves.size()));
+    const double full_vol = std::sqrt(var_sum / static_cast<double>(moves.size()));
+    // 近窗波动 (最近 ~7 天): 抓"全史平静但近期变活跃"的池 (calm-before-catalyst, 如真人秀临近决赛)。
+    // 报告 max(全史, 近窗) → 波动率过滤对"正在升温"的池也生效, 不只看长期平均。
+    const std::size_t rw = std::min<std::size_t>(7, moves.size());
+    double rsum = 0.0;
+    for (std::size_t i = moves.size() - rw; i < moves.size(); ++i) rsum += moves[i];
+    const double rmean = rsum / static_cast<double>(rw);
+    double rvar = 0.0;
+    for (std::size_t i = moves.size() - rw; i < moves.size(); ++i) rvar += (moves[i] - rmean) * (moves[i] - rmean);
+    const double recent_vol = std::sqrt(rvar / static_cast<double>(rw));
+    const double vol = full_vol;  // daily_vol_c 保持全史 (与 Python parity); 近窗单列 recent_vol_c 给过滤用
     const double jump_loss = min_size * max_jump;
     const double inf = std::numeric_limits<double>::infinity();
     const double days_wiped = reward_per_day > 0.0 ? (jump_loss / reward_per_day) : inf;
@@ -206,6 +216,7 @@ JumpRisk classify_jump_risk(const std::vector<double>& prices, double reward_per
     jr.days = static_cast<int>(prices.size());
     jr.max_jump_c = roundn(max_jump * 100.0, 2);
     jr.daily_vol_c = roundn(vol * 100.0, 2);
+    jr.recent_vol_c = roundn(recent_vol * 100.0, 2);
     jr.days_wiped = std::isinf(days_wiped) ? std::optional<double>{} : std::optional<double>{roundn(days_wiped, 1)};
     return jr;
 }
@@ -262,6 +273,7 @@ std::optional<PoolReport> score_pool(const RewardConfig& pool, const json& book,
     r.jump_verdict = jump.verdict;
     r.max_jump_c = jump.max_jump_c;
     r.daily_vol_c = jump.daily_vol_c;
+    r.recent_vol_c = jump.recent_vol_c;
     r.days_wiped = jump.days_wiped;
     return r;
 }
@@ -435,8 +447,10 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
         // 波动率过滤: 实现日波动 > vol_mult×奖励带宽 的池太跳, 逆选择重 → 剔除。
         // 历史无数据 (daily_vol_c 空) 的不剔。注意: 只抓"历史就跳"的, 抓不到"决赛前平静"的未来催化剂
         // (那类靠 max_mid_vel_cps 入场护栏 + FAK 自平 + 安全退出兜底)。
-        if (max_vol_mult > 0.0 && r->daily_vol_c.has_value() && r->max_spread_c > 0.0 &&
-            *r->daily_vol_c > max_vol_mult * r->max_spread_c) {
+        // 取 全史 与 近窗 波动的较大者 → 既抓"长期就跳"也抓"近期升温"(calm-before-catalyst, 如真人秀临近决赛)。
+        const double vol_c = std::max(r->daily_vol_c.value_or(0.0), r->recent_vol_c.value_or(0.0));
+        if (max_vol_mult > 0.0 && vol_c > 0.0 && r->max_spread_c > 0.0 &&
+            vol_c > max_vol_mult * r->max_spread_c) {
             ++vol_dropped;
             continue;
         }
