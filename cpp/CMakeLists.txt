@@ -214,4 +214,8 @@ target_link_libraries(order-smoke PRIVATE pmm_core)
 add_executable(balance-check apps/balance_check_main.cpp)
 target_link_libraries(balance-check PRIVATE pmm_core)
 
+# ---- 人工平仓: flatten (市价平掉未跟踪库存换回 USDC; REAL ORDER) ----
+add_executable(flatten apps/flatten_main.cpp)
+target_link_libraries(flatten PRIVATE pmm_core)
+
 message(STATUS "pmm scaffold: crypto reuse + models + db (sqlite3) + smoke checks")
