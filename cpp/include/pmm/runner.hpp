@@ -154,6 +154,9 @@ private:
     // 现实对账急停 (账本损坏也刹得住): 真实 USDC 较启动跌破 max_loss → KILL。用链上真实余额, 不信内部账本。
     // 真实 USDC 只随成交/持仓变 (挂单不锁), 故"跌幅 = 已实现亏 + 未平持仓成本" → 既抓亏损也抓失控累积。
     std::optional<double> usdc_start_;  // 启动时真实净值基线 (= 启动 USDC, 此时无持仓)
+    // 账本 inv_pnl 急停的"本轮基线": 只对启动后新增的 inv_pnl 跌幅急停, 忽略历史/重启残留的幻象累积
+    // (账本是脆弱来源 → 真正的安全是现实净值急停; 这个只作快速早警, 不让旧幻象反复误杀)。
+    std::optional<double> inv_pnl_start_;
     double last_usdc_{0.0};             // 上次查到的真实 USDC (节流缓存)
     double last_pos_value_{0.0};        // 上次查到的链上持仓市值 (净值 = USDC + 此值)
     double last_usdc_check_{0.0};       // 上次查询单调时刻 (节流 ~15s)

@@ -936,8 +936,11 @@ std::optional<std::string> LiveRunner::kill_check() {
             inv_pnl = engine_->get_maker_summary().value("inventory_pnl", 0.0);
         } catch (...) {
         }
-        if (inv_pnl <= -cfg_.max_loss) {
-            return "max-loss (maker inventory P&L $" + std::to_string(inv_pnl) + ")";
+        // 本轮基线: 首次记下启动时的累积 inv_pnl, 之后只对"较启动新增的跌幅"急停 → 重启/历史的残留幻象
+        // 不会反复误杀。真正兜底是现实净值急停 (链上, 不信账本); 这个账本急停仅作本轮快速早警。
+        if (!inv_pnl_start_) inv_pnl_start_ = inv_pnl;
+        if (inv_pnl - *inv_pnl_start_ <= -cfg_.max_loss) {
+            return "max-loss (this-run maker inv P&L drop $" + std::to_string(inv_pnl - *inv_pnl_start_) + ")";
         }
     }
     // 现实对账急停 (最关键的安全网, 账本损坏也刹得住): 真实 USDC 较启动基线跌破 max_loss → KILL。
