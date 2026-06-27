@@ -150,6 +150,14 @@ private:
 
     std::set<std::string> seen_fill_ids_;     // 已计成交 id (WS+REST 双源/跨轮去重)
     std::deque<std::string> seen_fill_fifo_;  // FIFO 上限淘汰
+
+    // 现实对账急停 (账本损坏也刹得住): 真实 USDC 较启动跌破 max_loss → KILL。用链上真实余额, 不信内部账本。
+    // 真实 USDC 只随成交/持仓变 (挂单不锁), 故"跌幅 = 已实现亏 + 未平持仓成本" → 既抓亏损也抓失控累积。
+    std::optional<double> usdc_start_;  // 启动时真实 USDC 基线
+    double last_usdc_{0.0};             // 上次查到的真实 USDC (节流缓存)
+    double last_usdc_check_{0.0};       // 上次查询单调时刻 (节流 ~15s)
+    // 防churn熔断 (现实, 用原始成交): 某 token 60s 内被吃 > K 次 = 趋势反复扫我们 → KILL。账本无关。
+    std::map<std::string, std::deque<double>> fill_times_;
 };
 
 }  // namespace pmm

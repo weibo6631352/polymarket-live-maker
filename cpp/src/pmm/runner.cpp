@@ -149,6 +149,15 @@ void LiveRunner::run() {
             submitter_ = owned_submitter_.get();
         }
         std::fprintf(stderr, "LIVE submitter armed — real orders will be placed\n");
+        // 现实对账急停基线: 记下启动时真实 USDC。之后跌破 (基线 - max_loss) → KILL (账本损坏也刹得住)。
+        if (auto bal = submitter_->usdc_balance(); bal && *bal > 0.0) {
+            usdc_start_ = *bal;
+            last_usdc_ = *bal;
+            std::fprintf(stderr, "real-USDC kill armed: baseline $%.2f, floor $%.2f (drop > max_loss $%.0f)\n",
+                         *bal, *bal - cfg_.max_loss, cfg_.max_loss);
+        } else {
+            std::fprintf(stderr, "WARN: could not read real USDC at startup — real-USDC kill DISABLED\n");
+        }
     } else if (cfg_.dry_live && submitter_ == nullptr) {
         owned_submitter_ = std::make_unique<maker::DryRunSubmitter>();
         submitter_ = owned_submitter_.get();
@@ -788,7 +797,18 @@ FillsByToken LiveRunner::poll_fills() {
         rf.side = f.value("side", std::string{});
         rf.size = f.value("size", 0.0);
         rf.price = f.value("price", 0.0);
-        out[f.value("token_id", std::string{})].push_back(rf);
+        const std::string tok = f.value("token_id", std::string{});
+        out[tok].push_back(rf);
+        // 防churn熔断: 这个 token 60s 内被吃太多次 = 被趋势反复扫 (逆选 churn) → KILL (现实, 不依赖账本)。
+        if (!tok.empty()) {
+            const double tn = mono_now();
+            auto& ft = fill_times_[tok];
+            ft.push_back(tn);
+            while (!ft.empty() && tn - ft.front() > 60.0) ft.pop_front();
+            if (ft.size() >= 8) {
+                trip_kill("churn: " + std::to_string(ft.size()) + " maker-fills/60s on token " + tok.substr(0, 12));
+            }
+        }
     }
     return out;
 }
@@ -889,6 +909,21 @@ std::optional<std::string> LiveRunner::kill_check() {
         }
         if (inv_pnl <= -cfg_.max_loss) {
             return "max-loss (maker inventory P&L $" + std::to_string(inv_pnl) + ")";
+        }
+    }
+    // 现实对账急停 (最关键的安全网, 账本损坏也刹得住): 真实 USDC 较启动基线跌破 max_loss → KILL。
+    // 真实 USDC 只随成交/持仓变 → 跌幅同时抓"已实现亏损"与"失控累积未平持仓"。节流 ~15s 查一次。
+    if (cfg_.live && usdc_start_ && submitter_ != nullptr) {
+        const double now = mono_now();
+        if (now - last_usdc_check_ >= 15.0) {
+            last_usdc_check_ = now;
+            if (auto bal = submitter_->usdc_balance(); bal && *bal >= 0.0) last_usdc_ = *bal;
+        }
+        if (last_usdc_ > 0.0 && last_usdc_ < *usdc_start_ - cfg_.max_loss) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "real-USDC-drawdown (now $%.2f < baseline $%.2f - maxloss $%.0f)",
+                          last_usdc_, *usdc_start_, cfg_.max_loss);
+            return std::string(buf);
         }
     }
     if (cfg_.live && cfg_.min_wallet_usdc > 0.0 && submitter_ != nullptr) {
