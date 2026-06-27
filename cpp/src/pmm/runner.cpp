@@ -139,6 +139,7 @@ void LiveRunner::run() {
     std::signal(SIGTERM, on_signal);
     ensure_engine();
     engine_->set_maker_crossing_cost_c(cfg_.crossing_cost_c);
+    engine_->set_micro_center(cfg_.micro_center, cfg_.micro_gate_c, cfg_.micro_beta);
     if (rate_limiter_) engine_->api().set_rate_limiter(rate_limiter_.get());
 
     if (cfg_.live) {
@@ -413,12 +414,12 @@ void LiveRunner::compute_and_store_signals(const std::string& token) {
         std::lock_guard<std::mutex> lk(signal_mu_);
         signal_by_token_[token] = sig;
     }
-    // 标定日志: 每 token 节流 ~5s 记一次 (150Hz 全记会爆); mid/micro_price/obi + 下一周期 Δmid 供回归。
+    // 标定日志: 每 token 节流 1s 记一次 (10Hz 全记会爆; 1s 给更细标定); mid/micro_price/obi + 下一周期 Δmid 供回归。
     const double now_m = mono_now();
     {
         std::lock_guard<std::mutex> lk(signal_mu_);
         auto it = signal_log_at_.find(token);
-        if (it != signal_log_at_.end() && now_m - it->second < 5.0) return;
+        if (it != signal_log_at_.end() && now_m - it->second < 1.0) return;  // 1s 节流 (更细标定数据)
         signal_log_at_[token] = now_m;
     }
     event("signal", {{"token", token},

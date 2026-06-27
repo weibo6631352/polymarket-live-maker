@@ -65,7 +65,7 @@ struct MakerPlan {
 [[nodiscard]] std::vector<Order> compute_two_sided_quotes_yes_no(
     double mid, double half_spread_c, double size, double tick, double max_spread_c,
     const std::string& yes_token_id, const std::string& no_token_id, double best_bid = 0.0,
-    double best_ask = 0.0, double skew_ticks = 0.0);
+    double best_ask = 0.0, double skew_ticks = 0.0, double center_shift = 0.0);
 
 // mid 是否移动到值得撤单重定心 (>= 一个 tick)。
 [[nodiscard]] bool plan_requote(double mid_prev, double mid_now, double half_spread_c, double tick);

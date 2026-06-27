@@ -17,6 +17,9 @@ struct RunnerConfig {
     int scan_top{0};  // 0 = 扫描所有合格池 (不设上限)
     int half_spread_ticks{1};
     bool use_optimal_spread{false};
+    bool micro_center{true};    // micro-price 中心化 (预测策略, 门控+保守)
+    double micro_gate_c{0.2};   // 触发门 (¢): micro-price 领先 >= 此值才偏移
+    double micro_beta{0.5};     // 偏移领先的比例
     int recenter_ticks{1};
     double min_days_to_resolution{10.0};  // 剔除 N 天内结算的池 (近结算=催化剂风险); 0=关
     double max_vol_mult{2.5};  // 剔除 实现日波动 > N×奖励带宽 的跳池; 0=关

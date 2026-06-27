@@ -44,12 +44,16 @@ std::vector<Order> compute_two_sided_quotes_yes_no(double mid, double half_sprea
                                                    double tick, double max_spread_c,
                                                    const std::string& yes_token_id,
                                                    const std::string& no_token_id, double best_bid,
-                                                   double best_ask, double skew_ticks) {
+                                                   double best_ask, double skew_ticks,
+                                                   double center_shift) {
     if (!(0.0 < mid && mid < 1.0)) {
         throw std::invalid_argument(std::format("mid must be in (0, 1), got {}", mid));
     }
     const double v = max_spread_c;  // 奖励带宽度 (分)
     const double shift = skew_ticks * tick;
+    // micro-price 中心化: 围绕预测公允值 (mid+center_shift) 挂, 而非裸 mid。两腿仍夹在奖励带 (相对 mid) 内,
+    // 故偏移天然受限。center_shift 已在上游门控+保守 (仅强信号才非零)。
+    const double center = mid + center_shift;
     // 奖励目标点: 离中点 clamp(half_spread, floor, 0.55·v) 分。太紧=易被扫, 太深=0 奖励。
     // 地板: 粗 tick 用 0.15v (≈1 tick, 数学最优角解, 维持跳变缓冲); 但细 tick(≤0.001)池 0.15v
     // 会逼到 ~0.67¢=6+ ticks, 而 Net(s) 最优 s* 仅 1-3 ticks → 白扔 17-30% 净奖励 (量化建模实证)。
@@ -59,14 +63,14 @@ std::vector<Order> compute_two_sided_quotes_yes_no(double mid, double half_sprea
     const double edge = 0.55 * v / 100.0;  // band edge: 最深仍计奖励的位置
     const auto to_tick = [tick](double p) { return std::nearbyint(p / tick) * tick; };
 
-    // YES bid 腿: 目标 mid-s_target; 有盘口则退到 best_bid-tick 之后; 但不深过 band edge; 夹 [tick,..]。
-    double bid = to_tick(mid - s_target - shift);
+    // YES bid 腿: 目标 center-s_target; 有盘口则退到 best_bid-tick 之后; 但不深过 band edge; 夹 [tick,..]。
+    double bid = to_tick(center - s_target - shift);
     if (best_bid > 0.0) bid = std::min(bid, best_bid - tick);
     bid = std::max(bid, to_tick(mid - edge));
     bid = std::max(bid, tick);
 
-    // YES ask-等价腿 (→ BUY-NO @ 1-ask): 目标 mid+s_target; 有盘口则抬到 best_ask+tick 之前。
-    double ask = to_tick(mid + s_target - shift);
+    // YES ask-等价腿 (→ BUY-NO @ 1-ask): 目标 center+s_target; 有盘口则抬到 best_ask+tick 之前。
+    double ask = to_tick(center + s_target - shift);
     if (best_ask > 0.0) ask = std::max(ask, best_ask + tick);
     ask = std::min(ask, to_tick(mid + edge));
     ask = std::min(ask, 1.0 - tick);

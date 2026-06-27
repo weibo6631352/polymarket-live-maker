@@ -80,6 +80,12 @@ public:
     // ---- equity ----
     double snapshot_equity();
     void set_maker_crossing_cost_c(double c) { maker_crossing_cost_c_ = c; }
+    // micro-price 中心化 (预测策略): 强信号时围绕预测公允值挂。gate_c=触发门(¢), beta=偏移领先的比例。
+    void set_micro_center(bool on, double gate_c, double beta) {
+        micro_center_ = on;
+        micro_gate_c_ = gate_c;
+        micro_beta_ = beta;
+    }
     // 注入实时 WS book 源 (新鲜且连接活时优先于 REST; nullptr = 总走 REST)。
     void set_book_source(ws::MarketChannel* s) noexcept { book_source_ = s; }
 
@@ -119,6 +125,9 @@ private:
     Database db_;
     PolymarketClient api_;
     double maker_crossing_cost_c_{0.0};
+    bool micro_center_{false};   // micro-price 中心化开关 (预测策略)
+    double micro_gate_c_{0.2};   // 触发门: micro-price 领先 >= 此值(¢) 才偏移 (强信号=净正)
+    double micro_beta_{0.5};     // 偏移领先的比例 (保守)
     ws::MarketChannel* book_source_{nullptr};  // 实时 WS book (可选); nullptr = REST
 };
 

@@ -443,18 +443,28 @@ json Engine::place_maker_quote_live(const std::string& slug_or_id, const maker::
     const std::string no_token = q.value("complement_token_id", std::string{});
     // 盘口感知 (P0): 取 YES 盘口顶部, 让两腿躲在盘口后面、不顶在最前被扫。
     double bb = 0.0, ba = 0.0;
+    double center_shift = 0.0;
     try {
         const OrderBook yb = api_.get_order_book(yes_token);
         for (const auto& l : yb.bids)
             if (l.size > 0.0 && l.price > bb) bb = l.price;
         for (const auto& l : yb.asks)
             if (l.size > 0.0 && (ba == 0.0 || l.price < ba)) ba = l.price;
+        // micro-price 中心化 (预测策略, 门控+保守): 仅强信号 (领先 >= gate¢) 才偏移 beta×领先。
+        // 标定证明强信号方向命中 78.9% (p<0.001); 门控避开"绑定腿一阶奖励代价"(弱信号不动)。
+        if (micro_center_) {
+            const ob::BookSignals sig = ob::compute_book_signals(yb, mid, q["max_spread_c"].get<double>());
+            if (sig.valid) {
+                const double lead = sig.micro_price - mid;  // price units
+                if (std::abs(lead) * 100.0 >= micro_gate_c_) center_shift = micro_beta_ * lead;
+            }
+        }
     } catch (...) {
     }
     // 双边 = BUY-YES @ bid (yes_token) + BUY-NO @ (1-ask) (no_token)。纯 USDC, 不挂 SELL。
     const std::vector<maker::Order> orders = maker::compute_two_sided_quotes_yes_no(
         mid, q["half_spread_c"].get<double>(), q["size"].get<double>(), q["tick"].get<double>(),
-        q["max_spread_c"].get<double>(), yes_token, no_token, bb, ba, 0.0);
+        q["max_spread_c"].get<double>(), yes_token, no_token, bb, ba, 0.0, center_shift);
     json acks = json::array();
     bool ok = true;
     for (const auto& o : orders) {
