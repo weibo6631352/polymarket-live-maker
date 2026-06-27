@@ -12,6 +12,7 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <thread>
 
 #include <curl/curl.h>
 
@@ -465,96 +466,137 @@ json ClobSubmitter::flatten(const std::string& token_id, const std::string& side
     const std::string tick = fetch_tick_size(token_id);
     const RoundConfig rc = round_config(tick);
     const bool is_buy = upper(side) == "BUY";
-    // 拿不到可成交价 → 不发错价单 (fail closed: 仓位存活, 下轮重试)。原来 SELL 回退 0.01 会愿以 ~1c 抛货。
-    const auto mkt_px = fetch_marketable_price(token_id, is_buy ? "BUY" : "SELL");
-    if (!mkt_px) {
-        return {{"status", "ERROR"}, {"error", "flatten_no_price"}, {"token_id", token_id},
-                {"side", side}, {"size", size}};
-    }
-    // 扫单价: 比触价再激进 ~8 档, 让 FAK 跨过多个盘口档位吃满 (薄盘口只挂触价 FAK 也只吃到顶档)。
+    const bool neg_risk = fetch_neg_risk(token_id);
     double tick_d = 0.01;
     try {
         tick_d = std::stod(tick);
     } catch (...) {
     }
-    double px = *mkt_px;
-    if (is_buy)
-        px = std::min(1.0 - tick_d, px + 8.0 * tick_d);  // 空头回补: 抬价扫 ask
-    else
-        px = std::max(tick_d, px - 8.0 * tick_d);  // 平多头: 压价扫 bid
-    const OrderAmounts amt = is_buy ? get_market_order_amounts(true, size * px, px, rc)  // 空头回补: amount=USDC
-                                    : get_market_order_amounts(false, size, px, rc);     // 多头平仓: amount=shares
-    const bool neg_risk = fetch_neg_risk(token_id);
-
-    crypto::OrderV2 ord;
-    ord.salt = crypto::U256FromU64(random_salt());
-    if (!crypto::AddressFromHex(creds_.maker, ord.maker)) return {{"status", "ERROR"}, {"error", "maker addr"}};
-    if (!crypto::AddressFromHex(creds_.signer_lc, ord.signer))
-        return {{"status", "ERROR"}, {"error", "signer addr"}};
-    if (!crypto::U256FromDecimal(token_id, ord.token_id)) return {{"status", "ERROR"}, {"error", "token_id"}};
-    ord.maker_amount = amt.maker_amount;
-    ord.taker_amount = amt.taker_amount;
-    ord.side = static_cast<std::uint8_t>(amt.side);
-    ord.signature_type = static_cast<std::uint8_t>(creds_.signature_type);
-    const auto now_s = static_cast<std::uint64_t>(now_unix());
-    ord.timestamp_ms = now_s * 1000ULL;
-
-    const crypto::Eip712Domain domain = crypto::CtfExchangeV2Domain(neg_risk);
-    const crypto::Bytes32 digest = crypto::ComputeOrderV2Digest(ord, domain);
-    crypto::Bytes32 key{};
-    std::memcpy(key.data(), creds_.private_key.data(), 32);
-    crypto::Signature65 sig{};
-    if (!crypto::SignDigest(digest, key, sig)) return {{"status", "ERROR"}, {"error", "sign failed"}};
-
-    wire::OrderV2Wire w;
-    {
-        std::uint64_t s = 0;
-        for (int i = 0; i < 8; ++i) s = (s << 8) | ord.salt[24 + static_cast<std::size_t>(i)];
-        w.salt = s;
-    }
-    w.maker = creds_.maker;
-    w.signer = creds_.signer_lc;
-    w.token_id = token_id;
-    w.maker_amount = amt.maker_amount;
-    w.taker_amount = amt.taker_amount;
-    w.is_buy = is_buy;
-    w.signature_type = static_cast<std::uint32_t>(creds_.signature_type);
-    w.timestamp_ms = ord.timestamp_ms;
-    w.signature = to_hex(sig.data(), 65);
-    w.owner = creds_.api_key;
-    w.order_type = "FAK";  // fill-and-kill: 吃掉可成交的, 余量取消 (薄盘口不会全不成→不孤立仓位)
-    const std::string body = wire::BuildOrderV2Body(w);
-
-    const std::string ts = std::to_string(now_s);
-    const Resp r = http("POST", "/order", l2_headers("POST", "/order", body, ts), body);
-
-    std::string status, order_id;
-    bool ok_resp = false;
-    try {
-        const json j = json::parse(r.body);
-        if (const json* v = ju::find(j, "status")) status = ju::to_str(*v);
-        if (const json* v = ju::find(j, "orderID")) order_id = ju::to_str(*v);
-        ok_resp = true;
-    } catch (...) {
-    }
-    std::string st_lc = status;
-    for (char& ch : st_lc) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    const bool filled = ok_resp && (st_lc == "matched" || st_lc == "delayed");
-    if (!filled) {  // FAK 一点没成 (跳变/空盘口) → 仓位存活, fail closed; 下轮重试
-        return {{"status", "ERROR"}, {"error", "flatten_unfilled"}, {"token_id", token_id},
-                {"side", side},      {"size", size},                {"http", r.status},
-                {"resp", r.body}};
-    }
-    if (!order_id.empty()) {
-        own_taker_ids_.insert(order_id);
-        own_taker_fifo_.push_back(order_id);
-        if (own_taker_fifo_.size() > 500) {  // 真 FIFO: 淘汰最旧, 保留刚加入的 (防自成交腿被误算为 maker fill)
-            own_taker_ids_.erase(own_taker_fifo_.front());
-            own_taker_fifo_.pop_front();
+    // 重试到清零: FAK 在薄盘口只吃顶档 → 部分成交 → 残量孤立 (实测: 247 股大单被扫后只平掉一点,
+    // 剩 247 股孤立, 手动平时价格已跌→亏)。循环最多 N 次, 每次重新取价+扫剩余量, 直到仓位清掉。
+    const auto filled_shares = [](const json& j) -> double {  // SELL→makingAmount(股); BUY→takingAmount(股)
+        auto num = [](const json* v) -> double {
+            if (v == nullptr) return 0.0;
+            if (v->is_number()) return v->get<double>();
+            if (v->is_string()) {
+                try {
+                    return std::stod(v->get<std::string>());
+                } catch (...) {
+                }
+            }
+            return 0.0;
+        };
+        return num(ju::find(j, "makingAmount"));
+    };
+    constexpr int kMaxAttempts = 6;
+    double remaining = size;
+    double total_filled = 0.0;
+    std::string last_status, last_order_id, last_resp;
+    int last_http = 0;
+    for (int attempt = 1; attempt <= kMaxAttempts && remaining >= 1.0; ++attempt) {
+        // 拿不到可成交价 → 不发错价单 (fail closed); 等盘口后重试。
+        const auto mkt_px = fetch_marketable_price(token_id, is_buy ? "BUY" : "SELL");
+        if (!mkt_px) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+            continue;
         }
+        // 扫单价: 比触价再激进 ~8 档, 让 FAK 跨过多个盘口档位吃满。
+        double px = *mkt_px;
+        if (is_buy)
+            px = std::min(1.0 - tick_d, px + 8.0 * tick_d);  // 空头回补: 抬价扫 ask
+        else
+            px = std::max(tick_d, px - 8.0 * tick_d);  // 平多头: 压价扫 bid
+        const OrderAmounts amt = is_buy ? get_market_order_amounts(true, remaining * px, px, rc)
+                                        : get_market_order_amounts(false, remaining, px, rc);
+
+        crypto::OrderV2 ord;
+        ord.salt = crypto::U256FromU64(random_salt());
+        if (!crypto::AddressFromHex(creds_.maker, ord.maker)) return {{"status", "ERROR"}, {"error", "maker addr"}};
+        if (!crypto::AddressFromHex(creds_.signer_lc, ord.signer))
+            return {{"status", "ERROR"}, {"error", "signer addr"}};
+        if (!crypto::U256FromDecimal(token_id, ord.token_id)) return {{"status", "ERROR"}, {"error", "token_id"}};
+        ord.maker_amount = amt.maker_amount;
+        ord.taker_amount = amt.taker_amount;
+        ord.side = static_cast<std::uint8_t>(amt.side);
+        ord.signature_type = static_cast<std::uint8_t>(creds_.signature_type);
+        const auto now_s = static_cast<std::uint64_t>(now_unix());
+        ord.timestamp_ms = now_s * 1000ULL;
+
+        const crypto::Eip712Domain domain = crypto::CtfExchangeV2Domain(neg_risk);
+        const crypto::Bytes32 digest = crypto::ComputeOrderV2Digest(ord, domain);
+        crypto::Bytes32 key{};
+        std::memcpy(key.data(), creds_.private_key.data(), 32);
+        crypto::Signature65 sig{};
+        if (!crypto::SignDigest(digest, key, sig)) return {{"status", "ERROR"}, {"error", "sign failed"}};
+
+        wire::OrderV2Wire w;
+        {
+            std::uint64_t s = 0;
+            for (int i = 0; i < 8; ++i) s = (s << 8) | ord.salt[24 + static_cast<std::size_t>(i)];
+            w.salt = s;
+        }
+        w.maker = creds_.maker;
+        w.signer = creds_.signer_lc;
+        w.token_id = token_id;
+        w.maker_amount = amt.maker_amount;
+        w.taker_amount = amt.taker_amount;
+        w.is_buy = is_buy;
+        w.signature_type = static_cast<std::uint32_t>(creds_.signature_type);
+        w.timestamp_ms = ord.timestamp_ms;
+        w.signature = to_hex(sig.data(), 65);
+        w.owner = creds_.api_key;
+        w.order_type = "FAK";  // fill-and-kill: 吃掉可成交的, 余量取消
+        const std::string body = wire::BuildOrderV2Body(w);
+        const std::string ts = std::to_string(now_s);
+        const Resp r = http("POST", "/order", l2_headers("POST", "/order", body, ts), body);
+        last_http = r.status;
+        last_resp = r.body;
+
+        double made = 0.0;
+        try {
+            const json j = json::parse(r.body);
+            if (const json* v = ju::find(j, "status")) last_status = ju::to_str(*v);
+            if (const json* v = ju::find(j, "orderID")) last_order_id = ju::to_str(*v);
+            made = is_buy ? 0.0 : filled_shares(j);  // SELL: 卖出股数 = makingAmount
+            if (is_buy) {  // 空头回补: takingAmount = 买入股数
+                auto num = [](const json* v) -> double {
+                    if (v == nullptr) return 0.0;
+                    if (v->is_number()) return v->get<double>();
+                    if (v->is_string()) {
+                        try {
+                            return std::stod(v->get<std::string>());
+                        } catch (...) {
+                        }
+                    }
+                    return 0.0;
+                };
+                made = num(ju::find(j, "takingAmount"));
+            }
+        } catch (...) {
+        }
+        if (made > 0.0) {
+            total_filled += made;
+            remaining -= made;
+            if (!last_order_id.empty()) {  // 排除自成交腿被误算为 maker fill
+                own_taker_ids_.insert(last_order_id);
+                own_taker_fifo_.push_back(last_order_id);
+                if (own_taker_fifo_.size() > 500) {
+                    own_taker_ids_.erase(own_taker_fifo_.front());
+                    own_taker_fifo_.pop_front();
+                }
+            }
+        }
+        if (remaining < 1.0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));  // 等盘口回补再扫剩余
     }
-    return {{"status", "FLATTENED"}, {"token_id", token_id}, {"side", side},
-            {"size", size},          {"order_id", order_id}, {"http", r.status}};
+    if (remaining < 1.0) {  // 清零 (或剩 <1 股零头)
+        return {{"status", "FLATTENED"}, {"token_id", token_id}, {"side", side},   {"size", size},
+                {"filled", total_filled}, {"order_id", last_order_id}, {"http", last_http}};
+    }
+    // 重试 N 次仍有残量 → 上报, caller 大声告警/记孤立 (fail closed)。
+    return {{"status", "ERROR"},      {"error", "flatten_partial"}, {"token_id", token_id},
+            {"side", side},           {"size", size},               {"filled", total_filled},
+            {"remaining", remaining}, {"http", last_http},          {"resp", last_resp}};
 }
 
 nlohmann::json ClobSubmitter::operator()(const nlohmann::json& action) noexcept {
@@ -744,14 +786,20 @@ json ClobSubmitter::query_rewards(const std::string& date) {
         const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
         out["percentages_http"] = r.status;
         int live = 0;
+        json by_cond = json::object();  // {condition_id: 实时占比%} — 供复评按真实占比踢死池
         try {
             const json j = json::parse(r.body);
             if (j.is_object())
                 for (auto it = j.begin(); it != j.end(); ++it)
-                    if (it.value().is_number() && ju::to_double(it.value()) > 0.0) ++live;
+                    if (it.value().is_number()) {
+                        const double pv = ju::to_double(it.value());
+                        by_cond[it.key()] = pv;
+                        if (pv > 0.0) ++live;
+                    }
         } catch (...) {
         }
         out["live_pct_markets"] = live;
+        out["pct_by_condition"] = by_cond;
     }
     return out;
 }

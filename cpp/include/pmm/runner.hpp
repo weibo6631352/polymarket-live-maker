@@ -118,6 +118,9 @@ private:
     std::map<std::string, double> poll_evt_at_;
     std::map<std::string, std::deque<std::pair<double, double>>> mid_hist_;  // token -> (ts, mid)
     std::map<std::string, double> refresh_at_;
+    // token -> EWMA(实测在带份额)。复评据此踢"被竞争稀释成 $0 的死池": share×daily < 门槛 → 退出腾资金。
+    // 只在主循环 (poll_once 写 / reevaluate_held 读) 访问, 无并发, 不需锁。
+    std::map<std::string, double> share_ewma_;
 
     std::map<std::string, std::pair<double, double>> reflex_refs_;  // token -> (mid, band)
     std::map<std::string, std::string> reflex_complement_;          // yes_token -> no_token (双边一并撤)

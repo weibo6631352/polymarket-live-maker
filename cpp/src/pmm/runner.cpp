@@ -632,11 +632,22 @@ void LiveRunner::reevaluate_held() {
     for (auto& t : ths) t.join();
 
     for (std::size_t i = 0; i < worklist.size(); ++i) {
-        if (!fresh[i]) continue;
         const auto& [cond, q] = worklist[i];
+        const std::string tok = q.value("token_id", std::string{});
+        // 真实份额踢死池 (独立于 rescore, 即使 rescore 失败也能踢): bot 实测在带份额 EWMA × daily < 门槛
+        // → 该池已被竞争稀释成 ~$0 (且大单挂在那易被整个扫掉 → 方向性亏损, 实测吃过亏), 退出腾资金给好池。
+        if (auto eit = share_ewma_.find(tok); eit != share_ewma_.end()) {
+            double daily0 = (fresh[i] && fresh[i]->contains("daily")) ? jget(*fresh[i], "daily", 0.0) : 0.0;
+            if (daily0 <= 0.0 && placed_.count(cond)) daily0 = jget(placed_[cond], "daily", 0.0);
+            if (daily0 > 0.0 && eit->second * daily0 < cfg_.min_pool_reward) {
+                exit_held(cond, q, "share_collapsed");
+                continue;
+            }
+        }
+        if (!fresh[i]) continue;
         auto reason = degrade_reason(*fresh[i]);
         if (!reason && cfg_.max_mid_vel_cps > 0.0) {
-            const double vel = mid_velocity(q.value("token_id", std::string{}));
+            const double vel = mid_velocity(tok);
             if (vel > cfg_.max_mid_vel_cps) reason = "fast_book";
         }
         if (reason) exit_held(cond, q, *reason);
@@ -695,7 +706,8 @@ std::optional<std::string> LiveRunner::degrade_reason(const json& fresh) {
 
 void LiveRunner::exit_held(const std::string& cond, const json& quote, const std::string& reason) {
     static const std::set<std::string> kCooldownReasons = {
-        "jump_risk_rose", "empty_band", "reward_collapsed", "daily_cut", "one_sided", "fast_book"};
+        "jump_risk_rose", "empty_band",   "reward_collapsed", "daily_cut",
+        "one_sided",      "fast_book",    "share_collapsed"};
     const std::string token = quote.value("token_id", std::string{});
     const std::string no_token = quote.value("complement_token_id", std::string{});
     const int qid = quote.value("id", 0);
@@ -810,6 +822,12 @@ std::vector<json> LiveRunner::poll_once() {
             auto& h = mid_hist_[tok];
             h.push_back({now_m, mit->get<double>()});
             while (h.size() > 120) h.pop_front();
+        }
+        // 实测在带份额 EWMA (复评据此踢被稀释成 $0 的死池)。α=0.2 → 反映近 ~5-10 次 poll。
+        if (auto sit = row.find("share"); sit != row.end() && sit->is_number() && !tok.empty()) {
+            const double s = sit->get<double>();
+            auto eit = share_ewma_.find(tok);
+            share_ewma_[tok] = (eit == share_ewma_.end()) ? s : 0.8 * eit->second + 0.2 * s;
         }
         // per-pool "poll" 事件 (节流; fills/reconcile/exit 总记)。对齐 Python 的 review 日志。
         const bool notable = row.contains("fills_applied") || row.contains("reconciled") || row.contains("exit_failed");
