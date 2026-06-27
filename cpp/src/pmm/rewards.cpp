@@ -351,7 +351,7 @@ std::vector<orderbook::PricePoint> RewardsClient::prices_history(const std::stri
 // ---------------------------------------------------------------------------
 
 ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump_risk,
-                double min_days_to_resolution) {
+                double min_days_to_resolution, double max_vol_mult) {
     const std::vector<json> markets = client.sampling_markets();
     const double now = static_cast<double>(std::time(nullptr));
 
@@ -429,9 +429,22 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
     }
 
     std::vector<PoolReport> scored;
+    int vol_dropped = 0;
     for (auto& r : results) {
-        if (r) scored.push_back(std::move(*r));
+        if (!r) continue;
+        // 波动率过滤: 实现日波动 > vol_mult×奖励带宽 的池太跳, 逆选择重 → 剔除。
+        // 历史无数据 (daily_vol_c 空) 的不剔。注意: 只抓"历史就跳"的, 抓不到"决赛前平静"的未来催化剂
+        // (那类靠 max_mid_vel_cps 入场护栏 + FAK 自平 + 安全退出兜底)。
+        if (max_vol_mult > 0.0 && r->daily_vol_c.has_value() && r->max_spread_c > 0.0 &&
+            *r->daily_vol_c > max_vol_mult * r->max_spread_c) {
+            ++vol_dropped;
+            continue;
+        }
+        scored.push_back(std::move(*r));
     }
+    if (vol_dropped > 0)
+        std::fprintf(stderr, "scan: vol-filter dropped %d jumpy pool(s) (daily_vol > %.1f x band)\n",
+                     vol_dropped, max_vol_mult);
 
     // 排序: SAFE 先, 再 非空簿 高毛年化。
     auto verdict_rank = [](const std::string& v) -> int {

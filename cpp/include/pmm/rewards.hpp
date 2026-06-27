@@ -109,6 +109,7 @@ struct ScanResult {
 };
 
 [[nodiscard]] ScanResult scan(RewardsClient& client, double min_daily = MIN_DAILY, int top = 30,
-                              bool with_jump_risk = true, double min_days_to_resolution = 0.0);
+                              bool with_jump_risk = true, double min_days_to_resolution = 0.0,
+                              double max_vol_mult = 0.0);
 
 }  // namespace pmm::rewards
