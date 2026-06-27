@@ -366,6 +366,20 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
             if (min_days_to_resolution > 0.0 && p->end_date_unix > 0.0 &&
                 (p->end_date_unix - now) / 86400.0 < min_days_to_resolution)
                 continue;
+            // 催化剂关键词过滤 (R3): 代币上线/IPO/空投 — end_date 远但催化剂近, 日期过滤抓不到,
+            // 上线日 FDV 会暴力跳变碾过被动做市单 (实测 round-2 fuse-fdv 漏网)。
+            if (min_days_to_resolution > 0.0) {
+                std::string ql = p->question;
+                for (char& ch : ql) ch = static_cast<char>((ch >= 'A' && ch <= 'Z') ? ch + 32 : ch);
+                static const char* kCatalyst[] = {"fdv", "launch", " ipo", "debut", "airdrop", "listing"};
+                bool catalyst = false;
+                for (const char* kw : kCatalyst)
+                    if (ql.find(kw) != std::string::npos) {
+                        catalyst = true;
+                        break;
+                    }
+                if (catalyst) continue;
+            }
             pools.push_back(*p);
         }
     }
