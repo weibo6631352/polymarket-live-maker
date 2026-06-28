@@ -993,6 +993,10 @@ std::optional<std::string> LiveRunner::kill_check() {
                 const std::string funder = pmm::env::str("POLYMARKET_FUNDER");
                 last_pos_value_ = engine_->api().chain_position_value(funder);
                 last_chain_positions_ = engine_->api().chain_positions(funder);  // 根因守卫用 (持仓的池不再报价)
+                // 每周期对账: 把活跃 quote 两腿持仓校正到链上真实。修 fill 误腿: BUY-NO 经 MINT 被 /data/trades
+                // 记在 YES token 上 → poll_fills 记成 YES 腿 → flatten 去平 YES(没持有)→ 永久孤立 (实测 Messi)。
+                // 校正后 flatten 对的是链上真实持有的腿 → 能平掉。链上为准, 与 fill 怎么记无关。
+                engine_->reconcile_inventory(last_chain_positions_);
                 inflight_.reconcile(last_chain_positions_, now);  // 链上追上→退役在途; 滞后窗口外才看链上
                 engine_->set_chain_positions(inflight_.believed_positions(last_chain_positions_));
             }
