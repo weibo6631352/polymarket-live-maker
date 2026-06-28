@@ -7,6 +7,7 @@
 //   - DdsPublisher:  盒子上 WITH_TELEMETRY=ON (见 dds_publisher.cpp), 转 DDS 类型并发布。
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -37,6 +38,7 @@ inline constexpr const char* kDiscoveryScan = "DiscoveryScan";
 inline constexpr const char* kConfigSnapshot = "ConfigSnapshot";
 inline constexpr const char* kSystemHealth = "SystemHealth";
 inline constexpr const char* kPoolReward = "PoolReward";
+inline constexpr const char* kCuratorCommand = "CuratorCommand";  // host→bot 控制 (唯一反向 topic)
 }  // namespace topic
 
 class Publisher {
@@ -44,6 +46,11 @@ public:
     virtual ~Publisher() = default;
     // 发布一条遥测到指定 topic。线程安全 (实现需自保证)。data 字段对应该 topic 的 IDL struct。
     virtual void publish(const std::string& topic, const nlohmann::json& data) = 0;
+
+    // 外部 curator 经 DDS CuratorCommand 推白名单 → bot 收到时回调 (whitelist_csv = 逗号分隔 cond)。
+    // host→bot 反向通道。NoopPublisher 默认空操作; DdsPublisher 建 DataReader 实现。线程安全。
+    using CommandCallback = std::function<void(const std::string& whitelist_csv)>;
+    virtual void set_command_callback(CommandCallback) {}
 };
 
 // 零开销空操作: 无 Fast-DDS 构建 / 显式禁用时用。inline 头内, DdsPublisher 失败可回退到它。

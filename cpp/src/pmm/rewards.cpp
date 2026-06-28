@@ -306,8 +306,8 @@ json RewardsClient::get(const std::string& path) {
     }
 }
 
-std::map<std::string, std::pair<double, double>> RewardsClient::reward_markets_multi(int max_pages) {
-    std::map<std::string, std::pair<double, double>> out;
+std::map<std::string, RewardMulti> RewardsClient::reward_markets_multi(int max_pages) {
+    std::map<std::string, RewardMulti> out;
     std::string cursor;
     for (int i = 0; i < max_pages; ++i) {
         std::string path = "/rewards/markets/multi?page_size=500";
@@ -337,7 +337,9 @@ std::map<std::string, std::pair<double, double>> RewardsClient::reward_markets_m
                             remaining += ju::to_double(*rem);
                 }
             }
-            out[cond] = {compet, remaining};
+            double vol24 = 0.0;
+            if (const json* v = ju::find(m, "volume_24hr")) vol24 = ju::to_double(*v);
+            out[cond] = RewardMulti{compet, remaining, vol24};
         }
         std::string nxt;
         if (data.is_object())
@@ -487,8 +489,8 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
         for (auto& t : ths) t.join();
     }
 
-    // B: PM 官方权威 竞争度 + 池剩余额度 (失败则退回不带这层增强)。
-    std::map<std::string, std::pair<double, double>> multi;
+    // B: PM 官方权威 竞争度 + 池剩余额度 + 24h量 (失败则退回不带这层增强)。
+    std::map<std::string, RewardMulti> multi;
     try {
         multi = client.reward_markets_multi();
     } catch (...) {
@@ -517,8 +519,9 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
         // B: 接 PM 权威数据。剔除快发完的池 (剩余已知且 <$1 = 没价值); 竞争度附上供选池/感知。
         auto mit = multi.find(r->condition_id);
         if (mit != multi.end()) {
-            r->competitiveness = mit->second.first;
-            r->remaining_reward = mit->second.second;
+            r->competitiveness = mit->second.competitiveness;
+            r->remaining_reward = mit->second.remaining;
+            r->volume_24hr = mit->second.volume_24hr;
             if (r->remaining_reward >= 0.0 && r->remaining_reward < 1.0) {
                 ++depleted_dropped;
                 continue;

@@ -73,7 +73,9 @@ json j_QuoteDecision(const QuoteDecision& s) {
 json j_PoolEval(const PoolEval& s) {
     return json{{"ts_ms", s.ts_ms()}, {"condition_id", s.condition_id()}, {"question", s.question()},
                 {"competitiveness", s.competitiveness()}, {"days_to_resolution", s.days_to_resolution()},
-                {"mid", s.mid()}, {"volume", s.volume()}, {"jump_verdict", s.jump_verdict()},
+                {"mid", s.mid()}, {"volume", s.volume()},
+                {"reward_rate_per_day", s.reward_rate_per_day()}, {"volume_24hr", s.volume_24hr()},
+                {"jump_verdict", s.jump_verdict()},
                 {"empty_band", s.empty_band()}, {"vol_mult", s.vol_mult()}, {"est_reward", s.est_reward()},
                 {"net_per_day", s.net_per_day()}, {"safe_pass", s.safe_pass()}, {"comp_pass", s.comp_pass()},
                 {"mid_pass", s.mid_pass()}, {"net_pass", s.net_pass()}, {"days_pass", s.days_pass()},

@@ -171,7 +171,6 @@ add_library(pmm_core STATIC
     src/pmm/api.cpp
     src/pmm/rewards.cpp
     src/pmm/portfolio.cpp
-    src/pmm/curation.cpp
     src/pmm/maker_live.cpp
     src/pmm/clob_submitter.cpp
     src/pmm/engine.cpp
@@ -222,9 +221,6 @@ target_link_libraries(pmm_db_smoke PRIVATE pmm_core)
 
 add_executable(pmm_config_smoke tests/config_smoke_main.cpp)
 target_link_libraries(pmm_config_smoke PRIVATE pmm_core)
-
-add_executable(pmm_curation_smoke tests/curation_smoke_main.cpp)
-target_link_libraries(pmm_curation_smoke PRIVATE pmm_core)
 
 add_executable(pmm_orderbook_parity tests/orderbook_parity_main.cpp)
 target_link_libraries(pmm_orderbook_parity PRIVATE pmm_core)
@@ -312,6 +308,15 @@ if(WITH_TELEMETRY)
     add_executable(telemetry_tap telemetry/tap/tap.cpp)
     target_include_directories(telemetry_tap PRIVATE ${TGEN})
     target_link_libraries(telemetry_tap PRIVATE pmm_core fastdds fastcdr)
+
+    # 外部 curator 闭环工具 (host 侧): curate_read 接收候选 (PoolEval) + curate_push 推白名单 (CuratorCommand)。
+    add_executable(curate_read telemetry/curate_read/curate_read.cpp)
+    target_include_directories(curate_read PRIVATE ${TGEN})
+    target_link_libraries(curate_read PRIVATE pmm_core fastdds fastcdr)
+
+    add_executable(curate_push telemetry/curate_push/curate_push.cpp)
+    target_include_directories(curate_push PRIVATE ${TGEN})
+    target_link_libraries(curate_push PRIVATE pmm_core fastdds fastcdr)
 endif()
 
 message(STATUS "pmm scaffold: crypto reuse + models + db (sqlite3) + smoke checks")

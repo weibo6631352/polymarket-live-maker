@@ -24,6 +24,11 @@
 #include <fastdds/dds/publisher/DataWriter.hpp>
 #include <fastdds/dds/publisher/Publisher.hpp>
 #include <fastdds/dds/publisher/qos/DataWriterQos.hpp>
+#include <fastdds/dds/subscriber/DataReader.hpp>
+#include <fastdds/dds/subscriber/DataReaderListener.hpp>
+#include <fastdds/dds/subscriber/SampleInfo.hpp>
+#include <fastdds/dds/subscriber/Subscriber.hpp>
+#include <fastdds/dds/subscriber/qos/DataReaderQos.hpp>
 #include <fastdds/dds/topic/Topic.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
@@ -113,6 +118,8 @@ void w_PoolEval(const nlohmann::json& j, efd::DataWriter* w) {
     s.days_to_resolution(GD("days_to_resolution"));
     s.mid(GD("mid"));
     s.volume(GD("volume"));
+    s.reward_rate_per_day(GD("reward_rate_per_day"));
+    s.volume_24hr(GD("volume_24hr"));
     s.jump_verdict(GS("jump_verdict"));
     s.empty_band(GB("empty_band"));
     s.vol_mult(GD("vol_mult"));
@@ -359,7 +366,31 @@ void w_PoolReward(const nlohmann::json& j, efd::DataWriter* w) {
 #undef GI32
 #undef GB
 
-// ---- DdsPublisher: 一个 participant + 一个 publisher + 每 topic 一个 writer ----
+// ---- CuratorCommand reader listener: 收到外部 curator 推的白名单 → 回调 bot (热更 dyn_whitelist_) ----
+// 通过指针引用 DdsPublisher 持有的 (mutex, callback), 这样 set_command_callback 可在建 reader 后再设。
+class CmdListener final : public efd::DataReaderListener {
+public:
+    CmdListener(std::mutex* mu, Publisher::CommandCallback* cb) : mu_(mu), cb_(cb) {}
+    void on_data_available(efd::DataReader* reader) override {
+        CuratorCommand cmd;
+        efd::SampleInfo info;
+        while (reader->take_next_sample(&cmd, &info) == efd::RETCODE_OK) {
+            if (!info.valid_data) continue;
+            Publisher::CommandCallback cb;
+            {
+                std::lock_guard<std::mutex> lk(*mu_);
+                cb = *cb_;
+            }
+            if (cb) cb(cmd.whitelist());  // whitelist_csv → bot 解析为 dyn_whitelist_
+        }
+    }
+
+private:
+    std::mutex* mu_;
+    Publisher::CommandCallback* cb_;
+};
+
+// ---- DdsPublisher: 一个 participant + 一个 publisher + 每 topic 一个 writer + 一个 command reader ----
 class DdsPublisher final : public Publisher {
 public:
     DdsPublisher() {
@@ -395,6 +426,9 @@ public:
         register_topic<ConfigSnapshotPubSubType>(topic::kConfigSnapshot, &w_ConfigSnapshot, true);
         register_topic<SystemHealthPubSubType>(topic::kSystemHealth, &w_SystemHealth, true);
         register_topic<PoolRewardPubSubType>(topic::kPoolReward, &w_PoolReward, true);
+
+        // host→bot 反向通道: 订阅 CuratorCommand, 收到外部 curator 推的白名单 → 回调热更。RELIABLE 不丢。
+        register_command_reader();
     }
 
     ~DdsPublisher() override {
@@ -421,11 +455,42 @@ public:
         }
     }
 
+    void set_command_callback(CommandCallback cb) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        cmd_cb_ = std::move(cb);
+    }
+
 private:
     struct Entry {
         efd::DataWriter* writer;
         WriteFn convert;
     };
+
+    // CuratorCommand reader: 唯一订阅。RELIABLE + KEEP_LAST, 与 curate_push 的 RELIABLE writer 匹配, 不丢白名单。
+    void register_command_reader() {
+        dds_sub_ = participant_->create_subscriber(efd::SUBSCRIBER_QOS_DEFAULT);
+        if (dds_sub_ == nullptr) {
+            throw std::runtime_error("DDS: create_subscriber failed");
+        }
+        efd::TypeSupport ts(new CuratorCommandPubSubType());
+        ts.register_type(participant_);
+        efd::Topic* tp = participant_->create_topic(topic::kCuratorCommand, ts.get_type_name(),
+                                                    efd::TOPIC_QOS_DEFAULT);
+        if (tp == nullptr) {
+            throw std::runtime_error("DDS: create_topic failed: CuratorCommand");
+        }
+        efd::DataReaderQos rq = efd::DATAREADER_QOS_DEFAULT;
+        rq.history().kind = efd::KEEP_LAST_HISTORY_QOS;
+        rq.history().depth = 4;
+        rq.reliability().kind = efd::RELIABLE_RELIABILITY_QOS;
+        // TRANSIENT_LOCAL: 匹配 curate_push 的 writer, 即使推送工具发现略晚也收到最后一条白名单。
+        rq.durability().kind = efd::TRANSIENT_LOCAL_DURABILITY_QOS;
+        cmd_listener_ = std::make_unique<CmdListener>(&mu_, &cmd_cb_);
+        cmd_reader_ = dds_sub_->create_datareader(tp, rq, cmd_listener_.get());
+        if (cmd_reader_ == nullptr) {
+            throw std::runtime_error("DDS: create_datareader failed: CuratorCommand");
+        }
+    }
 
     template <typename PubSubT>
     void register_topic(const char* name, WriteFn fn, bool reliable) {
@@ -458,6 +523,11 @@ private:
     efd::DomainParticipant* participant_ = nullptr;
     efd::Publisher* dds_pub_ = nullptr;
     std::unordered_map<std::string, Entry> writers_;
+    // host→bot 控制订阅 (CuratorCommand)。
+    efd::Subscriber* dds_sub_ = nullptr;
+    efd::DataReader* cmd_reader_ = nullptr;
+    std::unique_ptr<CmdListener> cmd_listener_;
+    CommandCallback cmd_cb_;  // mu_ 保护; set_command_callback 设, listener 读
 };
 
 }  // namespace

@@ -59,6 +59,8 @@ module pmm { module telemetry {
     double    days_to_resolution;
     double    mid;
     double    volume;
+    double    reward_rate_per_day;   // 原始日奖励率 ($/天, 未 κ 校准) —— curator 算奖励份额的分子
+    double    volume_24hr;           // PM 24h 成交额 ($) —— 流量信号
     string    jump_verdict;        // SAFE / jumpy
     boolean   empty_band;
     double    vol_mult;            // 实现波动 / 带宽 (>2.5 被丢)
@@ -291,6 +293,14 @@ module pmm { module telemetry {
     double    est_reward;
     double    realized_reward;     // /rewards/user/markets 实测
     double    share;
+  };
+
+  // === 控制 (host→bot, 唯一反向 topic): 外部 curator (这个 session) 经 DDS 实时推选中池白名单,
+  // bot 订阅热更 dyn_whitelist_, 不重启。这是"完全由 LLM 动态选池"的闭环回路。
+  struct CuratorCommand {
+    long long ts_ms;
+    string    whitelist;           // 逗号分隔 condition_id (本轮选中池集; 空串 = 清空白名单)
+    string    note;                // curator 理由摘要 (审计/可观测)
   };
 
 }; };

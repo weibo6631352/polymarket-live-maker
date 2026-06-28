@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <sstream>
 #include <thread>
 
 #include "pmm/clob_submitter.hpp"
@@ -72,21 +73,25 @@ LiveRunner::LiveRunner(RunnerConfig cfg, Engine* engine, rewards::RewardsClient*
         owned_scanner_ = std::make_unique<rewards::RewardsClient>(rate_limiter_.get());
         scanner_ = owned_scanner_.get();
     }
-    // 自主 LLM 选池: 启用且有 key 才建 curator_。api_key 是运行期机密 → 直接读 env (同 PM 私钥),
-    // 绝不进 RunnerConfig (避免 banner/ConfigSnapshot 打日志)。无 key → 不建 → 行为不变 (回退数字滤网)。
-    if (cfg_.llm_curation) {
-        const std::string key = pmm::env::strip(pmm::env::str("LM_ANTHROPIC_KEY"));
-        if (!key.empty()) {
-            curation::CurationConfig ccfg;
-            ccfg.api_key = key;
-            ccfg.model = cfg_.curation_model;
-            curator_ = std::make_unique<curation::Curator>(std::move(ccfg));
-            std::fprintf(stderr, "curation: LLM pool-curation ENABLED (model=%s)\n",
-                         cfg_.curation_model.c_str());
-        } else {
-            std::fprintf(stderr, "curation: LM_LLM_CURATION on but LM_ANTHROPIC_KEY empty -> disabled\n");
+    // 选池由外部 curator (这个 LLM session) 完全动态驱动: bot 把候选发上 DDS (PoolEval),
+    // curator 读着筛, 经 DDS CuratorCommand 把选中池白名单推回 → 这里热更 dyn_whitelist_, 不重启。
+    // 有效白名单 = cfg_.pool_whitelist (静态种子, 可空) ∪ dyn_whitelist_ (curator 实时推)。
+    publisher_->set_command_callback([this](const std::string& csv) {
+        std::set<std::string> wl;
+        std::stringstream ss(csv);
+        std::string id;
+        while (std::getline(ss, id, ',')) {
+            const auto a = id.find_first_not_of(" \t");
+            const auto b = id.find_last_not_of(" \t");
+            if (a != std::string::npos) wl.insert(id.substr(a, b - a + 1));
         }
-    }
+        const std::size_t n = wl.size();
+        {
+            std::lock_guard<std::mutex> lk(report_mu_);
+            dyn_whitelist_ = std::move(wl);
+        }
+        std::fprintf(stderr, "curator: applied %zu pools via DDS\n", n);
+    });
 }
 
 LiveRunner::~LiveRunner() {
@@ -690,7 +695,6 @@ void LiveRunner::start_discovery_thread() {
 
 void LiveRunner::rediscover() {
     const double t0 = mono_now();
-    std::vector<curation::Candidate> cands;  // 发现成功 + LLM 选池启用时填充; 网络调用留到锁外
     try {
         rewards::ScanResult res = rewards::scan(scanner(), cfg_.min_daily, cfg_.scan_top, true,
                                                 cfg_.min_days_to_resolution, cfg_.max_vol_mult,
@@ -701,10 +705,6 @@ void LiveRunner::rediscover() {
             std::lock_guard<std::mutex> lk(report_mu_);
             report_ = std::move(res);
             last_scan_ok_ = mono_now();
-            if (curator_) {  // 锁内从新鲜 report_ 抓候选 (问题/cond/mid); 网络 curate 留到锁外
-                for (const auto& pr : report_.pools)
-                    cands.push_back({pr.question, pr.condition_id, pr.mid});
-            }
         }
         std::lock_guard<std::mutex> lk(report_mu_);
         std::fprintf(stderr, "discovery: %d safe of %d scored\n", report_.safe_count, report_.pools_scored);
@@ -728,20 +728,7 @@ void LiveRunner::rediscover() {
     } catch (...) {
         // 保留上一份好 report; staleness guard 处理
     }
-    // 自主 LLM 选池: 在所有锁外做 (网络最多 ~15s, 不能卡住主环的 reselect)。失败/超时 → Curator 返回
-    // last-good (绝不清空动态白名单); 无 key → curator_ 不存在 → 跳过 (行为不变)。
-    if (curator_ && !cands.empty()) {
-        const std::set<std::string> approved = curator_->curate(cands);
-        {
-            std::lock_guard<std::mutex> lk(report_mu_);
-            dyn_whitelist_ = approved;
-        }
-        std::fprintf(stderr, "curation: LLM approved %zu of %zu candidate pools\n", approved.size(),
-                     cands.size());
-        event("curation", {{"approved_count", static_cast<int>(approved.size())},
-                           {"candidates", static_cast<int>(cands.size())},
-                           {"approved", json(approved)}});
-    }
+    // 选池决策不在这里做: dyn_whitelist_ 由外部 curator 经 DDS CuratorCommand 异步热更 (见 ctor 回调)。
 }
 
 bool LiveRunner::report_stale() {
@@ -814,6 +801,8 @@ void LiveRunner::reselect() {
                                  {"days_to_resolution", 0.0},
                                  {"mid", pr.mid},
                                  {"volume", pr.inband_notional},
+                                 {"reward_rate_per_day", pr.daily},  // 原始日奖励率 (份额分子)
+                                 {"volume_24hr", pr.volume_24hr},
                                  {"jump_verdict", pr.jump_verdict},
                                  {"empty_band", pr.empty_band},
                                  {"vol_mult", vol_mult},

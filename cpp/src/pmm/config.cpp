@@ -68,7 +68,7 @@ RunnerConfig RunnerConfig::from_env() {
     c.fade_obi = f("LM_FADE_OBI", 0.7);          // fade-on-imbalance: 订单流失衡阈 (0-1)
     c.fade_cooldown_s = f("LM_FADE_COOLDOWN_S", 10.0);  // fade 后冷却秒 (防紧抖动)
     c.fade_toxic_streak = i("LM_FADE_TOXIC_STREAK", 4);  // 连续 N poll 狂 fade → 退毒池
-    {  // 语义选池白名单 (逗号分隔 condition_id; 空=不限)
+    {  // 静态白名单种子 (逗号分隔 condition_id; 空=不限)。主路径是外部 curator 经 DDS CuratorCommand 热推。
         std::stringstream ss(pmm::env::str("LM_POOL_WHITELIST"));
         std::string id;
         while (std::getline(ss, id, ',')) {
@@ -76,12 +76,6 @@ RunnerConfig RunnerConfig::from_env() {
             const auto b = id.find_last_not_of(" \t");
             if (a != std::string::npos) c.pool_whitelist.insert(id.substr(a, b - a + 1));
         }
-    }
-    {  // 自主 LLM 选池: 默认关; 检测到 LM_ANTHROPIC_KEY 时自动开 (LM_LLM_CURATION 显式覆盖)。
-        const bool have_key = !strip(str("LM_ANTHROPIC_KEY")).empty();
-        c.llm_curation = flag_ne("LM_LLM_CURATION", "0", have_key ? "1" : "0");
-        std::string m = strip(str("LM_CURATION_MODEL"));
-        c.curation_model = m.empty() ? "claude-sonnet-4-6" : m;
     }
     c.min_days_to_resolution = f("LM_MIN_DAYS_TO_RESOLUTION", 10.0);  // R2: 剔除近结算催化剂池
     c.max_vol_mult = f("LM_MAX_VOL_MULT", 2.5);  // 剔除 实现日波动 > N×带宽 的跳池
