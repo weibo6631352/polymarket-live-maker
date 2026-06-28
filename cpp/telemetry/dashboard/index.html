@@ -106,7 +106,7 @@ const H={
     `<span class="${d.state==='connected'?'pos':'neg'}">${d.state}</span> ${fmt(d.msg_rate,0)}/s lag ${fmt(d.exch_lag_ms,0)}ms gaps ${d.gap_count}`]);},
   PoolReward:d=>{rewards.set(d.condition_id,d);renderRw();},
   LogEvent:d=>{push(logs,d);renderLog();},
-  KillEvent:d=>{push(logs,{kind:'KILL:'+d.kind,fields:{reason:d.reason}});renderLog();},
+  KillEvent:d=>{push(logs,{ts_ms:d.ts_ms,kind:'KILL:'+d.kind,detail:d.reason});renderLog();},
 };
 const short=s=>(s||'').slice(0,18);
 const row=a=>`<tr><td>${a[0]}</td><td>${a[1]}</td></tr>`;
@@ -123,7 +123,7 @@ function renderBook(d){const top=a=>(a||[]).slice(0,12);
   $('#asks').innerHTML='<div class=muted style="text-align:center">ASK</div>'+top(d.asks).reverse().map(l=>`<div class=lvl><span class=neg>${fmt(l.price,3)}</span><span>${fmt(l.size,0)}</span></div>`).join('');
   $('#bids').innerHTML='<div class=muted style="text-align:center">BID</div>'+top(d.bids).map(l=>`<div class=lvl><span class=pos>${fmt(l.price,3)}</span><span>${fmt(l.size,0)}</span></div>`).join('');}
 function renderLog(){$('#n-l').textContent=logs.length;
-  $('#log').innerHTML=logs.slice(0,80).map(d=>`<div><span class=muted>${ts(d.ts_ms)}</span> <b>${d.kind}</b> <span class=muted>${JSON.stringify(d.fields||{}).slice(0,160)}</span></div>`).join('');}
+  $('#log').innerHTML=logs.slice(0,80).map(d=>`<div><span class=muted>${ts(d.ts_ms)}</span> <b>${d.kind}</b> <span class=muted>${(d.detail||'').slice(0,160)}</span></div>`).join('');}
 const ts=ms=>ms?new Date(+ms).toISOString().slice(11,19):'';
 
 let ws;

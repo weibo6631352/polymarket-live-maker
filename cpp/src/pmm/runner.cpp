@@ -83,11 +83,25 @@ LiveRunner::~LiveRunner() {
 
 rewards::RewardsClient& LiveRunner::scanner() { return *scanner_; }
 
+// 墙钟毫秒 (遥测时间戳; mono_now 是单调时钟, 不能做 wall ts)。
+static int64_t telemetry_wall_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 void LiveRunner::event(const std::string& kind, const json& fields) {
     if (events_) events_->write(kind, fields);
-    // 全量遥测: 每个 event 也走 DDS 的 LogEvent 兜底 topic (kind+fields), 一条不漏。
-    // 富 topic (QuoteDecision/FillContext/OrderBookL2 等) 在各点显式 publish 全量字段。
-    if (publisher_) publisher_->publish(telemetry::topic::kLogEvent, {{"kind", kind}, {"fields", fields}});
+    // 全量遥测: 每个 event 走 DDS 的 LogEvent 兜底 topic。LogEvent IDL = {ts_ms,kind,condition_id,latency_ms,detail}:
+    // 把整个 fields 串进 detail (一条不漏), condition_id 有则抽出便于按池过滤。富 topic 在各点另行显式 publish。
+    if (publisher_)
+        publisher_->publish(
+            telemetry::topic::kLogEvent,
+            {{"ts_ms", telemetry_wall_ms()},
+             {"kind", kind},
+             {"condition_id", fields.value("cond", fields.value("condition_id", std::string{}))},
+             {"latency_ms", 0.0},
+             {"detail", fields.dump()}});
 }
 
 nlohmann::json LiveRunner::locked_submit(const json& action) {
@@ -211,6 +225,7 @@ void LiveRunner::run() {
         double last_reeval = mono_now();
         double last_stats = mono_now();
         long last_resync_count = 0;
+        run_start_ = mono_now();
         while (!stop_.load()) {
             if (g_signal_stop.load()) trip_kill("signal");
             // 收到信号/kill 立刻退出: 不再多跑一次 poll_once + 整睡一个 poll 周期。
@@ -225,11 +240,24 @@ void LiveRunner::run() {
             if (cfg_.stats_every_s > 0.0 && now - last_stats >= cfg_.stats_every_s) {
                 const long rc = resync_count_.load(std::memory_order_relaxed);
                 const double dt = now - last_stats;
-                std::fprintf(stderr, "stats: /book resync %.1f req/s (%ld in %.0fs)\n",
-                             dt > 0.0 ? static_cast<double>(rc - last_resync_count) / dt : 0.0,
+                last_rps_ = dt > 0.0 ? static_cast<double>(rc - last_resync_count) / dt : 0.0;
+                std::fprintf(stderr, "stats: /book resync %.1f req/s (%ld in %.0fs)\n", last_rps_,
                              rc - last_resync_count, dt);
                 last_resync_count = rc;
                 last_stats = now;
+            }
+            // 心跳遥测 (~2s): 运行态总览 (run/uptime/usdc/equity/quotes/盘口率)。
+            if (publisher_ && now - last_heartbeat_ >= 2.0) {
+                last_heartbeat_ = now;
+                publisher_->publish(telemetry::topic::kHeartbeat,
+                                    {{"ts_ms", telemetry_wall_ms()},
+                                     {"run_state", "running"},
+                                     {"uptime_s", now - run_start_},
+                                     {"usdc", last_usdc_},
+                                     {"equity", last_usdc_ + last_pos_value_},
+                                     {"n_quotes", static_cast<int>(placed_.size())},
+                                     {"n_pools_tracked", static_cast<int>(placed_.size())},
+                                     {"book_resync_rps", last_rps_}});
             }
             if (now - last_reeval >= cfg_.reeval_interval_s) {
                 tick_cooldowns();

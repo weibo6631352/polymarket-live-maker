@@ -96,6 +96,9 @@ private:
     std::unique_ptr<ISubmitter> owned_submitter_;
     std::unique_ptr<RateLimiter> rate_limiter_;
     std::unique_ptr<telemetry::Publisher> publisher_{telemetry::make_publisher()};  // 全量遥测总线
+    double run_start_{0.0};   // run() 起始单调时刻 (Heartbeat uptime)
+    double last_rps_{0.0};    // 最近盘口刷新率 (Heartbeat book_resync_rps)
+    double last_heartbeat_{0.0};  // 上次心跳发布时刻 (节流 ~2s)
     std::unique_ptr<EventLog> events_;
     std::mutex submitter_mu_;  // 串行化 submitter 访问 (反射 + poll 线程)
 
