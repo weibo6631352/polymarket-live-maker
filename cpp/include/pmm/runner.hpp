@@ -71,6 +71,8 @@ private:
     void start_ws();
     void start_book_resync();
     void resync_once(const std::string& token);
+    void publish_book_l2(const std::string& token);  // OrderBookL2 全档遥测 (resync 源头捕获)
+    void publish_risk_equity();                       // EquitySnapshot + Position + RiskState 遥测
     void start_discovery_thread();
     [[nodiscard]] bool report_stale();
     [[nodiscard]] std::optional<nlohmann::json> rescore(const std::string& cond, const std::string& token,
@@ -99,6 +101,8 @@ private:
     double run_start_{0.0};   // run() 起始单调时刻 (Heartbeat uptime)
     double last_rps_{0.0};    // 最近盘口刷新率 (Heartbeat book_resync_rps)
     double last_heartbeat_{0.0};  // 上次心跳发布时刻 (节流 ~2s)
+    std::atomic<long long> book_seq_{0};  // OrderBookL2 单调序号 (全局; 每 token 子序列仍单调, 供丢更检测)
+    double last_tel_check_{0.0};  // dry-live 净值/风险态遥测节流时刻 (live 走 kill_check 的 15s 链上块)
     std::unique_ptr<EventLog> events_;
     std::mutex submitter_mu_;  // 串行化 submitter 访问 (反射 + poll 线程)
 

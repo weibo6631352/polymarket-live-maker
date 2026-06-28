@@ -162,6 +162,54 @@ void LiveRunner::run() {
     engine_->set_jump_vol_weight(cfg_.jump_vol_weight);  // 跳变感知 bleed (毒池自动挂宽/净负)
     if (rate_limiter_) engine_->api().set_rate_limiter(rate_limiter_.get());
 
+    // 配置/版本溯源遥测: 启动发一次 (哪套配置 + 哪个 commit 产出这批数据)。其余参数塞 extra_json。
+    if (publisher_) {
+        const json extra = {{"live", cfg_.live},
+                            {"dry_live", cfg_.dry_live},
+                            {"min_daily", cfg_.min_daily},
+                            {"reward_calib", cfg_.reward_calib},
+                            {"waterfill", cfg_.waterfill},
+                            {"use_optimal_spread", cfg_.use_optimal_spread},
+                            {"net_edge_gate", cfg_.net_edge_gate},
+                            {"tail_k_sigma", cfg_.tail_k_sigma},
+                            {"extreme_mid_margin", cfg_.extreme_mid_margin},
+                            {"min_days_to_resolution", cfg_.min_days_to_resolution},
+                            {"max_vol_mult", cfg_.max_vol_mult},
+                            {"poll_seconds", cfg_.poll_seconds},
+                            {"discovery_interval_s", cfg_.discovery_interval_s},
+                            {"reeval_interval_s", cfg_.reeval_interval_s},
+                            {"min_pool_reward", cfg_.min_pool_reward},
+                            {"size_share_cap", cfg_.size_share_cap},
+                            {"quality_floor_frac", cfg_.quality_floor_frac},
+                            {"max_token_overlap", cfg_.max_token_overlap},
+                            {"recenter_ticks", cfg_.recenter_ticks},
+                            {"order_expiry_s", cfg_.order_expiry_s},
+                            {"min_hold_s", cfg_.min_hold_s},
+                            {"max_mid_vel_cps", cfg_.max_mid_vel_cps},
+                            {"resync_workers", cfg_.resync_workers},
+                            {"ws_enabled", cfg_.ws_enabled},
+                            {"min_wallet_usdc", cfg_.min_wallet_usdc},
+                            {"chop_aversion", cfg_.chop_aversion},
+                            {"risk_tolerance_days", cfg_.risk_tolerance_days},
+                            {"micro_center", cfg_.micro_center},
+                            {"cooldown_rounds", cfg_.cooldown_rounds}};
+#ifdef PMM_GIT_COMMIT
+        const std::string git_commit = PMM_GIT_COMMIT;
+#else
+        const std::string git_commit;
+#endif
+        publisher_->publish(telemetry::topic::kConfigSnapshot,
+                            {{"ts_ms", telemetry_wall_ms()},
+                             {"git_commit", git_commit},
+                             {"capital", cfg_.capital},
+                             {"max_loss", cfg_.max_loss},
+                             {"jump_vol_weight", cfg_.jump_vol_weight},
+                             {"max_competitiveness", cfg_.max_competitiveness},
+                             {"max_pool_frac", cfg_.max_pool_frac},
+                             {"tail_budget", cfg_.tail_budget},
+                             {"extra_json", extra.dump()}});
+    }
+
     if (cfg_.live) {
         if (submitter_ == nullptr) {
             owned_submitter_ = std::make_unique<clob::ClobSubmitter>(rate_limiter_.get());
@@ -412,9 +460,47 @@ void LiveRunner::resync_once(const std::string& token) {
             market_ch_->apply_rest_snapshot(token, book);
             compute_and_store_signals(token);  // 在新鲜权威盘口上算预测信号 (高频, 零额外请求)
             resync_count_.fetch_add(1, std::memory_order_relaxed);
+            publish_book_l2(token);  // 全档盘口遥测 (在权威盘口源头捕获全部档位, 非仅顶档)
         }
     } catch (...) {
     }
+}
+
+// OrderBookL2 全档快照遥测: 刚 resync 的权威盘口 → 全部 bid/ask 档 (价/量数组) + 派生 mid/inband_qmin。
+// seq 全局单调 (每 token 子序列仍单调, 供丢更/连贯检测)。BEST_EFFORT, 永不回压交易循环。
+void LiveRunner::publish_book_l2(const std::string& token) {
+    if (!publisher_ || !market_ch_) return;
+    auto ob = market_ch_->get_book(token);
+    if (!ob) return;
+    double bb = 0.0, ba = 0.0;
+    json bids = json::array(), asks = json::array();
+    for (const auto& l : ob->bids) {
+        if (l.size > 0.0 && l.price > bb) bb = l.price;
+        bids.push_back(json{{"price", l.price}, {"size", l.size}});
+    }
+    for (const auto& l : ob->asks) {
+        if (l.size > 0.0 && (ba == 0.0 || l.price < ba)) ba = l.price;
+        asks.push_back(json{{"price", l.price}, {"size", l.size}});
+    }
+    const double mid = (bb > 0.0 && ba > 0.0) ? (bb + ba) / 2.0 : 0.0;
+    double v = 4.5;
+    {
+        std::lock_guard<std::mutex> lk(reflex_mu_);
+        auto it = signal_v_.find(token);
+        if (it != signal_v_.end() && it->second > 0.0) v = it->second;
+    }
+    const double inband = (mid > 0.0) ? orderbook::book_inband_qmin(*ob, mid, v) : 0.0;
+    publisher_->publish(telemetry::topic::kOrderBookL2,
+                        {{"ts_ms", telemetry_wall_ms()},
+                         {"condition_id", std::string{}},
+                         {"token", token},
+                         {"seq", book_seq_.fetch_add(1, std::memory_order_relaxed)},
+                         {"source", "rest_resync"},
+                         {"update_type", "snapshot"},
+                         {"mid", mid},
+                         {"inband_qmin", inband},
+                         {"bids", bids},
+                         {"asks", asks}});
 }
 
 double LiveRunner::mid_velocity(const std::string& token) {
@@ -552,10 +638,13 @@ void LiveRunner::start_discovery_thread() {
 }
 
 void LiveRunner::rediscover() {
+    const double t0 = mono_now();
     try {
         rewards::ScanResult res = rewards::scan(scanner(), cfg_.min_daily, cfg_.scan_top, true,
                                                 cfg_.min_days_to_resolution, cfg_.max_vol_mult,
                                                 cfg_.reward_calib);
+        const int n_scanned = res.pools_scored;  // move 前抓计数 (供 DiscoveryScan 遥测)
+        const int n_safe = res.safe_count;
         {
             std::lock_guard<std::mutex> lk(report_mu_);
             report_ = std::move(res);
@@ -563,6 +652,18 @@ void LiveRunner::rediscover() {
         }
         std::lock_guard<std::mutex> lk(report_mu_);
         std::fprintf(stderr, "discovery: %d safe of %d scored\n", report_.safe_count, report_.pools_scored);
+        // DiscoveryScan 遥测 (漏斗粗粒度): scan 总览计数 + 耗时。逐原因 drop 计数 scan 未单列 → 0 (TODO)。
+        if (publisher_)
+            publisher_->publish(telemetry::topic::kDiscoveryScan,
+                                {{"ts_ms", telemetry_wall_ms()},
+                                 {"n_scanned", n_scanned},
+                                 {"n_safe", n_safe},
+                                 {"n_dropped_jumpy", 0},
+                                 {"n_dropped_depleted", 0},
+                                 {"n_dropped_extreme", 0},
+                                 {"n_dropped_comp", 0},
+                                 {"n_selected", static_cast<int>(selected_.size())},
+                                 {"scan_duration_ms", (mono_now() - t0) * 1000.0}});
     } catch (...) {
         // 保留上一份好 report; staleness guard 处理
     }
@@ -594,12 +695,61 @@ void LiveRunner::reselect() {
     p.max_competitiveness = cfg_.max_competitiveness;  // 硬剔除新闻/毒池 (重新启用)
     p.extreme_mid_margin = cfg_.extreme_mid_margin;    // 剔除近极端价池 (逆选/趋势源)
     p.cooldown = cd;
+    std::vector<rewards::PoolReport> scored_pools;
     {
         std::lock_guard<std::mutex> lk(report_mu_);
         selected_ = portfolio::select_pools(report_, p);
+        scored_pools = report_.pools;  // 复制供 PoolEval 遥测 (锁外发布, 不长持 report_mu_)
     }
     std::map<std::string, json> want;
     for (const auto& s : selected_) want[s.condition_id] = selected_to_json(s);
+
+    // PoolEval 遥测: 每个评分候选发一条 (为什么选/拒) —— 全部指标 + 各滤网逐个 pass 结果。
+    // net_per_day 在 scan 期未算 bleed → 用 reward_per_day 作代理; days_to_resolution 此处不在手 → 0。
+    if (publisher_) {
+        for (const auto& pr : scored_pools) {
+            const bool safe_pass = pr.jump_verdict == "SAFE" || pr.jump_verdict.empty();
+            const bool comp_pass = cfg_.max_competitiveness <= 0.0 || pr.competitiveness < 0.0 ||
+                                   pr.competitiveness <= cfg_.max_competitiveness;
+            const bool mid_pass = cfg_.extreme_mid_margin <= 0.0 ||
+                                  (pr.mid >= cfg_.extreme_mid_margin && pr.mid <= 1.0 - cfg_.extreme_mid_margin);
+            const bool reward_pass = pr.reward_per_day >= cfg_.min_pool_reward;
+            const bool net_pass = pr.reward_per_day > 0.0;
+            const bool is_sel = want.count(pr.condition_id) != 0;
+            const double vol_mult =
+                (pr.daily_vol_c && pr.max_spread_c > 0.0) ? *pr.daily_vol_c / pr.max_spread_c : 0.0;
+            std::string reject;
+            if (!is_sel) {
+                if (!safe_pass) reject = "jumpy";
+                else if (!comp_pass) reject = "competitive";
+                else if (!mid_pass) reject = "extreme_mid";
+                else if (pr.empty_band) reject = "empty_band";
+                else if (!reward_pass) reject = "low_reward";
+                else reject = "not_selected";
+            }
+            publisher_->publish(telemetry::topic::kPoolEval,
+                                {{"ts_ms", telemetry_wall_ms()},
+                                 {"condition_id", pr.condition_id},
+                                 {"question", pr.question},
+                                 {"competitiveness", pr.competitiveness},
+                                 {"days_to_resolution", 0.0},
+                                 {"mid", pr.mid},
+                                 {"volume", pr.inband_notional},
+                                 {"jump_verdict", pr.jump_verdict},
+                                 {"empty_band", pr.empty_band},
+                                 {"vol_mult", vol_mult},
+                                 {"est_reward", pr.reward_per_day},
+                                 {"net_per_day", pr.reward_per_day},
+                                 {"safe_pass", safe_pass},
+                                 {"comp_pass", comp_pass},
+                                 {"mid_pass", mid_pass},
+                                 {"net_pass", net_pass},
+                                 {"days_pass", true},
+                                 {"reward_pass", reward_pass},
+                                 {"selected", is_sel},
+                                 {"reject_reason", reject}});
+        }
+    }
 
     // DROP 不再在理想集中的持仓池
     if (engine_ != nullptr) {
@@ -666,26 +816,73 @@ void LiveRunner::reselect() {
 bool LiveRunner::place(const std::string& cond, const json& pool) {
     double hs = pool.value("half_spread_c", 0.0);
     double sigma_c = 0.0;
+    // QuoteDecision 遥测: 累积本次定价能读到的数学, 在每个出口 (净门跳过 / 尾部跳过 / 正常挂) 各发一条。
+    double mid = 0.0, net_per_day = 0.0, reward_per_day = 0.0, bleed_per_day = 0.0, existing_qmin = 0.0;
+    double share_w = pool.value("share", 0.0);
+    double max_spread_c = pool.value("max_spread_c", 0.0);
+    bool net_gate_pass = true, tail_capped = false;
+    double tail_var = 0.0;
+    double sz = pool.value("size", 0.0);
+    const double min_size = pool.value("min_size", 0.0);
+    auto emit_qd = [&](const char* status, const char* skip_reason) {
+        if (!publisher_) return;
+        const double own_qmin = (sz > 0.0 && hs > 0.0 && max_spread_c > 0.0)
+                                    ? orderbook::maker_quote_score(sz, hs, max_spread_c)
+                                    : 0.0;
+        publisher_->publish(telemetry::topic::kQuoteDecision,
+                            {{"ts_ms", telemetry_wall_ms()},
+                             {"condition_id", cond},
+                             {"question", pool.value("question", std::string{})},
+                             {"token", pool.value("token", std::string{})},
+                             {"side", "BUY-YES"},
+                             {"book_seq", 0},
+                             {"mid", mid},
+                             {"max_spread_c", max_spread_c},
+                             {"half_spread_c", hs},
+                             {"sigma_c", sigma_c},
+                             {"jump_sigma_c", sigma_c},  // engine σ 已是跳变感知 (jump_vol_weight>0); 同值
+                             {"jump_anomaly", 0.0},
+                             {"est_reward", reward_per_day},
+                             {"bleed_per_day", bleed_per_day},
+                             {"net_per_day", net_per_day},
+                             {"existing_qmin", existing_qmin},
+                             {"own_qmin", own_qmin},
+                             {"share_w", share_w},
+                             {"size", sz},
+                             {"committed_capital", pool.value("committed_capital", 0.0)},
+                             {"tail_var", tail_var},
+                             {"net_gate_pass", net_gate_pass},
+                             {"tail_capped", tail_capped},
+                             {"status", status},
+                             {"skip_reason", skip_reason}});
+    };
     if (cfg_.use_optimal_spread) {
         try {
             const json rec = engine().suggest_maker_half_spread(cond, "yes", 0.0, cfg_.poll_seconds);
+            mid = rec.value("mid", 0.0);
+            net_per_day = rec.value("net_per_day", 0.0);
+            reward_per_day = rec.value("reward_per_day", 0.0);
+            bleed_per_day = rec.value("bleed_per_day", 0.0);
+            existing_qmin = rec.value("existing_qmin", 0.0);
+            share_w = rec.value("share", share_w);
+            if (rec.contains("max_spread_c")) max_spread_c = rec.value("max_spread_c", max_spread_c);
+            sigma_c = rec.value("sigma_c", 0.0);
             // 净边际门 (专家 #2): 跳变感知 bleed 后 net=reward-bleed ≤ 0 → 奖励被逆选吃光 → 不报价, 让毒池
             // 自然出局 (取代手调 comp/mid 启发式)。rec 缺字段时默认放行 (不误杀)。
             if (cfg_.net_edge_gate && rec.value("net_per_day", 1.0) <= 0.0) {
                 std::fprintf(stderr, "net-gate: %s net/day=%.3f <= 0 (bleed eats reward) — not quoting\n",
                              cond.substr(0, 10).c_str(), rec.value("net_per_day", 0.0));
+                net_gate_pass = false;
+                emit_qd("skipped", "net_gate");
                 return false;
             }
             const double v = rec.value("half_spread_c", 0.0);
             if (v > 0.0) hs = v;
-            sigma_c = rec.value("sigma_c", 0.0);
         } catch (...) {
         }
     }
     MakerQuoteOpts opts;
     opts.half_spread_cents = hs;
-    double sz = pool.value("size", 0.0);
-    const double min_size = pool.value("min_size", 0.0);
     // #4 尾部-VaR 限仓 (专家): 单次成交最坏损失 ≈ size × (k·σ)。$1k 无法分散尾部 → 限到 tail_budget。连 min_size
     // 都超预算 (毒池/高波动) → 不报价; 否则把 size 压进预算 (但不低于 min_size, 否则拿不到奖励门)。
     if (cfg_.tail_budget > 0.0 && sigma_c > 0.0) {
@@ -694,10 +891,16 @@ bool LiveRunner::place(const std::string& cond, const json& pool) {
             if (min_size * worst_move > cfg_.tail_budget) {
                 std::fprintf(stderr, "tail-gate: %s min-tail $%.1f > budget $%.1f — not quoting\n",
                              cond.substr(0, 10).c_str(), min_size * worst_move, cfg_.tail_budget);
+                tail_var = min_size * worst_move;
+                emit_qd("skipped", "tail_budget");
                 return false;
             }
             const double max_sz = cfg_.tail_budget / worst_move;
-            if (sz > max_sz) sz = std::max(min_size, max_sz);
+            if (sz > max_sz) {
+                sz = std::max(min_size, max_sz);
+                tail_capped = true;
+            }
+            tail_var = sz * worst_move;
         }
     }
     if (sz > 0.0) opts.size = sz;
@@ -706,6 +909,7 @@ bool LiveRunner::place(const std::string& cond, const json& pool) {
     } else {
         engine().place_maker_quote(cond, "yes", opts);
     }
+    emit_qd("active", "");
     return true;
 }
 
@@ -890,6 +1094,37 @@ FillsByToken LiveRunner::poll_fills() {
         rf.price = f.value("price", 0.0);
         const std::string tok = f.value("token_id", std::string{});
         out[tok].push_back(rf);
+        // FillContext 遥测: 每笔新成交的逆选画面 (成交时盘口在手)。成交前 mid / bleed / inventory_after / 腿
+        // 不在此处计算 (在 engine accrual 内) → 置 0/""; book_bid/ask/mid_after 从当前 WS 盘口取 (若有)。
+        if (publisher_ && !tok.empty()) {
+            double bb = 0.0, ba = 0.0;
+            if (market_ch_) {
+                if (auto ob = market_ch_->get_book(tok)) {
+                    for (const auto& l : ob->bids)
+                        if (l.size > 0.0 && l.price > bb) bb = l.price;
+                    for (const auto& l : ob->asks)
+                        if (l.size > 0.0 && (ba == 0.0 || l.price < ba)) ba = l.price;
+                }
+            }
+            const double mid_after = (bb > 0.0 && ba > 0.0) ? (bb + ba) / 2.0 : 0.0;
+            publisher_->publish(telemetry::topic::kFillContext,
+                                {{"ts_ms", telemetry_wall_ms()},
+                                 {"condition_id", std::string{}},
+                                 {"question", std::string{}},
+                                 {"token", tok},
+                                 {"side", rf.side},
+                                 {"size", rf.size},
+                                 {"price", rf.price},
+                                 {"leg", std::string{}},
+                                 {"mid_before", 0.0},
+                                 {"mid_after", mid_after},
+                                 {"bleed", 0.0},
+                                 {"book_bid", bb},
+                                 {"book_ask", ba},
+                                 {"book_seq", 0},
+                                 {"inventory_after", 0.0},
+                                 {"reconciled", false}});
+        }
         // 防churn熔断: 这个 token 60s 内被吃太多次 = 被趋势反复扫 (逆选 churn) → KILL (现实, 不依赖账本)。
         if (!tok.empty()) {
             const double tn = mono_now();
@@ -1053,6 +1288,7 @@ std::optional<std::string> LiveRunner::kill_check() {
                 equity_dd_count_++;
             else
                 equity_dd_count_ = 0;
+            publish_risk_equity();  // live: 用刚刷新的链上真实净值/持仓发 Equity/Position/Risk 遥测 (15s)
         }
         if (equity_dd_count_ >= 3) {
             char buf[200];
@@ -1069,7 +1305,102 @@ std::optional<std::string> LiveRunner::kill_check() {
             return "wallet-floor (real USDC $" + std::to_string(*bal) + ")";
         }
     }
+    // DRY-LIVE 遥测: live 的 15s 链上刷新块此时不跑 (cfg_.live=false), 但仪表盘要持续有净值/持仓/风险态 →
+    // 用账本派生数据 (engine summary + 模拟两腿库存) 按 15s 节流发。绝不影响交易 (纯发布)。
+    if (publisher_ && !cfg_.live) {
+        const double nowt = mono_now();
+        if (nowt - last_tel_check_ >= 15.0) {
+            last_tel_check_ = nowt;
+            publish_risk_equity();
+        }
+    }
     return std::nullopt;
+}
+
+// EquitySnapshot + Position(每非零腿) + RiskState 遥测。live 用刚刷新的链上真实数据 (last_usdc_/
+// last_pos_value_/last_chain_positions_); dry-live 这些为 0/空 → 用 engine 账本 summary + 模拟两腿库存。
+void LiveRunner::publish_risk_equity() {
+    if (!publisher_ || engine_ == nullptr) return;
+    json summary;
+    try {
+        summary = engine_->get_maker_summary();
+    } catch (...) {
+        summary = json::object();
+    }
+    const double reward_accrued = summary.value("reward_income", 0.0);
+    const double realized_bleed = summary.value("adverse_bleed", 0.0);
+    const double day_pnl = summary.value("net_maker_pnl", 0.0);
+    const double committed = summary.value("committed_capital", 0.0);
+    const double equity = last_usdc_ + last_pos_value_;
+    const int64_t ts = telemetry_wall_ms();
+
+    publisher_->publish(telemetry::topic::kEquitySnapshot,
+                        {{"ts_ms", ts},
+                         {"usdc", last_usdc_},
+                         {"position_value", last_pos_value_},
+                         {"equity", equity},
+                         {"equity_dd_count", equity_dd_count_},
+                         {"day_pnl", day_pnl},
+                         {"realized_bleed", realized_bleed},
+                         {"reward_accrued", reward_accrued}});
+
+    // Position: live → 链上真实持仓 (token->size); dry-live (链上未刷新) → engine 账本两腿模拟库存。
+    if (!last_chain_positions_.empty()) {
+        for (const auto& [tok, psz] : last_chain_positions_) {
+            if (std::abs(psz) < 1e-9) continue;
+            publisher_->publish(telemetry::topic::kPosition, {{"ts_ms", ts},
+                                                              {"condition_id", std::string{}},
+                                                              {"token", tok},
+                                                              {"outcome", std::string{}},
+                                                              {"size", psz},
+                                                              {"value", 0.0}});
+        }
+    } else {
+        try {
+            for (const auto& q : engine_->get_maker_quotes()) {
+                const double qmid = q.value("last_mid", 0.0);
+                const double inv = q.value("inventory", 0.0);
+                const double cinv = q.value("complement_inventory", 0.0);
+                const std::string qcond = q.value("market_condition_id", std::string{});
+                if (std::abs(inv) >= 1e-9)
+                    publisher_->publish(telemetry::topic::kPosition,
+                                        {{"ts_ms", ts},
+                                         {"condition_id", qcond},
+                                         {"token", q.value("token_id", std::string{})},
+                                         {"outcome", "yes"},
+                                         {"size", inv},
+                                         {"value", inv * qmid}});
+                if (std::abs(cinv) >= 1e-9)
+                    publisher_->publish(telemetry::topic::kPosition,
+                                        {{"ts_ms", ts},
+                                         {"condition_id", qcond},
+                                         {"token", q.value("complement_token_id", std::string{})},
+                                         {"outcome", "no"},
+                                         {"size", cinv},
+                                         {"value", cinv * (1.0 - qmid)}});
+            }
+        } catch (...) {
+        }
+    }
+
+    // RiskState: 各刹车/预算的连续态 (best-effort)。
+    long churn = 0;
+    for (const auto& [tok, dq] : fill_times_) churn = std::max(churn, static_cast<long>(dq.size()));
+    long chain_nonzero = 0;
+    for (const auto& [tok, psz] : last_chain_positions_)
+        if (std::abs(psz) >= 1.0) ++chain_nonzero;
+    const bool kill_armed = cfg_.live && usdc_start_.has_value();
+    const double drawdown = (cfg_.live && usdc_start_) ? std::max(0.0, *usdc_start_ - equity)
+                                                       : std::max(0.0, -day_pnl);
+    publisher_->publish(telemetry::topic::kRiskState,
+                        {{"ts_ms", ts},
+                         {"kill_armed", kill_armed},
+                         {"equity_dd_count", equity_dd_count_},
+                         {"churn_count", churn},
+                         {"chain_flat_guard", chain_nonzero > 0},
+                         {"capital_deployed", committed},
+                         {"tail_budget_used", 0.0},
+                         {"drawdown", drawdown}});
 }
 
 void LiveRunner::shutdown() {

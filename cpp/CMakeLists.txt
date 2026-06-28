@@ -179,6 +179,18 @@ target_compile_features(pmm_core PUBLIC cxx_std_20)
 # OpenSSL::SSL: PersistentHttps 的 TLS 客户端 (带 openssl 头路径 + libssl/libcrypto)。
 target_link_libraries(pmm_core PUBLIC pmm_crypto SQLite::SQLite3 nlohmann_json OpenSSL::SSL CURL::libcurl)
 
+# ---- git commit 溯源 (ConfigSnapshot.git_commit): configure 时取短哈希烤进 pmm_core ----
+# 反映 configure 时的 HEAD (干净的 git-reset 部署足够); 取不到则不定义 → runner 发 ""。
+execute_process(
+    COMMAND git -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse --short HEAD
+    OUTPUT_VARIABLE PMM_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(PMM_GIT_COMMIT)
+    target_compile_definitions(pmm_core PRIVATE PMM_GIT_COMMIT="${PMM_GIT_COMMIT}")
+endif()
+
 # ---- Fast-DDS 链接 (仅 WITH_TELEMETRY=ON): 生成头 include 路径 + 编译开关 + fastdds/fastcdr ----
 if(WITH_TELEMETRY)
     # 生成的 PubSubTypes/CdrAux 含 eProsima 内部转换, -Wconversion/-Wold-style-cast 会大量误报 → 关警告。
