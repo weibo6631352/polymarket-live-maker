@@ -273,4 +273,12 @@ target_link_libraries(balance-check PRIVATE pmm_core)
 add_executable(flatten apps/flatten_main.cpp)
 target_link_libraries(flatten PRIVATE pmm_core)
 
+# ---- 遥测消费侧: telemetry_tap (Fast-DDS 订阅者 → stdout JSON; 仅 WITH_TELEMETRY) ----
+# 桥接 web 仪表盘 (ws_server.py) + 记录器 (recorder.py)。pmm_core PRIVATE 链 fastdds 不传递, 故显式再链。
+if(WITH_TELEMETRY)
+    add_executable(telemetry_tap telemetry/tap/tap.cpp)
+    target_include_directories(telemetry_tap PRIVATE ${TGEN})
+    target_link_libraries(telemetry_tap PRIVATE pmm_core fastdds fastcdr)
+endif()
+
 message(STATUS "pmm scaffold: crypto reuse + models + db (sqlite3) + smoke checks")
