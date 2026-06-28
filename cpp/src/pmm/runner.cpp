@@ -335,6 +335,44 @@ void LiveRunner::run() {
                 config_snapshot_["ts_ms"] = telemetry_wall_ms();
                 publisher_->publish(telemetry::topic::kConfigSnapshot, config_snapshot_);
             }
+            // PoolEval 全量重发 (~15s): 把缓存候选集 (report_.pools) 整体重发, 让任意时刻连上的外部 curator
+            // (curate_read) 都能立即拿到当前全量候选 —— 不必赶在 discovery 突发窗口内 (发现间隔 600s)。纯发
+            // 缓存, 不打 API。PoolEval 按 condition_id keyed → keyed reader 跨多次重发累积成"每池最新"全集。
+            if (publisher_ && now - last_pooleval_emit_ >= 15.0) {
+                last_pooleval_emit_ = now;
+                std::vector<rewards::PoolReport> snap;
+                {
+                    std::lock_guard<std::mutex> lk(report_mu_);
+                    snap = report_.pools;  // 拷出锁外发, 不长持 report_mu_
+                }
+                for (const auto& pr : snap) {
+                    const double vm =
+                        (pr.daily_vol_c && pr.max_spread_c > 0.0) ? *pr.daily_vol_c / pr.max_spread_c : 0.0;
+                    publisher_->publish(telemetry::topic::kPoolEval,
+                                        {{"ts_ms", telemetry_wall_ms()},
+                                         {"condition_id", pr.condition_id},
+                                         {"question", pr.question},
+                                         {"competitiveness", pr.competitiveness},
+                                         {"days_to_resolution", 0.0},
+                                         {"mid", pr.mid},
+                                         {"volume", pr.inband_notional},
+                                         {"reward_rate_per_day", pr.daily},
+                                         {"volume_24hr", pr.volume_24hr},
+                                         {"jump_verdict", pr.jump_verdict},
+                                         {"empty_band", pr.empty_band},
+                                         {"vol_mult", vm},
+                                         {"est_reward", pr.reward_per_day},
+                                         {"net_per_day", pr.reward_per_day},
+                                         {"safe_pass", true},
+                                         {"comp_pass", true},
+                                         {"mid_pass", true},
+                                         {"net_pass", true},
+                                         {"days_pass", true},
+                                         {"reward_pass", true},
+                                         {"selected", false},
+                                         {"reject_reason", std::string{}}});
+                }
+            }
             if (now - last_reeval >= cfg_.reeval_interval_s) {
                 tick_cooldowns();
                 reevaluate_held();

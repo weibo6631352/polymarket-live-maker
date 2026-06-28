@@ -106,6 +106,7 @@ private:
     double last_tel_check_{0.0};  // dry-live 净值/风险态遥测节流时刻 (live 走 kill_check 的 15s 链上块)
     nlohmann::json config_snapshot_;  // ConfigSnapshot 载荷 (启动构建; 周期重发, 防 DDS 发现竞态丢首发)
     double last_config_emit_{0.0};    // 上次 ConfigSnapshot 发布时刻 (节流 ~30s)
+    double last_pooleval_emit_{0.0};  // 上次 PoolEval 全量重发时刻 (节流 ~15s; 让任意时刻 curate_read 拿到全候选)
     std::unique_ptr<EventLog> events_;
     std::mutex submitter_mu_;  // 串行化 submitter 访问 (反射 + poll 线程)
 
