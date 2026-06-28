@@ -145,11 +145,7 @@ private:
     std::map<std::string, double> signal_v_;  // token -> max_spread_c (信号带宽); 与 reflex_refs_ 同锁
     std::mutex reflex_mu_;
 
-    // 预测信号: 在高频权威盘口 (REST resync) 上实时算 micro-price/OBI/μ̂, 存最新值。
-    // [待接线, 非废弃] signal_by_token_ 是"预测策略"读取的实时信号源 (micro-price 中心化 / 方向 skew /
-    // 预测撤单, 见量化备忘)。策略层尚未实现, 故现在只写不读; compute_book_signals 本身已在用 (盘口移动
-    // 唤醒 + 标定日志)。实现策略时从这里读 μ̂。
-    std::map<std::string, orderbook::BookSignals> signal_by_token_;
+    // 盘口信号 (micro-price/OBI) 在 REST resync 上实时算, 供 fade-on-imbalance + 标定日志 (telemetry) 用。
     std::map<std::string, double> signal_log_at_;  // token -> 上次记标定日志的单调时刻 (节流)
     std::map<std::string, double> fade_last_s_;     // token -> 上次 fade 的 mono 秒 (冷却: 防紧抖动)
     std::map<std::string, int> fade_since_poll_;    // token -> 自上次维护轮以来的 fade 次数 (signal_mu_ 下)

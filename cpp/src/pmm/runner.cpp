@@ -600,10 +600,6 @@ void LiveRunner::compute_and_store_signals(const std::string& token) {
     if (moved) wake_loop();
     const orderbook::BookSignals sig = orderbook::compute_book_signals(*ob, mid, v);
     if (!sig.valid) return;
-    {
-        std::lock_guard<std::mutex> lk(signal_mu_);
-        signal_by_token_[token] = sig;
-    }
     // fade-on-imbalance: micro-price 大幅偏离 mid / 强订单流失衡 = 毒流来袭 → 抢在 mid 越带前双边撤。
     // 研究 (IEX/Cont): 毒流集中在瞬间, 静态挂着 = 知情流的出口; OBI 解释 ~65% 短时移动。防御性拉单, 非预测 skew。
     {
