@@ -247,6 +247,7 @@ std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,
             sp.committed_capital = round_to(a.cap, 2);
             sp.est_daily_reward = round_to(share * a.p->daily, 4);  // 校准份额 × daily
             sp.risk_adj_score = round_to(a.score, 4);
+            sp.competitiveness = a.p->competitiveness;  // #3: 传给 placement 做 per-pool 竞争惩罚
             out.push_back(std::move(sp));
         }
         return out;
@@ -300,6 +301,7 @@ std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,
         sp.committed_capital = round_to(cap, 2);
         sp.est_daily_reward = round_to(share * p->daily, 4);
         sp.risk_adj_score = round_to(score, 4);
+        sp.competitiveness = p->competitiveness;  // #3: 传给 placement 做 per-pool 竞争惩罚
         selected.push_back(std::move(sp));
 
         spent += cap;

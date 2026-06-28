@@ -771,7 +771,7 @@ int Engine::reconcile_inventory(const std::map<std::string, double>& chain) {
 // ---- suggest_maker_half_spread ----
 
 json Engine::suggest_maker_half_spread(const std::string& slug_or_id, const std::string& outcome_in,
-                                       double cancel_efficiency, double poll_seconds) {
+                                       double cancel_efficiency, double poll_seconds, double competitiveness) {
     require_account();
     Market market = api_.get_market(slug_or_id);
     const std::string outcome = validate_outcome(outcome_in, &market);
@@ -788,8 +788,12 @@ json Engine::suggest_maker_half_spread(const std::string& slug_or_id, const std:
 
     // 利润校准: 真实竞争 ≈ 盘口快照竞争 / κ (毛估高估真实份额 4.2×)。充气 existing_qmin → 份额/奖励降到
     // 真实水平 → optimal_half_spread 求出更宽的最优半宽 (之前高估奖励 4.2× → 挂太紧 → 多被逆选)。
-    const double existing_qmin =
+    double existing_qmin =
         ob::book_inband_qmin(book, mid, pool->max_spread) / std::max(reward_calib_, 1e-6);
+    // #3 per-pool 竞争 (专家): 全局 κ 之上, 对 competitiveness > 参考的更挤池追加充气 (份额↓→挂宽/净负)。
+    // 保守: max(1,·) 从不放松到 κ 以下 (避免"放松安静池"的过度乐观——那半需真实结算数据校准)。
+    if (competitiveness > 0.0 && competitiveness_ref_ > 0.0)
+        existing_qmin *= std::max(1.0, competitiveness / competitiveness_ref_);
     std::vector<ob::PricePoint> history;
     try {
         history = api_.prices_history(token_id);

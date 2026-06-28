@@ -75,7 +75,8 @@ public:
     int reconcile_inventory(const std::map<std::string, double>& chain_positions);
 
     nlohmann::json suggest_maker_half_spread(const std::string& slug_or_id, const std::string& outcome = "yes",
-                                             double cancel_efficiency = 0.0, double poll_seconds = 60.0);
+                                             double cancel_efficiency = 0.0, double poll_seconds = 60.0,
+                                             double competitiveness = -1.0);
     std::vector<nlohmann::json> get_maker_quotes();
     std::optional<nlohmann::json> cancel_maker_quote(int quote_id);
     nlohmann::json get_maker_summary();
@@ -95,6 +96,8 @@ public:
     void set_chain_positions(const std::map<std::string, double>& cp) { chain_positions_ = cp; }
     // 跳变感知 bleed: 最优半宽里 σ 取 max(stdev-σ, w×最大单步移动), 把已显露的跳计进逆选成本 (毒池自动挂宽/净负)。
     void set_jump_vol_weight(double w) { jump_vol_weight_ = (w > 0.0) ? w : 0.0; }
+    // #3 per-pool 竞争参考: existing_qmin ×= max(1, competitiveness/ref) (对更挤的池追加惩罚; 保守, 不低于 κ)。
+    void set_competitiveness_ref(double r) { competitiveness_ref_ = (r > 0.0) ? r : 1.0; }
     // 注入实时 WS book 源 (新鲜且连接活时优先于 REST; nullptr = 总走 REST)。
     void set_book_source(ws::MarketChannel* s) noexcept { book_source_ = s; }
 
@@ -140,6 +143,7 @@ private:
     double reward_calib_{1.0};   // 利润校准 κ (真实/毛估); 1.0=不校准 (默认, 测试); runner 设为 ~0.237
     std::map<std::string, double> chain_positions_;  // 链上真实持仓 (token->size); 根因守卫: 持仓的池不报价
     double jump_vol_weight_{0.0};  // 跳变感知 bleed 权重 (σ 下限=w×最大单步移动); 0=纯 stdev (默认/测试)
+    double competitiveness_ref_{1.0};  // #3 per-pool 竞争参考 (existing_qmin ×= max(1, comp/ref))
     ws::MarketChannel* book_source_{nullptr};  // 实时 WS book (可选); nullptr = REST
 };
 

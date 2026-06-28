@@ -32,6 +32,9 @@ struct RunnerConfig {
     double extreme_mid_margin{0.2};   // 剔除 mid<0.2 或 >0.8 的近极端价池 (逆选/趋势源: South Korea)
     double jump_vol_weight{0.7};      // 跳变感知 bleed: σ 下限=w×最大单步移动 (毒池/新闻跳变自动挂宽/净负)
     bool net_edge_gate{true};         // 净边际门: 跳变感知 net=reward-bleed ≤ 0 的池不报价 (毒池自然出局)
+    double tail_budget{10.0};         // 尾部-VaR: 单池单次成交最坏损失 (size×k·σ) ≤ 此 $ 额; 连 min_size 都超→不报价
+    double tail_k_sigma{3.0};         // 最坏跳变 = k×σ (3σ 尾部); 与 jump_vol_weight 配合估单次成交尾部
+    double competitiveness_ref{1.0};  // #3 per-pool 竞争参考: existing_qmin ×= max(1, comp/ref) (挤池追加惩罚)
     int recenter_ticks{1};
     double min_days_to_resolution{10.0};  // 剔除 N 天内结算的池 (近结算=催化剂风险); 0=关
     double max_vol_mult{2.5};  // 剔除 实现日波动 > N×奖励带宽 的跳池; 0=关

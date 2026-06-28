@@ -37,7 +37,7 @@ json selected_to_json(const portfolio::SelectedPool& s) {
             {"size", s.size},             {"tick", s.tick},
             {"max_spread_c", s.max_spread_c}, {"half_spread_c", s.half_spread_c},
             {"committed_capital", s.committed_capital}, {"est_daily_reward", s.est_daily_reward},
-            {"risk_adj_score", s.risk_adj_score}};
+            {"risk_adj_score", s.risk_adj_score}, {"competitiveness", s.competitiveness}};
 }
 
 json pool_report_to_json(const rewards::PoolReport& p) {
@@ -143,6 +143,7 @@ void LiveRunner::run() {
     engine_->set_micro_center(cfg_.micro_center, cfg_.micro_gate_c, cfg_.micro_beta);
     engine_->set_reward_calib(cfg_.reward_calib);  // 利润校准 κ (真实/毛估 ~0.237)
     engine_->set_jump_vol_weight(cfg_.jump_vol_weight);  // 跳变感知 bleed (毒池自动挂宽/净负)
+    engine_->set_competitiveness_ref(cfg_.competitiveness_ref);  // #3 per-pool 竞争惩罚参考
     if (rate_limiter_) engine_->api().set_rate_limiter(rate_limiter_.get());
 
     if (cfg_.live) {
@@ -635,9 +636,11 @@ void LiveRunner::reselect() {
 
 bool LiveRunner::place(const std::string& cond, const json& pool) {
     double hs = pool.value("half_spread_c", 0.0);
+    double sigma_c = 0.0;
+    const double comp = pool.value("competitiveness", -1.0);  // #3: per-pool 竞争 (传给 suggest)
     if (cfg_.use_optimal_spread) {
         try {
-            const json rec = engine().suggest_maker_half_spread(cond, "yes", 0.0, cfg_.poll_seconds);
+            const json rec = engine().suggest_maker_half_spread(cond, "yes", 0.0, cfg_.poll_seconds, comp);
             // 净边际门 (专家 #2): 跳变感知 bleed 后 net=reward-bleed ≤ 0 → 奖励被逆选吃光 → 不报价, 让毒池
             // 自然出局 (取代手调 comp/mid 启发式)。rec 缺字段时默认放行 (不误杀)。
             if (cfg_.net_edge_gate && rec.value("net_per_day", 1.0) <= 0.0) {
@@ -647,12 +650,28 @@ bool LiveRunner::place(const std::string& cond, const json& pool) {
             }
             const double v = rec.value("half_spread_c", 0.0);
             if (v > 0.0) hs = v;
+            sigma_c = rec.value("sigma_c", 0.0);
         } catch (...) {
         }
     }
     MakerQuoteOpts opts;
     opts.half_spread_cents = hs;
-    const double sz = pool.value("size", 0.0);
+    double sz = pool.value("size", 0.0);
+    const double min_size = pool.value("min_size", 0.0);
+    // #4 尾部-VaR 限仓 (专家): 单次成交最坏损失 ≈ size × (k·σ)。$1k 无法分散尾部 → 限到 tail_budget。连 min_size
+    // 都超预算 (毒池/高波动) → 不报价; 否则把 size 压进预算 (但不低于 min_size, 否则拿不到奖励门)。
+    if (cfg_.tail_budget > 0.0 && sigma_c > 0.0) {
+        const double worst_move = cfg_.tail_k_sigma * sigma_c / 100.0;  // 价格分数 (σ 是 cents)
+        if (worst_move > 1e-9) {
+            if (min_size * worst_move > cfg_.tail_budget) {
+                std::fprintf(stderr, "tail-gate: %s min-tail $%.1f > budget $%.1f — not quoting\n",
+                             cond.substr(0, 10).c_str(), min_size * worst_move, cfg_.tail_budget);
+                return false;
+            }
+            const double max_sz = cfg_.tail_budget / worst_move;
+            if (sz > max_sz) sz = std::max(min_size, max_sz);
+        }
+    }
     if (sz > 0.0) opts.size = sz;
     if (use_live_path()) {
         engine().place_maker_quote_live(cond, [this](const json& a) { return locked_submit(a); }, "yes", opts);

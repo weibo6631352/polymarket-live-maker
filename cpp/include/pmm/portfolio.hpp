@@ -30,6 +30,7 @@ struct SelectedPool {
     double committed_capital{0.0};
     double est_daily_reward{0.0};
     double risk_adj_score{0.0};
+    double competitiveness{-1.0};  // PM market_competitiveness (传给 suggest_maker_half_spread 做 per-pool 竞争); -1=未知
 };
 
 struct SelectParams {
