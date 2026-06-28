@@ -696,6 +696,11 @@ void LiveRunner::rediscover() {
         }
         std::lock_guard<std::mutex> lk(report_mu_);
         std::fprintf(stderr, "discovery: %d safe of %d scored\n", report_.safe_count, report_.pools_scored);
+        if (std::getenv("LM_LOG_CANDIDATES") != nullptr)  // 候选转储 (语义选池/调试): 可做价位的候选池
+            for (const auto& pr : report_.pools)
+                if (pr.mid > 0.15 && pr.mid < 0.85)
+                    std::fprintf(stderr, "cand: %s mid=%.2f %s | %s\n", pr.condition_id.substr(0, 14).c_str(),
+                                 pr.mid, pr.jump_verdict.c_str(), pr.question.substr(0, 52).c_str());
         // DiscoveryScan 遥测 (漏斗粗粒度): scan 总览计数 + 耗时。逐原因 drop 计数 scan 未单列 → 0 (TODO)。
         if (publisher_)
             publisher_->publish(telemetry::topic::kDiscoveryScan,
@@ -838,7 +843,9 @@ void LiveRunner::reselect() {
     int n_placed = 0, n_lowrew = 0, n_budget = 0, n_failed = 0, n_lownet = 0;
     for (const auto& [cond, s] : want) {
         if (placed_.count(cond) != 0) continue;
-        if (s.value("est_daily_reward", 0.0) < cfg_.min_pool_reward) {
+        // 白名单池绕过低奖励跳过: LLM 选这些是冲"价差/行为盈余"(宽基散户流), 非流动性奖励 —— 奖励小不代表不该做。
+        if (cfg_.pool_whitelist.count(cond) == 0 &&
+            s.value("est_daily_reward", 0.0) < cfg_.min_pool_reward) {
             ++n_lowrew;
             continue;
         }
