@@ -27,14 +27,15 @@ struct RunnerConfig {
     // 把竞争对手分 existing_qmin 充气 1/κ → 估计份额/奖励降到真实水平 → 最优半宽变宽 (少被逆选)。
     double reward_calib{0.237};
     bool waterfill{true};       // 注水配资 (边际 κ×奖励/$ 均衡; 取代 capital∝score)
-    double compet_aversion{0.3};  // PM market_competitiveness 惩罚 (挤池降权; 实测 0.46–4.2)
-    double max_competitiveness{1.5};  // 硬剔除 competitiveness>此值的拥挤池 (churn源: Tyler/Romania)
+    // 竞争度三件套 (惩罚/截断/per-pool) 已废弃: market_competitiveness 是冗余且错标定的代理 (盘口
+    // book_inband_qmin 已直接测竞争), 旧值把 comp 1.5–5 的付费池误排。默认 0 = 关; 竞争交给盘口 + 净边际门。
+    double compet_aversion{0.0};      // 废弃 (默认关)
+    double max_competitiveness{0.0};  // 废弃 (默认关; 毒池由 jump-σ + 净边际门内生剔除)
     double extreme_mid_margin{0.2};   // 剔除 mid<0.2 或 >0.8 的近极端价池 (逆选/趋势源: South Korea)
     double jump_vol_weight{0.7};      // 跳变感知 bleed: σ 下限=w×最大单步移动 (毒池/新闻跳变自动挂宽/净负)
     bool net_edge_gate{true};         // 净边际门: 跳变感知 net=reward-bleed ≤ 0 的池不报价 (毒池自然出局)
     double tail_budget{10.0};         // 尾部-VaR: 单池单次成交最坏损失 (size×k·σ) ≤ 此 $ 额; 连 min_size 都超→不报价
     double tail_k_sigma{3.0};         // 最坏跳变 = k×σ (3σ 尾部); 与 jump_vol_weight 配合估单次成交尾部
-    double competitiveness_ref{1.0};  // #3 per-pool 竞争参考: existing_qmin ×= max(1, comp/ref) (挤池追加惩罚)
     int recenter_ticks{1};
     double min_days_to_resolution{10.0};  // 剔除 N 天内结算的池 (近结算=催化剂风险); 0=关
     double max_vol_mult{2.5};  // 剔除 实现日波动 > N×奖励带宽 的跳池; 0=关

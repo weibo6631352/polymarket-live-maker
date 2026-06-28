@@ -55,14 +55,13 @@ RunnerConfig RunnerConfig::from_env() {
     c.micro_beta = f("LM_MICRO_BETA", 0.1);
     c.reward_calib = f("LM_REWARD_CALIB", 0.237);  // 利润校准 κ (真实/毛估; 实测 ~0.237)
     c.waterfill = flag_ne("LM_WATERFILL", "0", "1");  // 注水配资 (默认开)
-    c.compet_aversion = f("LM_COMPET_AVERSION", 0.3);  // 竞争度惩罚 (挤池降权)
-    c.max_competitiveness = f("LM_MAX_COMPETITIVENESS", 1.5);  // 硬剔除拥挤池 (churn源)
+    c.compet_aversion = f("LM_COMPET_AVERSION", 0.0);  // 废弃 (竞争交给盘口 + 净边际门)
+    c.max_competitiveness = f("LM_MAX_COMPETITIVENESS", 0.0);  // 废弃 (默认关)
     c.extreme_mid_margin = f("LM_EXTREME_MID_MARGIN", 0.2);  // 剔除近极端价池 (逆选/趋势源)
     c.jump_vol_weight = f("LM_JUMP_VOL_WEIGHT", 0.7);  // 跳变感知 bleed (σ 下限=w×最大单步移动)
     c.net_edge_gate = flag_ne("LM_NET_EDGE_GATE", "0", "1");  // 净边际 ≤ 0 的池不报价 (默认开)
     c.tail_budget = f("LM_TAIL_BUDGET", 10.0);          // 尾部-VaR 预算 ($/单次成交最坏损失)
     c.tail_k_sigma = f("LM_TAIL_K_SIGMA", 3.0);         // 最坏跳变 = k×σ
-    c.competitiveness_ref = f("LM_COMPET_REF", 1.0);    // #3 per-pool 竞争参考
     // R2(数学家): mid 仅 0.5¢ 偏移 share 即掉 ~36%, 且 mid 单调漂(重挂会"粘住"不抖) → 早重挂找回份额。
     c.recenter_ticks = i("LM_RECENTER_TICKS", 1);
     c.min_days_to_resolution = f("LM_MIN_DAYS_TO_RESOLUTION", 10.0);  // R2: 剔除近结算催化剂池
