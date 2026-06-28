@@ -508,6 +508,10 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
         if (max_vol_mult > 0.0 && whitelist.count(r->condition_id) == 0 && vol_c > 0.0 &&
             r->max_spread_c > 0.0 && vol_c > max_vol_mult * r->max_spread_c) {
             ++vol_dropped;
+            if (std::getenv("LM_LOG_DROPPED") != nullptr)
+                std::fprintf(stderr, "drop-jumpy: %s vol=%.1f band=%.1f %s\n",
+                             r->condition_id.substr(0, 16).c_str(), vol_c, r->max_spread_c,
+                             r->question.substr(0, 44).c_str());
             continue;
         }
         // B: 接 PM 权威数据。剔除快发完的池 (剩余已知且 <$1 = 没价值); 竞争度附上供选池/感知。
