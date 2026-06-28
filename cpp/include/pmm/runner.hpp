@@ -151,6 +151,7 @@ private:
     // 唤醒 + 标定日志)。实现策略时从这里读 μ̂。
     std::map<std::string, orderbook::BookSignals> signal_by_token_;
     std::map<std::string, double> signal_log_at_;  // token -> 上次记标定日志的单调时刻 (节流)
+    std::map<std::string, double> fade_last_s_;     // token -> 上次 fade 的 mono 秒 (冷却: 防紧抖动)
     std::mutex signal_mu_;
     void compute_and_store_signals(const std::string& token);
 

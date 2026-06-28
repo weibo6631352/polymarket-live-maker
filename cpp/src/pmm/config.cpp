@@ -66,6 +66,7 @@ RunnerConfig RunnerConfig::from_env() {
     c.recenter_ticks = i("LM_RECENTER_TICKS", 1);
     c.fade_micro_c = f("LM_FADE_MICRO_C", 1.0);  // fade-on-imbalance: micro-price 偏离阈 (¢)
     c.fade_obi = f("LM_FADE_OBI", 0.7);          // fade-on-imbalance: 订单流失衡阈 (0-1)
+    c.fade_cooldown_s = f("LM_FADE_COOLDOWN_S", 10.0);  // fade 后冷却秒 (防紧抖动)
     {  // 语义选池白名单 (逗号分隔 condition_id; 空=不限)
         std::stringstream ss(pmm::env::str("LM_POOL_WHITELIST"));
         std::string id;

@@ -608,9 +608,24 @@ void LiveRunner::compute_and_store_signals(const std::string& token) {
     // 研究 (IEX/Cont): 毒流集中在瞬间, 静态挂着 = 知情流的出口; OBI 解释 ~65% 短时移动。防御性拉单, 非预测 skew。
     {
         const double micro_lead_c = std::abs(sig.micro_price - mid) * 100.0;
-        if ((cfg_.fade_micro_c > 0.0 && micro_lead_c >= cfg_.fade_micro_c) ||
-            (cfg_.fade_obi > 0.0 && std::abs(sig.obi_band) >= cfg_.fade_obi))
-            reflex_pull(token, "fade_imbalance", mid);
+        const bool imbalanced =
+            (cfg_.fade_micro_c > 0.0 && micro_lead_c >= cfg_.fade_micro_c) ||
+            (cfg_.fade_obi > 0.0 && std::abs(sig.obi_band) >= cfg_.fade_obi);
+        // 冷却: 撤后 fade_cooldown_s 秒内同 token 不再 fade。否则 fade→撤→wake 重挂→失衡还在→立刻再 fade
+        // = 亚秒紧抖动, 报价永远歇不住、永远不成交 (实盘实测 25 次/2min)。冷却让重挂的单歇住、能被吃。
+        if (imbalanced) {
+            const double now_s = mono_now();
+            bool do_fade = false;
+            {
+                std::lock_guard<std::mutex> lk(signal_mu_);
+                auto it = fade_last_s_.find(token);
+                if (it == fade_last_s_.end() || now_s - it->second >= cfg_.fade_cooldown_s) {
+                    fade_last_s_[token] = now_s;
+                    do_fade = true;
+                }
+            }
+            if (do_fade) reflex_pull(token, "fade_imbalance", mid);
+        }
     }
     // 标定日志: 每 token 节流 1s 记一次 (10Hz 全记会爆; 1s 给更细标定); mid/micro_price/obi + 下一周期 Δmid 供回归。
     const double now_m = mono_now();

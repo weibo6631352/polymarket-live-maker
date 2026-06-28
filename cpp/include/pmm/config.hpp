@@ -51,6 +51,7 @@ struct RunnerConfig {
     // 短时移动的领先信号 (OBI 解释 ~65%) → 抢在 mid 越带前双边撤, 躲开毒流。防御性拉单, 非预测 skew。
     double fade_micro_c{1.0};  // micro-price 偏离 mid ≥ 此 ¢ → 抢撤; 0=关
     double fade_obi{0.7};      // |带内订单流失衡| (0-1) ≥ 此值 → 抢撤; 0=关
+    double fade_cooldown_s{10.0};  // fade 后冷却秒: 同 token 撤后此时长内不再 fade (防 place→fade→replace 亚秒紧抖动, 让重挂单歇住能成交)
     double min_days_to_resolution{10.0};  // 剔除 N 天内结算的池 (近结算=催化剂风险); 0=关
     double max_vol_mult{2.5};  // 剔除 实现日波动 > N×奖励带宽 的跳池; 0=关
     double crossing_cost_c{0.0};
