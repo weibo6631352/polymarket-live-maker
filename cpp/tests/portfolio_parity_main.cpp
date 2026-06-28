@@ -105,40 +105,6 @@ int main() {
     Approx(selw.front().committed_capital >= selw.back().committed_capital ? 1 : 0, 1,
            "wf concentrates capital in higher-marginal (top) pool");
 
-    // ---- 竞争加权: PM market_competitiveness 惩罚 (挤池降权; 实测 0.46–4.2) ----
-    {
-        R::PoolReport quiet = pool("Quiet pool", "0xq1", "tq", 100, 10.0);
-        R::PoolReport crowded = pool("Crowded pool", "0xc2", "tc", 100, 10.0);
-        quiet.competitiveness = 0.47;   // 清静 (实测好选)
-        crowded.competitiveness = 4.2;  // 极挤 (实测烂选)
-        const double sq = P::risk_adjusted_score(quiet, 7.0, 1.0, 0.3);
-        const double sc = P::risk_adjusted_score(crowded, 7.0, 1.0, 0.3);
-        Approx(sc < sq ? 1 : 0, 1, "compet: crowded pool (comp 4.2) scores below quiet (comp 0.47), same reward");
-        const double s0q = P::risk_adjusted_score(quiet, 7.0, 1.0, 0.0);
-        const double s0c = P::risk_adjusted_score(crowded, 7.0, 1.0, 0.0);
-        Approx(std::abs(s0q - s0c) < 1e-9 ? 1 : 0, 1, "compet: aversion=0 -> no penalty (parity preserved)");
-    }
-
-    // ---- 硬剔除拥挤池: max_competitiveness 上限 (churn源, 即使高奖励也剔除) ----
-    {
-        R::ScanResult rep2;
-        R::PoolReport q1 = pool("Quiet alpha pool", "0xqa", "tqa", 100, 10.0);
-        R::PoolReport c1 = pool("Crowded beta pool", "0xcb", "tcb", 500, 50.0);  // 高奖励但极挤
-        q1.competitiveness = 0.47;
-        c1.competitiveness = 4.2;
-        rep2.pools = {q1, c1};
-        P::SelectParams mp;
-        mp.max_competitiveness = 1.5;
-        const auto sm = P::select_pools(rep2, mp);
-        bool hc = false, hq = false;
-        for (const auto& s : sm) {
-            if (s.token == "tcb") hc = true;
-            if (s.token == "tqa") hq = true;
-        }
-        Approx(hc ? 0 : 1, 1, "max_competitiveness: crowded pool (comp 4.2, high reward) excluded");
-        Approx(hq ? 1 : 0, 1, "max_competitiveness: quiet pool (comp 0.47) kept");
-    }
-
     // ---- 助手 ----
     const auto toks = P::significant_tokens("Will the Fed cut rates in December?");
     const std::set<std::string> want_toks = {"cut", "december", "fed", "rates"};

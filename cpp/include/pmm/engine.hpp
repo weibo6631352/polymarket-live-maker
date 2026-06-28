@@ -75,8 +75,7 @@ public:
     int reconcile_inventory(const std::map<std::string, double>& chain_positions);
 
     nlohmann::json suggest_maker_half_spread(const std::string& slug_or_id, const std::string& outcome = "yes",
-                                             double cancel_efficiency = 0.0, double poll_seconds = 60.0,
-                                             double competitiveness = -1.0);
+                                             double cancel_efficiency = 0.0, double poll_seconds = 60.0);
     std::vector<nlohmann::json> get_maker_quotes();
     std::optional<nlohmann::json> cancel_maker_quote(int quote_id);
     nlohmann::json get_maker_summary();

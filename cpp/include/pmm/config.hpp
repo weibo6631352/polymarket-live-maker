@@ -27,10 +27,7 @@ struct RunnerConfig {
     // 把竞争对手分 existing_qmin 充气 1/κ → 估计份额/奖励降到真实水平 → 最优半宽变宽 (少被逆选)。
     double reward_calib{0.237};
     bool waterfill{true};       // 注水配资 (边际 κ×奖励/$ 均衡; 取代 capital∝score)
-    // 竞争度三件套 (惩罚/截断/per-pool) 已废弃: market_competitiveness 是冗余且错标定的代理 (盘口
-    // book_inband_qmin 已直接测竞争), 旧值把 comp 1.5–5 的付费池误排。默认 0 = 关; 竞争交给盘口 + 净边际门。
-    double compet_aversion{0.0};      // 废弃 (默认关)
-    double max_competitiveness{0.0};  // 废弃 (默认关; 毒池由 jump-σ + 净边际门内生剔除)
+    // 竞争交给盘口 (book_inband_qmin 直接测) + 净边际门 + 跳变 σ; 不再用 market_competitiveness (冗余代理)。
     double extreme_mid_margin{0.2};   // 剔除 mid<0.2 或 >0.8 的近极端价池 (逆选/趋势源: South Korea)
     double jump_vol_weight{0.7};      // 跳变感知 bleed: σ 下限=w×最大单步移动 (毒池/新闻跳变自动挂宽/净负)
     bool net_edge_gate{true};         // 净边际门: 跳变感知 net=reward-bleed ≤ 0 的池不报价 (毒池自然出局)

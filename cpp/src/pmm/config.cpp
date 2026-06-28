@@ -55,8 +55,6 @@ RunnerConfig RunnerConfig::from_env() {
     c.micro_beta = f("LM_MICRO_BETA", 0.1);
     c.reward_calib = f("LM_REWARD_CALIB", 0.237);  // 利润校准 κ (真实/毛估; 实测 ~0.237)
     c.waterfill = flag_ne("LM_WATERFILL", "0", "1");  // 注水配资 (默认开)
-    c.compet_aversion = f("LM_COMPET_AVERSION", 0.0);  // 废弃 (竞争交给盘口 + 净边际门)
-    c.max_competitiveness = f("LM_MAX_COMPETITIVENESS", 0.0);  // 废弃 (默认关)
     c.extreme_mid_margin = f("LM_EXTREME_MID_MARGIN", 0.2);  // 剔除近极端价池 (逆选/趋势源)
     c.jump_vol_weight = f("LM_JUMP_VOL_WEIGHT", 0.7);  // 跳变感知 bleed (σ 下限=w×最大单步移动)
     c.net_edge_gate = flag_ne("LM_NET_EDGE_GATE", "0", "1");  // 净边际 ≤ 0 的池不报价 (默认开)

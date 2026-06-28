@@ -30,7 +30,6 @@ struct SelectedPool {
     double committed_capital{0.0};
     double est_daily_reward{0.0};
     double risk_adj_score{0.0};
-    double competitiveness{-1.0};  // PM market_competitiveness (传给 suggest_maker_half_spread 做 per-pool 竞争); -1=未知
 };
 
 struct SelectParams {
@@ -46,8 +45,6 @@ struct SelectParams {
     double max_pool_frac{0.25};
     bool waterfill{false};        // true: 注水配资 (边际 κ×奖励/$ 均衡); false: capital∝score (旧, parity)
     double reward_calib{1.0};     // 利润校准 κ (注水按真实份额; 竞争充气 1/κ)
-    double compet_aversion{0.0};  // PM market_competitiveness 惩罚强度 (挤池降权; 0=关, parity)
-    double max_competitiveness{0.0};  // 硬剔除 competitiveness > 此值的拥挤池 (churn源); 0=关 (parity)
     double extreme_mid_margin{0.0};   // 剔除 mid<margin 或 >1-margin 的近极端价池 (逆选/趋势源); 0=关 (parity)
     std::set<std::string> cooldown;
 };
@@ -56,7 +53,7 @@ struct SelectParams {
 [[nodiscard]] std::set<std::string> significant_tokens(const std::string& question);
 [[nodiscard]] std::string cluster_key(const std::string& question);  // "" = 无匹配
 [[nodiscard]] double risk_adjusted_score(const rewards::PoolReport& p, double risk_tolerance_days,
-                                         double chop_aversion = 1.0, double compet_aversion = 0.0);
+                                         double chop_aversion = 1.0);
 
 // 按风险调整收益在预算内挑出可投、分散的账本。
 [[nodiscard]] std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,

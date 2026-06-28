@@ -37,7 +37,7 @@ json selected_to_json(const portfolio::SelectedPool& s) {
             {"size", s.size},             {"tick", s.tick},
             {"max_spread_c", s.max_spread_c}, {"half_spread_c", s.half_spread_c},
             {"committed_capital", s.committed_capital}, {"est_daily_reward", s.est_daily_reward},
-            {"risk_adj_score", s.risk_adj_score}, {"competitiveness", s.competitiveness}};
+            {"risk_adj_score", s.risk_adj_score}};
 }
 
 json pool_report_to_json(const rewards::PoolReport& p) {
@@ -560,8 +560,6 @@ void LiveRunner::reselect() {
     p.max_token_overlap = cfg_.max_token_overlap;
     p.waterfill = cfg_.waterfill;        // 注水配资 (边际 κ×奖励/$ 均衡)
     p.reward_calib = cfg_.reward_calib;  // 利润校准 κ
-    p.compet_aversion = cfg_.compet_aversion;  // 竞争度惩罚 (挤池降权)
-    p.max_competitiveness = cfg_.max_competitiveness;  // 硬剔除拥挤池 (churn源)
     p.extreme_mid_margin = cfg_.extreme_mid_margin;    // 剔除近极端价池 (逆选/趋势源)
     p.cooldown = cd;
     {
@@ -636,10 +634,9 @@ void LiveRunner::reselect() {
 bool LiveRunner::place(const std::string& cond, const json& pool) {
     double hs = pool.value("half_spread_c", 0.0);
     double sigma_c = 0.0;
-    const double comp = pool.value("competitiveness", -1.0);  // #3: per-pool 竞争 (传给 suggest)
     if (cfg_.use_optimal_spread) {
         try {
-            const json rec = engine().suggest_maker_half_spread(cond, "yes", 0.0, cfg_.poll_seconds, comp);
+            const json rec = engine().suggest_maker_half_spread(cond, "yes", 0.0, cfg_.poll_seconds);
             // 净边际门 (专家 #2): 跳变感知 bleed 后 net=reward-bleed ≤ 0 → 奖励被逆选吃光 → 不报价, 让毒池
             // 自然出局 (取代手调 comp/mid 启发式)。rec 缺字段时默认放行 (不误杀)。
             if (cfg_.net_edge_gate && rec.value("net_per_day", 1.0) <= 0.0) {
