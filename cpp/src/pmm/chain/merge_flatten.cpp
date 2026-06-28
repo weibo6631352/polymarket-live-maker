@@ -6,6 +6,7 @@
 
 #include "pmm/chain/ctf.hpp"
 #include "pmm/chain/polygon_rpc.hpp"
+#include "pmm/chain/proxy_exec.hpp"
 #include "pmm/env.hpp"
 
 namespace pmm::chain {
@@ -64,6 +65,7 @@ FlattenDecision EvaluateFlatten(double n_shares, const std::vector<BookLevel>& y
 MergeExecutor::MergeExecutor() : arm_(Arm()), rpc_url_(pmm::env::str("POLYGON_RPC_URL")) {
     funder_lc_ = pmm::env::str("POLYMARKET_FUNDER");
     for (char& c : funder_lc_) c = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
+    sig_type_ = pmm::env::i("POLYMARKET_SIGNATURE_TYPE", 0);
 }
 
 ArmStatus MergeExecutor::Arm() {
@@ -73,19 +75,58 @@ ArmStatus MergeExecutor::Arm() {
     return a;
 }
 
+MergeRoute MergeExecutor::RouteFor(const MergeQuote& q) const {
+    MergeRoute r;
+    r.signature_type = sig_type_;
+    // 内层 mergePositions calldata — 两种路由通用。
+    const std::vector<std::uint8_t> inner =
+        ctf::EncodeMergePositionsBinary(q.collateral, q.condition_id, q.amount);
+
+    crypto::Address ctf_addr{};
+    if (!crypto::AddressFromHex(ctf::kCtfAddress, ctf_addr)) {
+        r.reason = "cannot parse CTF address";
+        return r;
+    }
+
+    if (sig_type_ == 0) {
+        // EOA 模式: token 由 EOA 自持 → 直发 CTF。
+        r.to = ctf_addr;
+        r.calldata = inner;
+        r.ok = true;
+        return r;
+    }
+    if (sig_type_ == 1) {
+        // POLY_PROXY: EOA → ProxyWalletFactory.proxy([{CALL, CTF, 0, inner}]) → 代理烧自己的 token。
+        if (!crypto::AddressFromHex(proxy::kProxyWalletFactory, r.to)) {
+            r.reason = "cannot parse ProxyWalletFactory address";
+            return r;
+        }
+        r.calldata = proxy::EncodeProxyExec(ctf_addr, inner);
+        r.via_proxy = true;
+        r.ok = true;
+        return r;
+    }
+    // sig_type==2 (GNOSIS_SAFE) 等: 另一套架构, 本仓库未实现 → 不构造任何 tx。
+    r.reason = "unsupported POLYMARKET_SIGNATURE_TYPE=" + std::to_string(sig_type_) +
+               " (only 0=EOA / 1=POLY_PROXY routed)";
+    return r;
+}
+
 bool MergeExecutor::BuildAndSign(const MergeQuote& q, const crypto::Bytes32& private_key,
                                  std::uint64_t nonce, std::uint64_t max_priority_fee_wei,
                                  std::uint64_t max_fee_wei, std::uint64_t gas_limit,
                                  SignedTx& out) const {
+    const MergeRoute route = RouteFor(q);
+    if (!route.ok) return false;  // 不支持的 sig_type → 绝不构造错误 tx
     Eip1559Tx tx;
     tx.chain_id = ctf::kPolygonChainId;
     tx.nonce = nonce;
     tx.max_priority_fee_per_gas = max_priority_fee_wei;
     tx.max_fee_per_gas = max_fee_wei;
     tx.gas_limit = gas_limit;
-    if (!crypto::AddressFromHex(ctf::kCtfAddress, tx.to)) return false;
+    tx.to = route.to;  // sig0=CTF, sig1=ProxyWalletFactory
     tx.value = 0;
-    tx.data = ctf::EncodeMergePositionsBinary(q.collateral, q.condition_id, q.amount);
+    tx.data = route.calldata;  // sig0=inner merge, sig1=proxy([{CALL,CTF,0,inner}])
     return SignTx(tx, private_key, out);
 }
 
@@ -93,11 +134,19 @@ nlohmann::json MergeExecutor::MaybeMerge(const MergeQuote& q,
                                          const crypto::Bytes32& private_key) const {
     nlohmann::json r;
     r["executed"] = false;
-    const auto cd = ctf::EncodeMergePositionsBinary(q.collateral, q.condition_id, q.amount);
-    r["calldata"] = to_hex(cd.data(), cd.size());
+    // 按 sig_type 选路由 (sig0=EOA→CTF, sig1=EOA→ProxyWalletFactory→CTF)。
+    const MergeRoute route = RouteFor(q);
     r["amount"] = q.amount;
+    r["signature_type"] = route.signature_type;
+    r["via_proxy"] = route.via_proxy;
     r["decision_on"] = arm_.decision_on;
     r["real_funds_armed"] = arm_.real_funds_armed;
+    if (!route.ok) {
+        r["reason"] = route.reason;
+        return r;
+    }
+    r["to"] = to_hex(route.to.data(), 20);
+    r["calldata"] = to_hex(route.calldata.data(), route.calldata.size());
 
     if (!arm_.decision_on) {
         r["reason"] = "LM_FLATTEN_VIA_MERGE not set (merge route disabled)";
@@ -115,8 +164,7 @@ nlohmann::json MergeExecutor::MaybeMerge(const MergeQuote& q,
         r["reason"] = "cannot derive EOA";
         return r;
     }
-    // !! 路由警告 (见头文件): sig_type=1/2 下 token 由 funder 代理持有, EOA 直发 CTF 会销毁不到任何 token。
-    //    此 from=eoa 路径只对 EOA 模式 (sig_type=0) 正确; 代理模式需先包一层代理工厂 exec (尚未构建)。
+    // from = 签名 EOA (即工厂路由所依据的 msg.sender); to = 路由目标 (sig1 下为 ProxyWalletFactory)。
     const std::string from = to_hex(eoa.data(), 20);
     const auto nonce = rpc.TransactionCount(from);
     const auto tip = rpc.MaxPriorityFeePerGas();
@@ -127,11 +175,8 @@ nlohmann::json MergeExecutor::MaybeMerge(const MergeQuote& q,
     }
     const std::uint64_t priority = tip.value_or(30'000'000'000ULL);  // 30 gwei 兜底
     const std::uint64_t max_fee = *gp * 2ULL + priority;             // 经典 2× base + tip
-    const std::vector<std::uint8_t> data =
-        ctf::EncodeMergePositionsBinary(q.collateral, q.condition_id, q.amount);
-    crypto::Address to_addr{};
-    (void)crypto::AddressFromHex(ctf::kCtfAddress, to_addr);
-    const auto gas_est = rpc.EstimateGas(from, to_hex(to_addr.data(), 20), data);
+    const std::vector<std::uint8_t>& data = route.calldata;
+    const auto gas_est = rpc.EstimateGas(from, to_hex(route.to.data(), 20), data);
     const std::uint64_t gas = gas_est.value_or(200'000ULL) * 12ULL / 10ULL;  // +20% 余量
 
     SignedTx signed_tx;

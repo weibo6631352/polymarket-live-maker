@@ -7,14 +7,16 @@
 //   LM_FLATTEN_VIA_MERGE=1   → 决策评估开 (仍只是 DRY: 构建+签名+打印, 不发链)
 //   LM_MERGE_ARM_REAL_FUNDS=1→ 真实上链开 (须与上面同时开 + 用户监督); 否则永不 eth_sendRawTransaction
 //
-// !! 实盘账户路由警告 (真实测试前必须解决) !!
-//   本账户 POLYMARKET_SIGNATURE_TYPE=1 (POLY_PROXY): 仓位 ERC1155 由 funder 代理钱包 0x78dE 持有,
-//   而非签名 EOA (0xb9c8)。CTF.mergePositions 销毁"调用者"的 token —— 因此必须由代理 0x78dE 发起。
-//   下面 BuildAndSign/MaybeMerge 构造的是 EOA 直发 CTF 的 tx (from=EOA), 只对 EOA 模式 (sig_type=0,
-//   token 由 EOA 自持) 正确; sig_type=1/2 下需把 mergePositions calldata 再包一层 Polymarket 代理工厂
-//   的 exec 调用 (proxy([{to:CTF,value:0,data:inner}])) 由 EOA 发给工厂合约 —— 这层 (工厂地址+ABI)
-//   尚未构建, 是实盘 merge 的关键缺口。inner mergePositions 编码 (ctf::EncodeMergePositions) 两种路由
-//   通用、已 DRY 验证。
+// 实盘账户路由 (POLYMARKET_SIGNATURE_TYPE 决定, 已构建+DRY 验证):
+//   sig_type=0 (EOA)       : token 由 EOA 自持 → tx.to=CTF, tx.data=mergePositions(inner)。
+//   sig_type=1 (POLY_PROXY): token 由 funder 代理钱包 0x78dE 持有 (本账户)。CTF.mergePositions 烧
+//     "调用者"的 token, 故必须由代理发起。控制 EOA (0xb9c8) 直接调用 ProxyWalletFactory.proxy([{CALL,
+//     CTF, 0, inner}]); 工厂按 msg.sender 路由到该 EOA 的确定性代理 (= 0x78dE), 代理再 CALL CTF →
+//     mergePositions 的 caller = 代理 → 烧代理 token。✓  (外层编码见 chain/proxy_exec.hpp, 已 DRY 验证;
+//     CREATE2 离线证明 EOA 0xb9c8 的代理 == funder 0x78dE。)
+//   sig_type=2 (GNOSIS_SAFE): 另一套架构 (Safe execTransaction), 本仓库不支持 → RouteFor 返回 ok=false,
+//     绝不误用 POLY_PROXY 工厂构造错误 tx。本账户非此类型。
+//   from = EOA (签名 EOA, 即工厂路由所依据的 msg.sender) — 两种路由皆然。
 //
 // 红线: 私钥只读不持有不 log。R-12: 非 hot path。
 #pragma once
@@ -64,14 +66,28 @@ struct ArmStatus {
     bool real_funds_armed{false}; // LM_MERGE_ARM_REAL_FUNDS
 };
 
+// 一笔 merge tx 的 (to, calldata) 路由结果 (按 POLYMARKET_SIGNATURE_TYPE 选)。
+struct MergeRoute {
+    crypto::Address to{};                 // tx.to: sig0=CTF, sig1=ProxyWalletFactory
+    std::vector<std::uint8_t> calldata;   // tx.data: sig0=inner merge, sig1=proxy([{CALL,CTF,0,inner}])
+    int signature_type{0};
+    bool via_proxy{false};                // sig_type==1 (外层包了一层 factory.proxy)
+    bool ok{false};                       // false → 不支持 (如 sig_type==2) / 地址解析失败
+    std::string reason;                   // ok=false 时的原因
+};
+
 class MergeExecutor {
 public:
-    MergeExecutor();  // 读双闸 flag + POLYGON_RPC_URL + funder (POLYMARKET_FUNDER)
+    MergeExecutor();  // 读双闸 flag + POLYGON_RPC_URL + funder + POLYMARKET_SIGNATURE_TYPE
 
     [[nodiscard]] static ArmStatus Arm();       // 读两个闸的当前状态
     [[nodiscard]] bool DecisionEnabled() const { return arm_.decision_on; }
+    [[nodiscard]] int SignatureType() const { return sig_type_; }
 
-    // 构建 + 签名一笔 merge tx (纯 DRY, 不发网络)。可单测 (raw 逐字节匹配 eth_account)。
+    // 按 sig_type 选路由 (to + calldata)。sig0=EOA 直发 CTF; sig1=EOA→factory.proxy→CTF; sig2=不支持。
+    [[nodiscard]] MergeRoute RouteFor(const MergeQuote& q) const;
+
+    // 构建 + 签名一笔 merge tx (纯 DRY, 不发网络)。按 RouteFor 选 to/calldata; 路由不支持→返回 false。
     [[nodiscard]] bool BuildAndSign(const MergeQuote& q, const crypto::Bytes32& private_key,
                                     std::uint64_t nonce, std::uint64_t max_priority_fee_wei,
                                     std::uint64_t max_fee_wei, std::uint64_t gas_limit,
@@ -86,6 +102,7 @@ private:
     ArmStatus arm_;
     std::string rpc_url_;
     std::string funder_lc_;
+    int sig_type_{0};  // POLYMARKET_SIGNATURE_TYPE (0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE)
 };
 
 }  // namespace pmm::chain

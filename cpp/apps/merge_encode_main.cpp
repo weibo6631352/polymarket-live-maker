@@ -17,6 +17,7 @@
 #include "pmm/app/dotenv.hpp"
 #include "pmm/chain/ctf.hpp"
 #include "pmm/chain/eip1559.hpp"
+#include "pmm/chain/merge_flatten.hpp"
 #include "pmm/crypto/eip712_v2.hpp"
 #include "pmm/crypto/secp256k1_signer.hpp"
 #include "pmm/env.hpp"
@@ -94,7 +95,18 @@ int main(int argc, char** argv) {
     pmm::crypto::Address eoa{};
     (void)pmm::crypto::DeriveAddress(pk, eoa);
 
-    const auto data = pmm::chain::ctf::EncodeMergePositionsBinary(collateral, condition, amount);
+    // 按 POLYMARKET_SIGNATURE_TYPE 选路由: sig0 → CTF 直发; sig1 → ProxyWalletFactory.proxy(...)。
+    pmm::chain::MergeExecutor exec;
+    pmm::chain::MergeQuote q;
+    q.collateral = collateral;
+    q.condition_id = condition;
+    q.amount = amount;
+    const pmm::chain::MergeRoute route = exec.RouteFor(q);
+    if (!route.ok) {
+        std::fprintf(stderr, "route not supported: %s\n", route.reason.c_str());
+        return 1;
+    }
+    const auto& data = route.calldata;
 
     pmm::chain::Eip1559Tx tx;
     tx.chain_id = pmm::chain::ctf::kPolygonChainId;
@@ -102,7 +114,7 @@ int main(int argc, char** argv) {
     tx.max_priority_fee_per_gas = tip_gwei * 1'000'000'000ULL;
     tx.max_fee_per_gas = maxfee_gwei * 1'000'000'000ULL;
     tx.gas_limit = gas;
-    (void)pmm::crypto::AddressFromHex(pmm::chain::ctf::kCtfAddress, tx.to);
+    tx.to = route.to;  // sig0=CTF, sig1=ProxyWalletFactory
     tx.value = 0;
     tx.data = data;
 
@@ -112,6 +124,10 @@ int main(int argc, char** argv) {
     std::printf("=== CTF mergePositions DRY encode (NO broadcast) ===\n");
     std::printf("signer EOA   : %s%s\n", Hex(eoa.data(), 20).c_str(),
                 real_key ? " (REAL key)" : " (TEST key 0x46*32)");
+    std::printf("sig_type     : %d%s\n", exec.SignatureType(),
+                route.via_proxy ? " (POLY_PROXY → factory.proxy wrapper)" : " (EOA direct)");
+    std::printf("tx.to        : %s%s\n", Hex(route.to.data(), 20).c_str(),
+                route.via_proxy ? " (ProxyWalletFactory)" : " (CTF)");
     std::printf("CTF contract : %.*s\n", static_cast<int>(pmm::chain::ctf::kCtfAddress.size()),
                 pmm::chain::ctf::kCtfAddress.data());
     std::printf("collateral   : %.*s\n", static_cast<int>(pmm::chain::ctf::kUsdcE.size()),

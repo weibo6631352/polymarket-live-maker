@@ -16,8 +16,11 @@
 #include "pmm/chain/ctf.hpp"
 #include "pmm/chain/eip1559.hpp"
 #include "pmm/chain/merge_flatten.hpp"
+#include "pmm/chain/proxy_exec.hpp"
 #include "pmm/chain/rlp.hpp"
 #include "pmm/crypto/eip712_v2.hpp"
+
+#include <cstdlib>  // setenv/unsetenv (route-by-sig_type test)
 
 namespace {
 
@@ -119,9 +122,10 @@ int main() {
         Check(Hex(s.raw) == kRefRawNonce1, "raw tx(nonce=1, yParity=1) == reference");
     }
 
-    // ---- 4) MergeExecutor::BuildAndSign 走 CTF + EIP-1559 同一路径 ----
+    // ---- 4) MergeExecutor::BuildAndSign 走 CTF + EIP-1559 同一路径 (sig_type=0 默认) ----
     {
-        MergeExecutor exec;  // 默认双闸 OFF
+        unsetenv("POLYMARKET_SIGNATURE_TYPE");  // 默认 → sig_type=0 (EOA 直发 CTF)
+        MergeExecutor exec;                     // 默认双闸 OFF
         MergeQuote q;
         q.collateral = collateral;
         q.condition_id = condition;
@@ -129,7 +133,85 @@ int main() {
         SignedTx s;
         Check(exec.BuildAndSign(q, pk, 7, 30'000'000'000ULL, 100'000'000'000ULL, 250'000, s) &&
                   Hex(s.raw) == kRefRawNonce7,
-              "MergeExecutor::BuildAndSign == reference");
+              "MergeExecutor::BuildAndSign(sig0) == EOA-direct reference");
+    }
+
+    // ---- 4b) sig_type=1 (POLY_PROXY) 外层包装: proxy((uint8,address,uint256,bytes)[]) ----
+    {
+        // selector == py-builder-relayer-client encode/proxy.py。
+        Check(Hex(proxy::ProxySelector().data(), 4) == kRefProxySelector,
+              "proxy() selector == 34ee9791 (py-builder-relayer-client)");
+
+        Address ctf_addr{};
+        Check(pmm::crypto::AddressFromHex(ctf::kCtfAddress, ctf_addr), "parse CTF address (proxy.to)");
+
+        // 包裹本测试的 inner merge calldata → 与 eth-abi gold reference 逐字节匹配。
+        const auto wrapped = proxy::EncodeProxyExec(ctf_addr, calldata);
+        Check(Hex(wrapped) == kRefProxyExecMerge, "EncodeProxyExec(CTF, merge) == eth-abi reference");
+        Check(wrapped.size() == 548, "proxy-exec(merge) length == 548 bytes");
+
+        // 跨校验: 用 SDK 自带 fixture (USDC.e approve) 走同一编码器 → 证明与 SDK 编码器逐字节同源。
+        Address usdce{};
+        (void)pmm::crypto::AddressFromHex(ctf::kUsdcE, usdce);
+        std::vector<std::uint8_t> approve;
+        {
+            const std::string a =
+                "095ea7b30000000000000000000000004d97dcd97ec945f40cf65f87097ace5ea0476045"
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+            for (std::size_t i = 0; i + 1 < a.size(); i += 2) {
+                auto hv = [](char ch) {
+                    return ch <= '9' ? ch - '0' : (ch <= 'F' ? ch - 'A' + 10 : ch - 'a' + 10);
+                };
+                approve.push_back(static_cast<std::uint8_t>((hv(a[i]) << 4) | hv(a[i + 1])));
+            }
+        }
+        Check(Hex(proxy::EncodeProxyExec(usdce, approve)) == kRefProxyExecApprove,
+              "EncodeProxyExec(USDC.e, approve) == py-builder-relayer-client fixture");
+    }
+
+    // ---- 4c) 路由按 POLYMARKET_SIGNATURE_TYPE 选择 (sig0=CTF 直发, sig1=ProxyWalletFactory) ----
+    {
+        MergeQuote q;
+        q.collateral = collateral;
+        q.condition_id = condition;
+        q.amount = 1'000'000;
+
+        setenv("POLYMARKET_SIGNATURE_TYPE", "0", 1);
+        {
+            MergeExecutor exec0;
+            const MergeRoute r0 = exec0.RouteFor(q);
+            Address ctf_addr{};
+            (void)pmm::crypto::AddressFromHex(ctf::kCtfAddress, ctf_addr);
+            Check(r0.ok && !r0.via_proxy && Hex(r0.to.data(), 20) == Hex(ctf_addr.data(), 20),
+                  "RouteFor(sig0): to == CTF, not via proxy");
+            Check(Hex(r0.calldata) == kRefCalldata, "RouteFor(sig0): calldata == inner merge");
+        }
+
+        setenv("POLYMARKET_SIGNATURE_TYPE", "1", 1);
+        {
+            MergeExecutor exec1;
+            const MergeRoute r1 = exec1.RouteFor(q);
+            Address fac{};
+            (void)pmm::crypto::AddressFromHex(proxy::kProxyWalletFactory, fac);
+            Check(r1.ok && r1.via_proxy && Hex(r1.to.data(), 20) == Hex(fac.data(), 20),
+                  "RouteFor(sig1): to == ProxyWalletFactory, via proxy");
+            Check(Hex(r1.calldata) == kRefProxyExecMerge, "RouteFor(sig1): calldata == proxy-wrapped");
+            // BuildAndSign 在 sig1 下也成功 (走工厂 to + 包装 data)。
+            SignedTx s1;
+            Check(exec1.BuildAndSign(q, pk, 7, 30'000'000'000ULL, 100'000'000'000ULL, 250'000, s1),
+                  "BuildAndSign(sig1) signs proxy-routed tx ok");
+        }
+
+        setenv("POLYMARKET_SIGNATURE_TYPE", "2", 1);
+        {
+            MergeExecutor exec2;  // GNOSIS_SAFE: 未实现 → ok=false, 不构造任何 tx
+            const MergeRoute r2 = exec2.RouteFor(q);
+            SignedTx s2;
+            Check(!r2.ok && !exec2.BuildAndSign(q, pk, 7, 30'000'000'000ULL, 100'000'000'000ULL,
+                                                250'000, s2),
+                  "RouteFor(sig2=GNOSIS_SAFE): unsupported → ok=false, BuildAndSign refuses");
+        }
+        unsetenv("POLYMARKET_SIGNATURE_TYPE");  // 复位, 不影响后续测试
     }
 
     // ---- 5) 平仓决策 (穿盘卖 vs 买互补+merge) 纯函数 ----

@@ -105,6 +105,7 @@ add_library(pmm_crypto STATIC
     # CTF merge 平仓: 纯 ABI calldata 编码 + RLP + EIP-1559 tx 签名 (复用 keccak/secp256k1, 无 curl)。
     src/pmm/chain/rlp.cpp
     src/pmm/chain/ctf.cpp
+    src/pmm/chain/proxy_exec.cpp  # sig_type=1 代理 exec 包装 (纯 keccak+abi 编码)
     src/pmm/chain/eip1559.cpp
 )
 target_compile_features(pmm_crypto PUBLIC cxx_std_20)
