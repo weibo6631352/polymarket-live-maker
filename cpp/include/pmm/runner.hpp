@@ -79,6 +79,9 @@ private:
     [[nodiscard]] std::optional<nlohmann::json> rescore(const std::string& cond, const std::string& token,
                                                         double own_size, double own_hs);
     void exit_held(const std::string& cond, const nlohmann::json& quote, const std::string& reason);
+    // 有效白名单成员判定 = cfg_.pool_whitelist (静态种子) ∪ dyn_whitelist_ (curator 经 DDS 实时推)。
+    // 所有"白名单绕过启发式"的检查都过这里, 确保 DDS 推入的池与静态名单池享同样豁免。短锁读 dyn_whitelist_。
+    [[nodiscard]] bool is_effectively_whitelisted(const std::string& cond);
     [[nodiscard]] bool use_live_path() const;
     bool place(const std::string& cond, const nlohmann::json& pool);  // false = 净边际门跳过 (未下单)
     [[nodiscard]] FillsByToken poll_fills();

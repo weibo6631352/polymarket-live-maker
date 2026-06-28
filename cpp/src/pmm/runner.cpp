@@ -918,7 +918,8 @@ void LiveRunner::reselect() {
     for (const auto& [cond, s] : want) {
         if (placed_.count(cond) != 0) continue;
         // 白名单池绕过低奖励跳过: LLM 选这些是冲"价差/行为盈余"(宽基散户流), 非流动性奖励 —— 奖励小不代表不该做。
-        if (cfg_.pool_whitelist.count(cond) == 0 &&
+        // 有效白名单 (静态 ∪ DDS 动态): curate_push 推入的池落在 dyn_whitelist_, 必须与静态名单池一样豁免。
+        if (!is_effectively_whitelisted(cond) &&
             s.value("est_daily_reward", 0.0) < cfg_.min_pool_reward) {
             ++n_lowrew;
             continue;
@@ -1013,13 +1014,8 @@ bool LiveRunner::place(const std::string& cond, const json& pool) {
             // 净边际门 (专家 #2): 跳变感知 bleed 后 net=reward-bleed ≤ 0 → 奖励被逆选吃光 → 不报价, 让毒池
             // 自然出局 (取代手调 comp/mid 启发式)。rec 缺字段时默认放行 (不误杀)。
             // 白名单池绕过净门: κ-bleed 模型保守/跳变盲, 会把宽基好池判净负误杀; LLM 判过 + fade 管逆选。
-            // 有效白名单 = 静态 ∪ LLM 动态 (dyn_whitelist_ 与 report_ 同锁; place 不持 report_mu_, 短锁查)。
-            bool whitelisted = cfg_.pool_whitelist.count(cond) != 0;
-            if (!whitelisted) {
-                std::lock_guard<std::mutex> lk(report_mu_);
-                whitelisted = dyn_whitelist_.count(cond) != 0;
-            }
-            if (cfg_.net_edge_gate && !whitelisted && rec.value("net_per_day", 1.0) <= 0.0) {
+            // 有效白名单 = 静态 ∪ DDS 动态 (is_effectively_whitelisted 短锁查 dyn_whitelist_)。
+            if (cfg_.net_edge_gate && !is_effectively_whitelisted(cond) && rec.value("net_per_day", 1.0) <= 0.0) {
                 std::fprintf(stderr, "net-gate: %s net/day=%.3f <= 0 (bleed eats reward) — not quoting\n",
                              cond.substr(0, 10).c_str(), rec.value("net_per_day", 0.0));
                 net_gate_pass = false;
@@ -1191,12 +1187,21 @@ std::optional<std::string> LiveRunner::degrade_reason(const json& fresh) {
     return std::nullopt;
 }
 
+bool LiveRunner::is_effectively_whitelisted(const std::string& cond) {
+    // 静态种子先查 (无锁), 命中即真; 否则短锁查 curator 经 DDS 热更的 dyn_whitelist_ (与 report_ 同锁)。
+    // 调用点 (reselect ADD / place / exit_held) 均不持 report_mu_ → 短锁无重入死锁。
+    if (cfg_.pool_whitelist.count(cond) != 0) return true;
+    std::lock_guard<std::mutex> lk(report_mu_);
+    return dyn_whitelist_.count(cond) != 0;
+}
+
 void LiveRunner::exit_held(const std::string& cond, const json& quote, const std::string& reason) {
     // 白名单池: LLM 选它是冲价差/行为盈余, 不因"奖励份额塌缩/跳动"这类启发式退出 (否则会 place→exit 抖动)。
     // 功能性退出 (empty_band/one_sided/fast_book) 仍生效 —— 盘口真不可做时照退。
     static const std::set<std::string> kRewardOrJumpExits = {
         "reward_collapsed", "daily_cut", "share_collapsed", "jump_risk_rose"};
-    if (cfg_.pool_whitelist.count(cond) != 0 && kRewardOrJumpExits.count(reason) != 0) {
+    // 有效白名单 (静态 ∪ DDS 动态): DDS 推入的池也免于"奖励塌缩/跳动"启发式退出 (cheap 的 reason 集先判, 再短锁)。
+    if (kRewardOrJumpExits.count(reason) != 0 && is_effectively_whitelisted(cond)) {
         return;
     }
     static const std::set<std::string> kCooldownReasons = {
