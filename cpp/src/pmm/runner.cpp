@@ -198,16 +198,18 @@ void LiveRunner::run() {
 #else
         const std::string git_commit;
 #endif
-        publisher_->publish(telemetry::topic::kConfigSnapshot,
-                            {{"ts_ms", telemetry_wall_ms()},
-                             {"git_commit", git_commit},
-                             {"capital", cfg_.capital},
-                             {"max_loss", cfg_.max_loss},
-                             {"jump_vol_weight", cfg_.jump_vol_weight},
-                             {"max_competitiveness", cfg_.max_competitiveness},
-                             {"max_pool_frac", cfg_.max_pool_frac},
-                             {"tail_budget", cfg_.tail_budget},
-                             {"extra_json", extra.dump()}});
+        // 存为成员后周期重发 (主循环): 一次性首发会输给 DDS writer/reader 发现竞态 (发布在匹配完成前 → 丢);
+        // 周期重发还让后加入的仪表盘客户端拿到当前配置。
+        config_snapshot_ = {{"ts_ms", telemetry_wall_ms()},
+                            {"git_commit", git_commit},
+                            {"capital", cfg_.capital},
+                            {"max_loss", cfg_.max_loss},
+                            {"jump_vol_weight", cfg_.jump_vol_weight},
+                            {"max_competitiveness", cfg_.max_competitiveness},
+                            {"max_pool_frac", cfg_.max_pool_frac},
+                            {"tail_budget", cfg_.tail_budget},
+                            {"extra_json", extra.dump()}};
+        publisher_->publish(telemetry::topic::kConfigSnapshot, config_snapshot_);
     }
 
     if (cfg_.live) {
@@ -306,6 +308,12 @@ void LiveRunner::run() {
                                      {"n_quotes", static_cast<int>(placed_.size())},
                                      {"n_pools_tracked", static_cast<int>(placed_.size())},
                                      {"book_resync_rps", last_rps_}});
+            }
+            // ConfigSnapshot 周期重发 (~30s): 防首发输给 DDS 发现竞态 + 让后加入的客户端拿到当前配置。
+            if (publisher_ && !config_snapshot_.is_null() && now - last_config_emit_ >= 30.0) {
+                last_config_emit_ = now;
+                config_snapshot_["ts_ms"] = telemetry_wall_ms();
+                publisher_->publish(telemetry::topic::kConfigSnapshot, config_snapshot_);
             }
             if (now - last_reeval >= cfg_.reeval_interval_s) {
                 tick_cooldowns();

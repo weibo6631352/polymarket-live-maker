@@ -103,6 +103,8 @@ private:
     double last_heartbeat_{0.0};  // 上次心跳发布时刻 (节流 ~2s)
     std::atomic<long long> book_seq_{0};  // OrderBookL2 单调序号 (全局; 每 token 子序列仍单调, 供丢更检测)
     double last_tel_check_{0.0};  // dry-live 净值/风险态遥测节流时刻 (live 走 kill_check 的 15s 链上块)
+    nlohmann::json config_snapshot_;  // ConfigSnapshot 载荷 (启动构建; 周期重发, 防 DDS 发现竞态丢首发)
+    double last_config_emit_{0.0};    // 上次 ConfigSnapshot 发布时刻 (节流 ~30s)
     std::unique_ptr<EventLog> events_;
     std::mutex submitter_mu_;  // 串行化 submitter 访问 (反射 + poll 线程)
 
