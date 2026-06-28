@@ -29,9 +29,9 @@ struct RunnerConfig {
     bool waterfill{true};       // 注水配资 (边际 κ×奖励/$ 均衡; 取代 capital∝score)
     // 竞争交给盘口 (book_inband_qmin 直接测) + 净边际门 + 跳变 σ; 不再用 market_competitiveness (冗余代理)。
     double extreme_mid_margin{0.2};   // 剔除 mid<0.2 或 >0.8 的近极端价池 (逆选/趋势源: South Korea)
-    double jump_vol_weight{0.7};      // 跳变感知 bleed: σ 下限=w×最大单步移动 (毒池/新闻跳变自动挂宽/净负)
+    double jump_vol_weight{0.4};      // 跳变感知 bleed (异常跳变才抬 σ); 0.4 不过度挂宽 → 份额↑ 多赚奖励
     bool net_edge_gate{true};         // 净边际门: 跳变感知 net=reward-bleed ≤ 0 的池不报价 (毒池自然出局)
-    double tail_budget{10.0};         // 尾部-VaR: 单池单次成交最坏损失 (size×k·σ) ≤ 此 $ 额; 连 min_size 都超→不报价
+    double tail_budget{20.0};         // 尾部-VaR: 单次成交最坏损失 ≤ 此 $ 额 (bug 修后逆选有界, 放宽→更大 size/更多池)
     double tail_k_sigma{3.0};         // 最坏跳变 = k×σ (3σ 尾部); 与 jump_vol_weight 配合估单次成交尾部
     int recenter_ticks{1};
     double min_days_to_resolution{10.0};  // 剔除 N 天内结算的池 (近结算=催化剂风险); 0=关
