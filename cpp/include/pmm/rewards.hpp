@@ -102,18 +102,20 @@ public:
     explicit RewardsClient(RateLimiter* rate_limiter = nullptr, std::size_t pool_size = SCAN_WORKERS);
 
     [[nodiscard]] std::vector<nlohmann::json> sampling_markets(int max_pages = 100);
-    // B: /rewards/markets/multi → {condition_id: RewardMulti(竞争度, 剩余额度$, 24h量)}; 选池用 PM 权威数据。
-    // max_pages=20: 官方约 1875 个奖励池跨 ~15 页(每页 500); 4 页只覆盖 ~27% → comp/vol 大量缺失。20 页全覆盖。
-    [[nodiscard]] std::map<std::string, RewardMulti> reward_markets_multi(int max_pages = 20);
+    // B: 经 gamma /markets?condition_ids= 按本轮候选池精确批量查 竞争度(competitive)+24h量(volume24hr)。
+    // 取代 /rewards/markets/multi: 那端点上万市场、bot 的近期池落在分页尾部、且不支持 by-id 过滤 → 实测整轮取空。
+    [[nodiscard]] std::map<std::string, RewardMulti> gamma_enrich(const std::vector<std::string>& condition_ids);
     [[nodiscard]] nlohmann::json book(const std::string& token_id);
     [[nodiscard]] std::vector<orderbook::PricePoint> prices_history(const std::string& token_id,
                                                                     const std::string& interval = "max",
                                                                     int fidelity = 1440);
 
 private:
-    nlohmann::json get(const std::string& path);  // 经 rate_limiter (low priority) + 池
+    nlohmann::json get(const std::string& path);        // clob.polymarket.com (rate_limiter + 连接池)
+    nlohmann::json gamma_get(const std::string& path);  // gamma-api.polymarket.com (公共, 同 rate_limiter)
     RateLimiter* rate_limiter_;
     pmm::net::HttpsPool clob_;
+    pmm::net::HttpsPool gamma_;
 };
 
 // scan 结果。

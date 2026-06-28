@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "pmm/jsonutil.hpp"
@@ -28,6 +29,7 @@ using nlohmann::json;
 namespace {
 
 constexpr char kClobHost[] = "clob.polymarket.com";
+constexpr char kGammaHost[] = "gamma-api.polymarket.com";
 
 // Python round(x, n) / round(x): round-half-to-even (FE_TONEAREST 默认)。
 double roundn(double x, int n) {
@@ -287,7 +289,7 @@ std::optional<PoolReport> score_pool(const RewardConfig& pool, const json& book,
 // ---------------------------------------------------------------------------
 
 RewardsClient::RewardsClient(RateLimiter* rate_limiter, std::size_t pool_size)
-    : rate_limiter_(rate_limiter), clob_(kClobHost, pool_size) {}
+    : rate_limiter_(rate_limiter), clob_(kClobHost, pool_size), gamma_(kGammaHost, pool_size) {}
 
 json RewardsClient::get(const std::string& path) {
     if (rate_limiter_ != nullptr) {
@@ -306,20 +308,37 @@ json RewardsClient::get(const std::string& path) {
     }
 }
 
-std::map<std::string, RewardMulti> RewardsClient::reward_markets_multi(int max_pages) {
+json RewardsClient::gamma_get(const std::string& path) {
+    if (rate_limiter_ != nullptr) rate_limiter_->acquire(path, "GET");
+    const net::HttpResponse r = gamma_.Get(path);
+    if (r.status == 0) throw ApiError("Gamma API request failed");
+    if (r.status >= 400)
+        throw ApiError(std::format("Gamma API error: {} {}", r.status, r.body.substr(0, 200)), r.status);
+    try {
+        return json::parse(r.body);
+    } catch (...) {
+        throw ApiError("Gamma API: invalid JSON response");
+    }
+}
+
+// 按本轮候选池 condition_id 批量精确查 gamma /markets → {cond: RewardMulti(competitive, -1, volume24hr)}。
+// gamma 的 condition_ids 是可重复 query 参数 (逗号形式不行); 只收回包里 condition_id 命中请求集的市场 (防相关市场污染)。
+std::map<std::string, RewardMulti> RewardsClient::gamma_enrich(const std::vector<std::string>& condition_ids) {
     std::map<std::string, RewardMulti> out;
-    std::string cursor;
-    int pages = 0;
-    const char* stop = "max_pages";
+    if (condition_ids.empty()) return out;
+    const std::unordered_set<std::string> want(condition_ids.begin(), condition_ids.end());
+    constexpr std::size_t kBatch = 25;  // 25×66字符 ≈ 1.9KB URL, 远低于上限; 277 池 ≈ 12 批
+    int batches = 0;
     std::string last_err;
-    for (int i = 0; i < max_pages; ++i) {
-        std::string path = "/rewards/markets/multi?page_size=500";
-        if (!cursor.empty()) path += "&next_cursor=" + cursor;
+    for (std::size_t i = 0; i < condition_ids.size(); i += kBatch) {
+        std::string path = "/markets?limit=500";
+        for (std::size_t j = i; j < std::min(i + kBatch, condition_ids.size()); ++j)
+            path += "&condition_ids=" + condition_ids[j];
         json data;
         bool ok = false;
-        for (int attempt = 0; attempt < 3 && !ok; ++attempt) {  // 瞬时失败重试 2 次, 不因单次抖动/限流丢整轮 comp/vol
+        for (int attempt = 0; attempt < 2 && !ok; ++attempt) {  // 瞬时失败重试 1 次, 不因单次抖动丢这批
             try {
-                data = get(path);
+                data = gamma_get(path);
                 ok = true;
             } catch (const std::exception& e) {
                 last_err = e.what();
@@ -327,58 +346,34 @@ std::map<std::string, RewardMulti> RewardsClient::reward_markets_multi(int max_p
                 last_err = "unknown";
             }
         }
-        if (!ok) {
-            stop = "get_failed";
-            break;  // 连重试也失败才放弃 (下个发现周期自愈)
-        }
-        ++pages;
-        const json* d = data.is_object() ? ju::find(data, "data") : nullptr;
-        const json page = (d != nullptr) ? *d : (data.is_array() ? data : json::array());
-        if (!page.is_array() || page.empty()) {
-            stop = "empty_page";
-            break;
-        }
-        for (const auto& m : page) {
-            // 每市场独立 try: 单条字段类型异常 (如 volume_24hr 偶为 null/字符串) 不能掀翻整轮增强。
+        if (!ok) continue;
+        ++batches;
+        // gamma /markets 顶层即市场数组 (亦兼容 {data:[...]} 包裹)。
+        const json* dp = (data.is_object() && data.contains("data")) ? ju::find(data, "data") : nullptr;
+        const json arr = (dp != nullptr && dp->is_array()) ? *dp : (data.is_array() ? data : json::array());
+        for (const auto& m : arr) {
             try {
-                const json* cv = ju::find(m, "condition_id");
+                const json* cv = ju::find(m, "conditionId");
                 if (cv == nullptr) continue;
                 const std::string cond = ju::to_str(*cv);
-                if (cond.empty()) continue;
+                if (want.count(cond) == 0) continue;  // 只收请求的池 (gamma 可能回相关市场)
                 double compet = 0.0;
-                if (const json* c = ju::find(m, "market_competitiveness"))
+                if (const json* c = ju::find(m, "competitive"))
                     if (c->is_number()) compet = ju::to_double(*c);
-                double remaining = -1.0;
-                if (const json* rc = ju::find(m, "rewards_config")) {
-                    if (rc->is_array() && !rc->empty()) {
-                        remaining = 0.0;
-                        for (const auto& cfg : *rc)
-                            if (const json* rem = ju::find(cfg, "remaining_reward_amount"))
-                                if (rem->is_number()) remaining += ju::to_double(*rem);
-                    }
-                }
                 double vol24 = 0.0;
-                if (const json* v = ju::find(m, "volume_24hr"))
+                if (const json* v = ju::find(m, "volume24hr"))
                     if (v->is_number()) vol24 = ju::to_double(*v);
-                out[cond] = RewardMulti{compet, remaining, vol24};
+                out[cond] = RewardMulti{compet, -1.0, vol24};  // gamma 无 remaining_reward → -1 (不触发 depleted 剔除)
             } catch (const std::exception& e) {
                 if (last_err.empty()) last_err = std::string("mkt:") + e.what();
             } catch (...) {
                 if (last_err.empty()) last_err = "mkt:unknown";
             }
         }
-        std::string nxt;
-        if (data.is_object())
-            if (const json* n = ju::find(data, "next_cursor"))
-                if (n->is_string()) nxt = ju::to_str(*n);
-        if (nxt.empty() || nxt == "LTE=" || nxt == cursor) {
-            stop = "cursor_end";
-            break;
-        }
-        cursor = nxt;
     }
-    std::fprintf(stderr, "reward_multi: %zu markets / %d pages (stop=%s%s%s)\n", out.size(), pages, stop,
-                 last_err.empty() ? "" : " err=", last_err.empty() ? "" : last_err.substr(0, 70).c_str());
+    std::fprintf(stderr, "gamma_enrich: %zu/%zu pools enriched over %d batches%s%s\n", out.size(),
+                 condition_ids.size(), batches, last_err.empty() ? "" : " err=",
+                 last_err.empty() ? "" : last_err.substr(0, 60).c_str());
     return out;
 }
 
@@ -521,11 +516,17 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
         for (auto& t : ths) t.join();
     }
 
-    // B: PM 官方权威 竞争度 + 池剩余额度 + 24h量 (失败则退回不带这层增强)。
+    // B: gamma 权威 竞争度 + 24h量 — 按本轮候选池 condition_id 精确批量查 (失败则退回不带这层增强)。
     std::map<std::string, RewardMulti> multi;
-    try {
-        multi = client.reward_markets_multi();
-    } catch (...) {
+    {
+        std::vector<std::string> cand_conds;
+        cand_conds.reserve(results.size());
+        for (const auto& rp : results)
+            if (rp) cand_conds.push_back(rp->condition_id);
+        try {
+            multi = client.gamma_enrich(cand_conds);
+        } catch (...) {
+        }
     }
     std::vector<PoolReport> scored;
     int vol_dropped = 0;
@@ -548,7 +549,8 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
                              r->question.substr(0, 44).c_str());
             continue;
         }
-        // B: 接 PM 权威数据。剔除快发完的池 (剩余已知且 <$1 = 没价值); 竞争度附上供选池/感知。
+        // B: 接 gamma 权威数据 (competitive + volume24hr) 供选池/感知。remaining_reward 经 gamma 不可得 (恒 -1),
+        // 故下面的"剩余<$1 剔除"对 gamma 增强是休眠的; 保留是为兼容未来若有剩余额度来源时仍能剔快发完的池。
         auto mit = multi.find(r->condition_id);
         if (mit != multi.end()) {
             r->competitiveness = mit->second.competitiveness;
