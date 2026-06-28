@@ -1100,6 +1100,13 @@ std::optional<std::string> LiveRunner::degrade_reason(const json& fresh) {
 }
 
 void LiveRunner::exit_held(const std::string& cond, const json& quote, const std::string& reason) {
+    // 白名单池: LLM 选它是冲价差/行为盈余, 不因"奖励份额塌缩/跳动"这类启发式退出 (否则会 place→exit 抖动)。
+    // 功能性退出 (empty_band/one_sided/fast_book) 仍生效 —— 盘口真不可做时照退。
+    static const std::set<std::string> kRewardOrJumpExits = {
+        "reward_collapsed", "daily_cut", "share_collapsed", "jump_risk_rose"};
+    if (cfg_.pool_whitelist.count(cond) != 0 && kRewardOrJumpExits.count(reason) != 0) {
+        return;
+    }
     static const std::set<std::string> kCooldownReasons = {
         "jump_risk_rose", "empty_band",   "reward_collapsed", "daily_cut",
         "one_sided",      "fast_book",    "share_collapsed"};
