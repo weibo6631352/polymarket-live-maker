@@ -51,9 +51,11 @@ module pmm { module telemetry {
   };
 
   // 选池评估: 每个发现周期、每个候选 —— 全部指标 + 每个滤网的结果。分析"为什么选/拒"的核心。
+  // @key condition_id: 按池作 DDS 实例; writer KEEP_LAST(1)/instance + TRANSIENT_LOCAL → 任意时刻新
+  // reader 立即拿到"每池最新 PoolEval"(全量当前候选集), 不必赶在 scan 突发窗口内 (发现间隔 600s)。
   struct PoolEval {
     long long ts_ms;
-    string    condition_id;
+    @key string condition_id;
     string    question;
     double    competitiveness;
     double    days_to_resolution;

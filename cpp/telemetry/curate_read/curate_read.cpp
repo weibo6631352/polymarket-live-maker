@@ -67,9 +67,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     efd::DataReaderQos rq = efd::DATAREADER_QOS_DEFAULT;
+    // 与 bot 的 keyed PoolEval writer 匹配: RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)/instance →
+    // 一连上就立即收到"每池最新 PoolEval"(全量当前候选集), 不必赶在 scan 突发窗口内。
     rq.history().kind = efd::KEEP_LAST_HISTORY_QOS;
-    rq.history().depth = 16;
-    rq.reliability().kind = efd::BEST_EFFORT_RELIABILITY_QOS;  // 匹配发布者 RELIABLE/BEST_EFFORT
+    rq.history().depth = 1;
+    rq.reliability().kind = efd::RELIABLE_RELIABILITY_QOS;
+    rq.durability().kind = efd::TRANSIENT_LOCAL_DURABILITY_QOS;
+    rq.resource_limits().max_samples_per_instance = 1;
+    rq.resource_limits().max_instances = 16384;
+    rq.resource_limits().max_samples = 16384;
     PoolEvalReader listener;
     efd::DataReader* dr = sub->create_datareader(tp, rq, &listener);
     if (dr == nullptr) {

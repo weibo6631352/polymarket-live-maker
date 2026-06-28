@@ -407,7 +407,7 @@ public:
         // 高频 topic → BEST_EFFORT (绝不阻塞), 其余 → RELIABLE (但短 max_blocking_time 兜底)。
         register_topic<HeartbeatPubSubType>(topic::kHeartbeat, &w_Heartbeat, /*reliable=*/true);
         register_topic<QuoteDecisionPubSubType>(topic::kQuoteDecision, &w_QuoteDecision, true);
-        register_topic<PoolEvalPubSubType>(topic::kPoolEval, &w_PoolEval, true);
+        register_topic<PoolEvalPubSubType>(topic::kPoolEval, &w_PoolEval, true, /*transient_local=*/true);
         register_topic<FillContextPubSubType>(topic::kFillContext, &w_FillContext, true);
         register_topic<OrderBookL2PubSubType>(topic::kOrderBookL2, &w_OrderBookL2, /*reliable=*/false);
         register_topic<RawFeedPubSubType>(topic::kRawFeed, &w_RawFeed, /*reliable=*/false);
@@ -493,7 +493,7 @@ private:
     }
 
     template <typename PubSubT>
-    void register_topic(const char* name, WriteFn fn, bool reliable) {
+    void register_topic(const char* name, WriteFn fn, bool reliable, bool transient_local = false) {
         efd::TypeSupport ts(new PubSubT());
         ts.register_type(participant_);  // 同时注册嵌套类型 (如 OrderBookL2 的 PriceLevel)
 
@@ -511,6 +511,15 @@ private:
         wq.reliability().kind = reliable ? efd::RELIABLE_RELIABILITY_QOS : efd::BEST_EFFORT_RELIABILITY_QOS;
         // RELIABLE 历史满时最多阻塞 20ms (默认 100ms) —— 兜底, 绝不长回压交易循环。
         wq.reliability().max_blocking_time = efd::Duration_t{0, 20000000u};
+        if (transient_local) {
+            // keyed "最新快照" topic (如 PoolEval, @key condition_id): 每实例只留最新 1 条 + TRANSIENT_LOCAL,
+            // 任意时刻晚到的 reader 立即拿到"每池最新样本"= 全量当前候选集, 不必赶在 scan 突发窗口内。
+            wq.history().depth = 1;
+            wq.durability().kind = efd::TRANSIENT_LOCAL_DURABILITY_QOS;
+            wq.resource_limits().max_samples_per_instance = 1;
+            wq.resource_limits().max_instances = 16384;  // PoolEval 每轮 ~400+ 池, 留足实例
+            wq.resource_limits().max_samples = 16384;
+        }
 
         efd::DataWriter* dw = dds_pub_->create_datawriter(tp, wq);
         if (dw == nullptr) {
