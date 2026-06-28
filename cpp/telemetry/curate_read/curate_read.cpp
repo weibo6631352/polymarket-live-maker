@@ -50,7 +50,8 @@ public:
 }  // namespace
 
 int main(int argc, char** argv) {
-    const double secs = argc > 1 ? std::atof(argv[1]) : 4.0;
+    // 默认 18s: 略大于 bot 的 PoolEval 周期重发间隔 (15s), 保证无参一跑就拿到全量当前候选集。
+    const double secs = argc > 1 ? std::atof(argv[1]) : 18.0;
 
     efd::DomainParticipant* dp = efd::DomainParticipantFactory::get_instance()->create_participant(
         0, efd::PARTICIPANT_QOS_DEFAULT);
