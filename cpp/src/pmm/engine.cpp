@@ -796,7 +796,7 @@ json Engine::suggest_maker_half_spread(const std::string& slug_or_id, const std:
     } catch (...) {
         history.clear();
     }
-    const double sigma_c = ob::realized_sigma_c_from_history(history, poll_seconds);
+    const double sigma_c = ob::realized_sigma_c_from_history(history, poll_seconds, jump_vol_weight_);
     const ob::OptimalHalfSpread rec = ob::optimal_half_spread(
         pool->daily, pool->max_spread, pool->min_size, pool->tick * 100.0, existing_qmin, sigma_c,
         86400.0 / poll_seconds, cancel_efficiency);

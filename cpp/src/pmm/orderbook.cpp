@@ -261,7 +261,8 @@ double expected_excess_move(double sigma, double offset) {
     return std::max(0.0, 2.0 * sigma * phi - 2.0 * offset * (1.0 - cdf));
 }
 
-double realized_sigma_c_from_history(const std::vector<PricePoint>& history, double poll_seconds) {
+double realized_sigma_c_from_history(const std::vector<PricePoint>& history, double poll_seconds,
+                                     double jump_weight) {
     std::vector<double> prices;
     std::vector<double> ts;
     prices.reserve(history.size());
@@ -290,9 +291,18 @@ double realized_sigma_c_from_history(const std::vector<PricePoint>& history, dou
     for (double d : diffs_c) sum += d;
     const double mean = sum / n;
     double var_sum = 0.0;
-    for (double d : diffs_c) var_sum += (d - mean) * (d - mean);
+    double max_abs_dev = 0.0;
+    for (double d : diffs_c) {
+        var_sum += (d - mean) * (d - mean);
+        max_abs_dev = std::max(max_abs_dev, std::abs(d - mean));  // 最大单步偏移 = 已显露的跳变幅度
+    }
     const double var = var_sum / n;
-    return std::sqrt(var) * std::sqrt(poll_seconds / step);
+    const double scale = std::sqrt(poll_seconds / step);
+    const double stdev_sigma = std::sqrt(var) * scale;
+    if (jump_weight <= 0.0) return stdev_sigma;  // parity
+    // 跳变感知: 一次跳变被 stdev 摊薄 → 用最大单步移动作 σ 下限, 让 bleed 计进尾部 → 挂宽/净负避开毒池。
+    const double jump_sigma = jump_weight * max_abs_dev * scale;
+    return std::max(stdev_sigma, jump_sigma);
 }
 
 OptimalHalfSpread optimal_half_spread(double daily_rate, double max_spread_c, double min_size,

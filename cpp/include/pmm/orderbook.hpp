@@ -95,8 +95,11 @@ struct PricePoint {
 };
 
 // 从历史 mid 路径估 per-poll 移动波动 (cents), 按 √-time 缩放到 poll_seconds。
+// jump_weight>0: 跳变感知 σ —— 取 max(stdev-σ, jump_weight×最大单步移动)。stdev 会把一次跳变摊薄到看不见
+// (实测: 安静池突发新闻跳变 → 滚动 σ 低 → 挂太紧 → 被碾)。用最大单步移动作 σ 下限, 把"已显露的跳"计进
+// bleed → 自动挂宽/净负。默认 0 = 纯 stdev (parity)。
 [[nodiscard]] double realized_sigma_c_from_history(const std::vector<PricePoint>& history,
-                                                   double poll_seconds);
+                                                   double poll_seconds, double jump_weight = 0.0);
 
 // optimal_half_spread 的结果 (各字段 round 到 4 位, 与 Python 一致)。
 struct OptimalHalfSpread {

@@ -72,6 +72,23 @@ int main() {
               "#7 kappa: lower reward -> wider-or-equal optimal half-spread");
     }
 
+    // #8 跳变感知 σ: 安静路径里一次跳变被 stdev 摊薄 → jump_weight>0 取最大单步移动作 σ 下限 → σ↑ →
+    //    bleed↑ → 最优半宽变宽 (毒池/新闻跳变自动挂宽或净负)。验证 σ 与半宽方向。
+    {
+        using pmm::orderbook::PricePoint;
+        std::vector<PricePoint> jump;  // 安静 ±0.002, 中间一步跳 +0.078 (新闻) 再回落
+        for (int i = 0; i < 20; ++i)
+            jump.push_back(PricePoint{0.50 + ((i % 2) ? 0.002 : -0.002), static_cast<double>(i)});
+        jump[10].p = 0.578;
+        const double s_plain = pmm::orderbook::realized_sigma_c_from_history(jump, 1.0, 0.0);
+        const double s_jump = pmm::orderbook::realized_sigma_c_from_history(jump, 1.0, 0.7);
+        Check(s_jump > s_plain, "#8 jump-aware: weight>0 raises sigma (jump no longer diluted)");
+        const double daily = 50.0, v = 8.0, min_sz = 100.0, tick_c = 1.0, qmin = 200.0, ppd = 86400.0;
+        const auto a = pmm::orderbook::optimal_half_spread(daily, v, min_sz, tick_c, qmin, s_plain, ppd);
+        const auto b = pmm::orderbook::optimal_half_spread(daily, v, min_sz, tick_c, qmin, s_jump, ppd);
+        Check(b.half_spread_c >= a.half_spread_c, "#8 jump-aware: higher sigma -> wider-or-equal half-spread");
+    }
+
     std::printf(g_fail ? "\n%d CHECK(S) FAILED\n" : "\nALL CHECKS PASSED\n", g_fail);
     return g_fail ? 1 : 0;
 }

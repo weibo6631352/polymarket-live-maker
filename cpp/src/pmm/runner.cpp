@@ -142,6 +142,7 @@ void LiveRunner::run() {
     engine_->set_maker_crossing_cost_c(cfg_.crossing_cost_c);
     engine_->set_micro_center(cfg_.micro_center, cfg_.micro_gate_c, cfg_.micro_beta);
     engine_->set_reward_calib(cfg_.reward_calib);  // 利润校准 κ (真实/毛估 ~0.237)
+    engine_->set_jump_vol_weight(cfg_.jump_vol_weight);  // 跳变感知 bleed (毒池自动挂宽/净负)
     if (rate_limiter_) engine_->api().set_rate_limiter(rate_limiter_.get());
 
     if (cfg_.live) {

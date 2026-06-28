@@ -30,6 +30,7 @@ struct RunnerConfig {
     double compet_aversion{0.3};  // PM market_competitiveness 惩罚 (挤池降权; 实测 0.46–4.2)
     double max_competitiveness{1.5};  // 硬剔除 competitiveness>此值的拥挤池 (churn源: Tyler/Romania)
     double extreme_mid_margin{0.2};   // 剔除 mid<0.2 或 >0.8 的近极端价池 (逆选/趋势源: South Korea)
+    double jump_vol_weight{0.7};      // 跳变感知 bleed: σ 下限=w×最大单步移动 (毒池/新闻跳变自动挂宽/净负)
     int recenter_ticks{1};
     double min_days_to_resolution{10.0};  // 剔除 N 天内结算的池 (近结算=催化剂风险); 0=关
     double max_vol_mult{2.5};  // 剔除 实现日波动 > N×奖励带宽 的跳池; 0=关
