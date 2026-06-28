@@ -28,6 +28,7 @@ module pmm { module telemetry {
     string    question;
     string    token;
     string    side;                // BUY-YES / BUY-NO
+    long long book_seq;            // 回链到决策当下的 OrderBookL2 (连贯通: 精确重建所见盘口)
     double    mid;
     double    max_spread_c;        // 奖励带宽
     double    half_spread_c;       // 最终半价差 (optimal_half_spread 输出)
@@ -88,21 +89,43 @@ module pmm { module telemetry {
     double    bleed;               // 该笔逆选损失
     double    book_bid;            // 成交时盘口
     double    book_ask;
+    long long book_seq;            // 回链 OrderBookL2 (连贯通)
     double    inventory_after;     // 成交后该腿持仓
     boolean   reconciled;          // 是否触发 reconcile 纠腿
   };
 
-  // 盘口快照: 关键点的微结构 (报价/成交/移动时)。
-  struct BookSnapshot {
+  // 价档: 订单簿一档 (价 + 量)。
+  struct PriceLevel {
+    double    price;
+    double    size;
+  };
+
+  // 订单簿 L2 全档快照: 每次盘口更新都发 —— WS 每条 + REST 每次 resync, 全部档位(非仅顶档)。
+  // "从根源最全": 在 bot 收到行情的源头捕获, 不摘要、不丢档。
+  // seq 按 token 单调递增 → 连贯性 + 丢更检测; 任何 QuoteDecision/FillContext 都带 book_seq 回链到这里,
+  // 可精确重建"bot 决策当下看到的盘口" —— 这就是"连贯通"。
+  struct OrderBookL2 {
     long long ts_ms;
     string    condition_id;
     string    token;
+    long long seq;                 // 单调序号 (连贯/丢更检测)
+    string    source;              // ws / rest_resync
+    string    update_type;         // snapshot / delta
     double    mid;
-    double    best_bid;
-    double    best_ask;
-    double    bid_qty;
-    double    ask_qty;
-    double    inband_qmin;         // 带内最小挂量 (直接竞争度量)
+    double    inband_qmin;         // 派生: 带内最小挂量 (竞争度量)
+    sequence<PriceLevel> bids;     // 全部买档 (价降序)
+    sequence<PriceLevel> asks;     // 全部卖档 (价升序)
+  };
+
+  // 原始源消息: WS/REST 收到的 payload 原样捕获 (解析前, 最高保真)。
+  // "原始全量" —— 连解析都不丢, 可事后重放/重析任何字段。结构化 OrderBookL2 之外的兜底全量层。
+  struct RawFeed {
+    long long ts_ms;
+    string    channel;             // market / user / rest_book
+    string    condition_id;
+    string    token;
+    long long seq;
+    string    payload;             // 原始 JSON 原样
   };
 
   // 持仓快照: 每个非零持仓 (链上真实)。
@@ -149,6 +172,125 @@ module pmm { module telemetry {
     string    condition_id;        // "" = 全局
     double    latency_ms;          // 相关延迟 (如链上查询耗时); 无则 0
     string    detail;              // key=val; ... 自由结构化
+  };
+
+  // === 执行/订单生命周期: 原始订单状态机 (submit→ack→fill/cancel/reject/expire) + 交易所延迟。
+  // 现在只发了 QuoteDecision(决策)和 Fill(成交), 缺中间的真实订单流转。
+  struct OrderEvent {
+    long long ts_ms;
+    string    condition_id;
+    string    token;
+    string    order_id;
+    string    phase;               // submit / ack / reject / cancel_req / cancel_ack / expire
+    string    side;
+    double    price;
+    double    size;
+    long      signature_type;
+    double    latency_ms;          // 该阶段耗时 (submit→ack 等)
+    string    error;               // 拒单/失败原因
+  };
+
+  // === 市场公开成交流 (Tape): 池里每笔公开成交, 不只我们的 —— 逆选根因。
+  // 知情 taker 扫盘 → 我们报价被逆选成交。只有看到公开 tape 才知道"是不是被知情流吃了"。最高价值缺口。
+  struct TradePrint {
+    long long ts_ms;
+    string    condition_id;
+    string    token;
+    double    price;
+    double    size;
+    string    taker_side;          // buy / sell (吃单方向 = 买卖压)
+    boolean   is_ours;
+  };
+
+  // === 行情连接健康: WS 连断/重连/消息率/丢更/交易所延迟/订阅态 (之前"看不到 WS 日志"的疑问就靠它)。
+  struct FeedHealth {
+    long long ts_ms;
+    string    channel;             // market / user
+    string    state;               // connected / disconnected / reconnecting
+    double    msg_rate;            // 消息/秒
+    long      gap_count;           // 丢更数
+    double    exch_lag_ms;         // 交易所 ts vs 本地接收
+    long      n_subscribed;
+  };
+
+  // === 延迟剖面: 各动作耗时, 诊断"慢→逆选"。
+  struct LatencyProfile {
+    long long ts_ms;
+    double    place_ms;            // 决策→挂单 ack
+    double    cancel_ms;           // 撤单→ack
+    double    chain_query_ms;      // 链上查询
+    double    loop_tick_ms;        // 事件循环单 tick
+    double    book_staleness_ms;   // 盘口最新更新距今 (新鲜度)
+  };
+
+  // === 链上/结算: 原始链上态 (逐 token 持仓 + USDC + allowance) + 结算延迟 (BUY-NO/假急停根因层)。
+  struct ChainState {
+    long long ts_ms;
+    string    token;
+    double    chain_size;
+    double    usdc;
+    double    allowance;
+    double    settlement_lag_ms;   // 成交→链上反映时延
+    long      pending_inflight;    // 在途未结算
+  };
+
+  // === 风险/安全态: 各刹车/预算实时态 (之前只有 KillEvent 在触发瞬间, 这个是连续态)。
+  struct RiskState {
+    long long ts_ms;
+    boolean   kill_armed;
+    long      equity_dd_count;     // 净值连续跌破计数
+    long      churn_count;         // churn 窗口成交数
+    boolean   chain_flat_guard;    // 持仓守卫是否阻挂
+    double    capital_deployed;
+    double    tail_budget_used;
+    double    drawdown;
+  };
+
+  // === 发现/选池漏斗: 扫描分项 (各阶段丢了多少、为什么) —— 选池的"漏斗全貌"。
+  struct DiscoveryScan {
+    long long ts_ms;
+    long      n_scanned;
+    long      n_safe;
+    long      n_dropped_jumpy;
+    long      n_dropped_depleted;
+    long      n_dropped_extreme;
+    long      n_dropped_comp;
+    long      n_selected;
+    double    scan_duration_ms;
+  };
+
+  // === 配置/版本溯源: 哪套配置 + 哪个 commit 产出了这批数据 (启动 + 变更时发) —— 分析必须知道。
+  struct ConfigSnapshot {
+    long long ts_ms;
+    string    git_commit;
+    double    capital;
+    double    max_loss;
+    double    jump_vol_weight;
+    double    max_competitiveness;
+    double    max_pool_frac;
+    double    tail_budget;
+    string    extra_json;          // 其余全部参数 key=val
+  };
+
+  // === 系统/进程健康。
+  struct SystemHealth {
+    long long ts_ms;
+    double    cpu_pct;
+    double    mem_mb;
+    double    http_req_rate;       // HTTP 请求/秒
+    long      rate_limit_hits;
+    double    db_write_ms;
+    long      thread_count;
+  };
+
+  // === 每池奖励分项: 实测每市场赚的奖励 vs 估计, 验证 κ 校准 + 看哪些池真发钱。
+  struct PoolReward {
+    long long ts_ms;
+    string    condition_id;
+    string    question;
+    double    est_reward;
+    double    realized_reward;     // /rewards/user/markets 实测
+    double    share;
   };
 
 }; };
