@@ -115,7 +115,8 @@ nlohmann::json MergeExecutor::MaybeMerge(const MergeQuote& q,
         r["reason"] = "cannot derive EOA";
         return r;
     }
-    // 注意: maker (funder) 是 proxy; 但 mergePositions 由持币地址直接发。EOA 模式下 from=eoa。
+    // !! 路由警告 (见头文件): sig_type=1/2 下 token 由 funder 代理持有, EOA 直发 CTF 会销毁不到任何 token。
+    //    此 from=eoa 路径只对 EOA 模式 (sig_type=0) 正确; 代理模式需先包一层代理工厂 exec (尚未构建)。
     const std::string from = to_hex(eoa.data(), 20);
     const auto nonce = rpc.TransactionCount(from);
     const auto tip = rpc.MaxPriorityFeePerGas();

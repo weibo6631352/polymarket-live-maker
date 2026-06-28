@@ -7,6 +7,15 @@
 //   LM_FLATTEN_VIA_MERGE=1   → 决策评估开 (仍只是 DRY: 构建+签名+打印, 不发链)
 //   LM_MERGE_ARM_REAL_FUNDS=1→ 真实上链开 (须与上面同时开 + 用户监督); 否则永不 eth_sendRawTransaction
 //
+// !! 实盘账户路由警告 (真实测试前必须解决) !!
+//   本账户 POLYMARKET_SIGNATURE_TYPE=1 (POLY_PROXY): 仓位 ERC1155 由 funder 代理钱包 0x78dE 持有,
+//   而非签名 EOA (0xb9c8)。CTF.mergePositions 销毁"调用者"的 token —— 因此必须由代理 0x78dE 发起。
+//   下面 BuildAndSign/MaybeMerge 构造的是 EOA 直发 CTF 的 tx (from=EOA), 只对 EOA 模式 (sig_type=0,
+//   token 由 EOA 自持) 正确; sig_type=1/2 下需把 mergePositions calldata 再包一层 Polymarket 代理工厂
+//   的 exec 调用 (proxy([{to:CTF,value:0,data:inner}])) 由 EOA 发给工厂合约 —— 这层 (工厂地址+ABI)
+//   尚未构建, 是实盘 merge 的关键缺口。inner mergePositions 编码 (ctf::EncodeMergePositions) 两种路由
+//   通用、已 DRY 验证。
+//
 // 红线: 私钥只读不持有不 log。R-12: 非 hot path。
 #pragma once
 
