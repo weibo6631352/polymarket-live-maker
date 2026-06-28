@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>pmm 全量遥测</title>
+<style>
+  :root{--bg:#0b0f14;--panel:#121922;--line:#1e2a38;--fg:#cdd9e5;--dim:#7d8da0;--green:#3fb950;--red:#f85149;--amber:#d29922;--blue:#58a6ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{display:flex;align-items:center;gap:16px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+  header .stat{display:flex;flex-direction:column}
+  header .stat b{font-size:15px}header .stat span{color:var(--dim);font-size:10px;text-transform:uppercase}
+  #dot{width:9px;height:9px;border-radius:50%;background:var(--red)}
+  #dot.ok{background:var(--green)}
+  input{background:#0b0f14;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;font:inherit}
+  main{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:8px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;display:flex;flex-direction:column;min-height:180px;max-height:340px}
+  .panel h3{margin:0;padding:6px 10px;font-size:11px;color:var(--blue);border-bottom:1px solid var(--line);text-transform:uppercase;letter-spacing:.5px;display:flex;justify-content:space-between}
+  .panel h3 .n{color:var(--dim)}
+  .body{overflow:auto;padding:4px 0}
+  table{width:100%;border-collapse:collapse}
+  td,th{padding:2px 8px;text-align:right;white-space:nowrap}
+  th{color:var(--dim);font-weight:400;position:sticky;top:0;background:var(--panel)}
+  td:first-child,th:first-child{text-align:left}
+  tr:hover{background:#0e141b}
+  .pos{color:var(--green)}.neg{color:var(--red)}.warn{color:var(--amber)}.muted{color:var(--dim)}
+  .book{display:grid;grid-template-columns:1fr 1fr;gap:0 6px;padding:0 8px}
+  .lvl{display:flex;justify-content:space-between;padding:1px 4px;border-radius:2px}
+  .ask .lvl{background:linear-gradient(90deg,transparent,rgba(248,81,73,.10))}
+  .bid .lvl{background:linear-gradient(270deg,transparent,rgba(63,185,80,.10))}
+  .wide{grid-column:span 2}.full{grid-column:span 3}
+  .log{font-size:11px}.log div{padding:1px 10px;border-bottom:1px solid #0e141b}
+  .pill{padding:0 5px;border-radius:8px;font-size:10px}
+  .pill.sel{background:rgba(63,185,80,.15);color:var(--green)}
+  .pill.rej{background:rgba(248,81,73,.15);color:var(--red)}
+</style>
+</head>
+<body>
+<header>
+  <div id="dot"></div>
+  <div class="stat"><b id="run">—</b><span>run</span></div>
+  <div class="stat"><b id="uptime">—</b><span>uptime</span></div>
+  <div class="stat"><b id="usdc">—</b><span>usdc</span></div>
+  <div class="stat"><b id="equity">—</b><span>equity</span></div>
+  <div class="stat"><b id="pnl">—</b><span>day p&l</span></div>
+  <div class="stat"><b id="quotes">—</b><span>quotes</span></div>
+  <div class="stat"><b id="rps">—</b><span>book rps</span></div>
+  <div class="stat"><b id="bleed">—</b><span>逆选累计</span></div>
+  <div style="margin-left:auto"><input id="url" size="34" placeholder="ws://host:8787/telemetry"/></div>
+</header>
+<main>
+  <div class="panel"><h3>报价决策 QuoteDecision <span class="n" id="n-q">0</span></h3>
+    <div class="body"><table id="t-q"><thead><tr><th>池</th><th>mid</th><th>半宽</th><th>σ</th><th>净/日</th><th>size</th><th>状态</th></tr></thead><tbody></tbody></table></div></div>
+
+  <div class="panel"><h3>选池评估 PoolEval <span class="n" id="n-p">0</span></h3>
+    <div class="body"><table id="t-p"><thead><tr><th>问题</th><th>竞争</th><th>天数</th><th>净/日</th><th></th></tr></thead><tbody></tbody></table></div></div>
+
+  <div class="panel"><h3>风险态 RiskState</h3>
+    <div class="body"><table id="t-r"><tbody></tbody></table></div></div>
+
+  <div class="panel wide"><h3>成交+公开流 Fills / Tape <span class="n" id="n-f">0</span></h3>
+    <div class="body"><table id="t-f"><thead><tr><th>时间</th><th>类型</th><th>池</th><th>方向</th><th>size</th><th>价</th><th>逆选/吃单</th></tr></thead><tbody></tbody></table></div></div>
+
+  <div class="panel"><h3>订单簿 L2 <input id="bk" size="10" placeholder="token…"/></h3>
+    <div class="body"><div class="book"><div class="ask" id="asks"></div><div class="bid" id="bids"></div></div></div></div>
+
+  <div class="panel wide"><h3>延迟/连接 Latency·Feed</h3>
+    <div class="body"><table id="t-l"><tbody></tbody></table></div></div>
+
+  <div class="panel"><h3>每池奖励 PoolReward <span class="n" id="n-rw">0</span></h3>
+    <div class="body"><table id="t-rw"><thead><tr><th>问题</th><th>估</th><th>实测</th><th>份额</th></tr></thead><tbody></tbody></table></div></div>
+
+  <div class="panel full"><h3>日志流 LogEvent <span class="n" id="n-l">0</span></h3>
+    <div class="body log" id="log"></div></div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const fmt=(x,d=2)=>x==null||isNaN(x)?'—':(+x).toFixed(d);
+const cls=x=>x>0?'pos':x<0?'neg':'';
+const quotes=new Map(),pools=new Map(),rewards=new Map(); let fills=[],logs=[];
+const books=new Map(); let bookTok='';
+
+const H={
+  Heartbeat:d=>{$('#run').textContent=d.run_state;$('#dot').className=d.run_state==='running'?'ok':'';
+    $('#uptime').textContent=fmt(d.uptime_s/60,0)+'m';$('#usdc').textContent='$'+fmt(d.usdc,0);
+    $('#equity').textContent='$'+fmt(d.equity,0);$('#quotes').textContent=d.n_quotes;$('#rps').textContent=fmt(d.book_resync_rps,0);},
+  EquitySnapshot:d=>{const e=$('#pnl');e.textContent='$'+fmt(d.day_pnl);e.className=cls(d.day_pnl);
+    $('#bleed').textContent='$'+fmt(d.realized_bleed);},
+  QuoteDecision:d=>{quotes.set(d.token,d);renderQ();},
+  PoolEval:d=>{pools.set(d.condition_id,d);renderP();},
+  RiskState:d=>{$('#t-r').querySelector('tbody').innerHTML=
+    row(['急停武装',d.kill_armed?'<span class=warn>ARMED</span>':'—'])+row(['净值跌破计数',d.equity_dd_count])
+    +row(['churn 窗口',d.churn_count])+row(['持仓守卫',d.chain_flat_guard?'阻挂':'—'])
+    +row(['已部署',`$${fmt(d.capital_deployed,0)}`])+row(['尾部占用',`$${fmt(d.tail_budget_used)}`])
+    +row(['回撤',`<span class=neg>$${fmt(d.drawdown)}</span>`]);},
+  FillContext:d=>{const mv=fmt((d.mid_after-d.mid_before)*100,2);
+    push(fills,{t:d.ts_ms,k:'FILL',c:short(d.question||d.condition_id),s:d.side,sz:fmt(d.size,0),p:fmt(d.price,3),x:`bleed $${fmt(d.bleed)} (Δmid ${mv}¢)`,cl:'neg'});renderF();},
+  TradePrint:d=>{if(d.is_ours)return;push(fills,{t:d.ts_ms,k:'TAPE',c:short(d.condition_id),s:d.taker_side,sz:fmt(d.size,0),p:fmt(d.price,3),x:d.taker_side,cl:'muted'});renderF();},
+  OrderBookL2:d=>{books.set(d.token,d);if(!bookTok)bookTok=d.token;if(d.token===($('#bk').value||bookTok))renderBook(d);},
+  LatencyProfile:d=>{$('#t-l').querySelector('tbody').innerHTML=
+    row(['挂单 place',`${fmt(d.place_ms,1)} ms`])+row(['撤单 cancel',`${fmt(d.cancel_ms,1)} ms`])
+    +row(['链上查询',`${fmt(d.chain_query_ms,1)} ms`])+row(['循环 tick',`${fmt(d.loop_tick_ms,1)} ms`])
+    +row(['盘口新鲜度',`<span class="${d.book_staleness_ms>500?'warn':''}">${fmt(d.book_staleness_ms,0)} ms</span>`]);},
+  FeedHealth:d=>{const e=$('#t-l').querySelector('tbody');e.innerHTML+=row(['WS '+d.channel,
+    `<span class="${d.state==='connected'?'pos':'neg'}">${d.state}</span> ${fmt(d.msg_rate,0)}/s lag ${fmt(d.exch_lag_ms,0)}ms gaps ${d.gap_count}`]);},
+  PoolReward:d=>{rewards.set(d.condition_id,d);renderRw();},
+  LogEvent:d=>{push(logs,d);renderLog();},
+  KillEvent:d=>{push(logs,{kind:'KILL:'+d.kind,fields:{reason:d.reason}});renderLog();},
+};
+const short=s=>(s||'').slice(0,18);
+const row=a=>`<tr><td>${a[0]}</td><td>${a[1]}</td></tr>`;
+function push(a,x){a.unshift(x);if(a.length>200)a.pop();}
+function renderQ(){const b=$('#t-q tbody');$('#n-q').textContent=quotes.size;
+  b.innerHTML=[...quotes.values()].map(d=>`<tr><td>${short(d.question)}</td><td>${fmt(d.mid,3)}</td><td>${fmt(d.half_spread_c)}</td><td>${fmt(d.sigma_c)}</td><td class="${cls(d.net_per_day)}">${fmt(d.net_per_day)}</td><td>${fmt(d.size,0)}</td><td class="${d.status==='active'?'pos':'muted'}">${d.status}</td></tr>`).join('');}
+function renderP(){const b=$('#t-p tbody');$('#n-p').textContent=pools.size;
+  b.innerHTML=[...pools.values()].slice(0,40).map(d=>`<tr><td>${short(d.question)}</td><td>${fmt(d.competitiveness)}</td><td>${fmt(d.days_to_resolution,0)}</td><td class="${cls(d.net_per_day)}">${fmt(d.net_per_day)}</td><td><span class="pill ${d.selected?'sel':'rej'}">${d.selected?'选':d.reject_reason||'拒'}</span></td></tr>`).join('');}
+function renderF(){const b=$('#t-f tbody');$('#n-f').textContent=fills.length;
+  b.innerHTML=fills.slice(0,60).map(d=>`<tr><td>${ts(d.t)}</td><td class="${d.k==='FILL'?'warn':'muted'}">${d.k}</td><td>${d.c}</td><td>${d.s}</td><td>${d.sz}</td><td>${d.p}</td><td class="${d.cl}">${d.x}</td></tr>`).join('');}
+function renderRw(){const b=$('#t-rw tbody');$('#n-rw').textContent=rewards.size;
+  b.innerHTML=[...rewards.values()].map(d=>`<tr><td>${short(d.question)}</td><td>${fmt(d.est_reward)}</td><td class="pos">${fmt(d.realized_reward)}</td><td>${fmt(d.share,3)}</td></tr>`).join('');}
+function renderBook(d){const top=a=>(a||[]).slice(0,12);
+  $('#asks').innerHTML='<div class=muted style="text-align:center">ASK</div>'+top(d.asks).reverse().map(l=>`<div class=lvl><span class=neg>${fmt(l.price,3)}</span><span>${fmt(l.size,0)}</span></div>`).join('');
+  $('#bids').innerHTML='<div class=muted style="text-align:center">BID</div>'+top(d.bids).map(l=>`<div class=lvl><span class=pos>${fmt(l.price,3)}</span><span>${fmt(l.size,0)}</span></div>`).join('');}
+function renderLog(){$('#n-l').textContent=logs.length;
+  $('#log').innerHTML=logs.slice(0,80).map(d=>`<div><span class=muted>${ts(d.ts_ms)}</span> <b>${d.kind}</b> <span class=muted>${JSON.stringify(d.fields||{}).slice(0,160)}</span></div>`).join('');}
+const ts=ms=>ms?new Date(+ms).toISOString().slice(11,19):'';
+
+let ws;
+function connect(){
+  const url=$('#url').value||('ws://'+location.hostname+':8787/telemetry');
+  try{ws=new WebSocket(url);}catch(e){return setTimeout(connect,2000);}
+  ws.onmessage=ev=>{try{const m=JSON.parse(ev.data);(H[m.topic]||(()=>{}))(m.data);}catch(e){}};
+  ws.onclose=()=>{$('#dot').className='';setTimeout(connect,2000);};
+}
+$('#bk').onchange=()=>{const d=books.get($('#bk').value);if(d)renderBook(d);};
+$('#url').value='ws://'+location.hostname+':8787/telemetry';
+$('#url').onchange=()=>{if(ws)ws.close();connect();};
+connect();
+</script>
+</body>
+</html>
