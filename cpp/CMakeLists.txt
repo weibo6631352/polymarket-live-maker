@@ -128,6 +128,7 @@ add_library(pmm_core STATIC
     src/pmm/api.cpp
     src/pmm/rewards.cpp
     src/pmm/portfolio.cpp
+    src/pmm/inflight.cpp
     src/pmm/maker_live.cpp
     src/pmm/clob_submitter.cpp
     src/pmm/engine.cpp
@@ -182,6 +183,9 @@ target_link_libraries(pmm_orders_smoke PRIVATE pmm_core)
 
 add_executable(pmm_poll_fills_cursor tests/poll_fills_cursor_main.cpp)
 target_link_libraries(pmm_poll_fills_cursor PRIVATE pmm_core)
+
+add_executable(pmm_inflight_smoke tests/inflight_smoke_main.cpp)
+target_link_libraries(pmm_inflight_smoke PRIVATE pmm_core)
 
 add_executable(pmm_engine_smoke tests/engine_smoke_main.cpp)
 target_link_libraries(pmm_engine_smoke PRIVATE pmm_core)
