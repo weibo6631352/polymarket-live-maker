@@ -309,22 +309,35 @@ json RewardsClient::get(const std::string& path) {
 std::map<std::string, RewardMulti> RewardsClient::reward_markets_multi(int max_pages) {
     std::map<std::string, RewardMulti> out;
     std::string cursor;
+    int pages = 0;
+    const char* stop = "max_pages";
+    std::string last_err;
     for (int i = 0; i < max_pages; ++i) {
         std::string path = "/rewards/markets/multi?page_size=500";
         if (!cursor.empty()) path += "&next_cursor=" + cursor;
         json data;
         bool ok = false;
-        for (int attempt = 0; attempt < 2 && !ok; ++attempt) {  // 瞬时失败重试一次, 不因单次网络抖动丢整轮 comp/vol 增强
+        for (int attempt = 0; attempt < 3 && !ok; ++attempt) {  // 瞬时失败重试 2 次, 不因单次抖动/限流丢整轮 comp/vol
             try {
                 data = get(path);
                 ok = true;
+            } catch (const std::exception& e) {
+                last_err = e.what();
             } catch (...) {
+                last_err = "unknown";
             }
         }
-        if (!ok) break;  // 连重试也失败才放弃 (下个发现周期自愈)
+        if (!ok) {
+            stop = "get_failed";
+            break;  // 连重试也失败才放弃 (下个发现周期自愈)
+        }
+        ++pages;
         const json* d = data.is_object() ? ju::find(data, "data") : nullptr;
         const json page = (d != nullptr) ? *d : (data.is_array() ? data : json::array());
-        if (!page.is_array() || page.empty()) break;
+        if (!page.is_array() || page.empty()) {
+            stop = "empty_page";
+            break;
+        }
         for (const auto& m : page) {
             const json* cv = ju::find(m, "condition_id");
             if (cv == nullptr) continue;
@@ -348,9 +361,14 @@ std::map<std::string, RewardMulti> RewardsClient::reward_markets_multi(int max_p
         std::string nxt;
         if (data.is_object())
             if (const json* n = ju::find(data, "next_cursor")) nxt = ju::to_str(*n);
-        if (nxt.empty() || nxt == "LTE=" || nxt == cursor) break;
+        if (nxt.empty() || nxt == "LTE=" || nxt == cursor) {
+            stop = "cursor_end";
+            break;
+        }
         cursor = nxt;
     }
+    std::fprintf(stderr, "reward_multi: %zu markets / %d pages (stop=%s%s%s)\n", out.size(), pages, stop,
+                 last_err.empty() ? "" : " err=", last_err.empty() ? "" : last_err.substr(0, 70).c_str());
     return out;
 }
 
