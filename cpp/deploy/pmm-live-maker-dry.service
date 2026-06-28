@@ -1,0 +1,38 @@
+[Unit]
+Description=pmm live-maker DRY-LIVE (telemetry producer; NO real orders, ever)
+After=network-online.target pmm-telemetry-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Isolated working dir (own state/ ledger + flock) so the dry-live bot NEVER conflicts
+# with the real-money polymarket-live-maker.service state/.  Set up once:
+#   mkdir -p /root/pmm-dry-live
+#   ln -sfn /root/polymarket-live-maker/.env /root/pmm-dry-live/.env
+WorkingDirectory=/root/pmm-dry-live
+# DRY-LIVE, belt-and-suspenders: PM_TRADER_LIVE=0 (no real submitter) + LM_DRY_LIVE=1
+# (rehearse the live code path; DryRunSubmitter LOGS orders, never sends). systemd env
+# is set before the binary runs; .env LoadDotEnv uses setdefault -> never overrides these.
+Environment=PM_TRADER_LIVE=0
+Environment=LM_DRY_LIVE=1
+Environment=LD_LIBRARY_PATH=/root/dds/lib:/root/dds/lib64
+# WITH_TELEMETRY=ON binary -> publishes the full DDS telemetry bus (domain 0).
+ExecStart=/root/polymarket-live-maker/cpp/build-tel/live-maker
+Restart=always
+RestartSec=15
+# graceful: SIGTERM -> runner trips kill-switch -> cancels resting quotes (dry: logged).
+KillSignal=SIGTERM
+TimeoutStopSec=90
+MemoryHigh=384M
+MemoryMax=512M
+TasksMax=400
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=live-maker-dry
+NoNewPrivileges=true
+
+# DRY-LIVE = no real money -> safe to auto-start on boot (dashboard "always live").
+#   cp cpp/deploy/pmm-live-maker-dry.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now pmm-live-maker-dry
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+[Unit]
+Description=pmm telemetry bridge (Fast-DDS tap -> SQLite recorder + WebSocket :8787)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/polymarket-live-maker
+# tap | tee recorder | ws_server  (see run_bridge.sh). Writes state/telemetry.db
+# in WorkingDirectory and serves the dashboard WebSocket on 0.0.0.0:8787 /telemetry.
+ExecStart=/bin/bash /root/polymarket-live-maker/cpp/telemetry/bridge/run_bridge.sh
+Restart=always
+RestartSec=5
+# default KillMode=control-group -> SIGTERM the whole pipeline (tap + tee + python).
+TimeoutStopSec=15
+MemoryMax=512M
+TasksMax=200
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pmm-telemetry-bridge
+
+# DRY-LIVE dashboard is harmless (no real money) -> safe to auto-start on boot so the
+# dashboard is "always live".  Install + enable:
+#   cp cpp/deploy/pmm-telemetry-bridge.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now pmm-telemetry-bridge
+[Install]
+WantedBy=multi-user.target
