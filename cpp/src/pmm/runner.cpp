@@ -806,6 +806,28 @@ void LiveRunner::reselect() {
         // 都空 → 空白名单 → 数字滤网正常生效 (行为不变); 非空 → 只做名单内 (LLM 批准的池绕过脆滤网)。
         p.pool_whitelist = cfg_.pool_whitelist;            // 语义选池白名单 (非空只做名单内)
         for (const auto& c : dyn_whitelist_) p.pool_whitelist.insert(c);
+        // 诊断: 推入的动态白名单池为何选不中。先看它在不在当前 report_ (curate_read 读 TRANSIENT_LOCAL
+        // keyed 缓存, 会留住已从 report_ 掉出的旧池 → "看得见却选不了"), 在的话逐个功能门给结论。
+        for (const auto& c : dyn_whitelist_) {
+            const rewards::PoolReport* pr = nullptr;
+            for (const auto& q : report_.pools)
+                if (q.condition_id == c) { pr = &q; break; }
+            if (pr == nullptr) {
+                std::fprintf(stderr, "wl-diag %s NOT-in-report_ (report=%zu pools)\n", c.substr(0, 16).c_str(),
+                             report_.pools.size());
+                continue;
+            }
+            const bool cd_hit = cd.count(c) != 0 || cd.count(pr->token) != 0;
+            const double hs = pr->tick * 100.0 * cfg_.half_spread_ticks;
+            const double min_cap = pr->min_size * (1.0 - 2.0 * (hs / 100.0));
+            const bool extreme = p.extreme_mid_margin > 0.0 && pr->mid > 0.0 &&
+                                 (pr->mid < p.extreme_mid_margin || pr->mid > 1.0 - p.extreme_mid_margin);
+            std::fprintf(stderr,
+                         "wl-diag %s in-report_ mid=%.3f empty=%d extreme=%d cooldown=%d min_size=%.0f "
+                         "min_cap=%.2f cap=%.0f jump=%s\n",
+                         c.substr(0, 16).c_str(), pr->mid, pr->empty_band ? 1 : 0, extreme ? 1 : 0, cd_hit ? 1 : 0,
+                         pr->min_size, min_cap, cfg_.capital, pr->jump_verdict.c_str());
+        }
         selected_ = portfolio::select_pools(report_, p);
         scored_pools = report_.pools;  // 复制供 PoolEval 遥测 (锁外发布, 不长持 report_mu_)
     }
