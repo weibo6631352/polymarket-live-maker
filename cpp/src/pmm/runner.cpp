@@ -990,6 +990,28 @@ std::optional<std::string> LiveRunner::kill_check() {
                 // 校正后 flatten 对的是链上真实持有的腿 → 能平掉。链上为准, 与 fill 怎么记无关。
                 engine_->reconcile_inventory(last_chain_positions_);
                 engine_->set_chain_positions(last_chain_positions_);  // 根因守卫用链上真实持仓
+                // 孤立清扫: 链上持有、但无活跃 quote 在管的仓 (pool 退出/降级时平仓没完成留下) → 主动平掉。
+                // reconcile 只校正活跃 quote, 退出后的孤立它只告警不平 → 这里兜底 (实测 168 NO 退出孤立卡 5min)。
+                std::set<std::string> active_toks;
+                for (const auto& q : engine_->get_maker_quotes()) {
+                    const std::string ty = q.value("token_id", std::string{});
+                    const std::string tn = q.value("complement_token_id", std::string{});
+                    if (!ty.empty()) active_toks.insert(ty);
+                    if (!tn.empty()) active_toks.insert(tn);
+                }
+                for (const auto& [tok, sz] : last_chain_positions_) {
+                    if (std::abs(sz) < 1.0 || active_toks.count(tok) != 0) continue;
+                    std::fprintf(stderr, "orphan-sweep: flattening untracked %.0f on %s\n", sz,
+                                 tok.substr(0, 12).c_str());
+                    try {
+                        locked_submit({{"action", "FLATTEN"},
+                                       {"token_id", tok},
+                                       {"side", sz > 0.0 ? "SELL" : "BUY"},
+                                       {"size", std::abs(sz)}});
+                        event("orphan_sweep", {{"token", tok}, {"size", sz}});
+                    } catch (...) {
+                    }
+                }
             }
             // 净值急停持续性: 链上持仓查询刚买后滞后→净值瞬时假跌。连续 3 次 15s 采样(~45s)都跌破才急停 →
             // 滤掉结算滞后的假跌, 真亏(持续)照样刹住。不用在途 net_cost: /data/trades 把 BUY-NO 记成 SELL-YES,
