@@ -119,6 +119,15 @@ add_library(nlohmann_json INTERFACE)
 target_include_directories(nlohmann_json INTERFACE ${CMAKE_SOURCE_DIR}/third_party)
 
 # ---- pmm_core: 业务逻辑库 (随迁移逐模块增长) ----
+# 全量遥测 (Fast-DDS): WITH_TELEMETRY=ON (盒子, 见 ~/dds) 链 Fast-DDS + 编 dds_publisher.cpp;
+# 默认 OFF → 编 no-op publisher.cpp (Mac 本地/单测零依赖, publish 全空操作)。
+option(WITH_TELEMETRY "Build Fast-DDS telemetry publisher" OFF)
+if(WITH_TELEMETRY)
+    set(PMM_TELEMETRY_SRC src/pmm/telemetry/dds_publisher.cpp)
+else()
+    set(PMM_TELEMETRY_SRC src/pmm/telemetry/publisher.cpp)
+endif()
+
 add_library(pmm_core STATIC
     src/pmm/config.cpp
     src/pmm/db.cpp
@@ -135,6 +144,7 @@ add_library(pmm_core STATIC
     src/pmm/runner.cpp
     src/pmm/maker_sim.cpp
     src/pmm/review.cpp
+    ${PMM_TELEMETRY_SRC}
 )
 target_compile_features(pmm_core PUBLIC cxx_std_20)
 # OpenSSL::SSL: PersistentHttps 的 TLS 客户端 (带 openssl 头路径 + libssl/libcrypto)。

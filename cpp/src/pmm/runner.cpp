@@ -85,6 +85,9 @@ rewards::RewardsClient& LiveRunner::scanner() { return *scanner_; }
 
 void LiveRunner::event(const std::string& kind, const json& fields) {
     if (events_) events_->write(kind, fields);
+    // 全量遥测: 每个 event 也走 DDS 的 LogEvent 兜底 topic (kind+fields), 一条不漏。
+    // 富 topic (QuoteDecision/FillContext/OrderBookL2 等) 在各点显式 publish 全量字段。
+    if (publisher_) publisher_->publish(telemetry::topic::kLogEvent, {{"kind", kind}, {"fields", fields}});
 }
 
 nlohmann::json LiveRunner::locked_submit(const json& action) {

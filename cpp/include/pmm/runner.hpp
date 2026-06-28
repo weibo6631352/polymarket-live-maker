@@ -27,6 +27,7 @@
 #include "pmm/ratelimit.hpp"
 #include "pmm/rewards.hpp"
 #include "pmm/submitter.hpp"
+#include "pmm/telemetry/publisher.hpp"
 #include "pmm/ws.hpp"
 
 namespace pmm {
@@ -94,6 +95,7 @@ private:
     ISubmitter* submitter_{nullptr};
     std::unique_ptr<ISubmitter> owned_submitter_;
     std::unique_ptr<RateLimiter> rate_limiter_;
+    std::unique_ptr<telemetry::Publisher> publisher_{telemetry::make_publisher()};  // 全量遥测总线
     std::unique_ptr<EventLog> events_;
     std::mutex submitter_mu_;  // 串行化 submitter 访问 (反射 + poll 线程)
 
