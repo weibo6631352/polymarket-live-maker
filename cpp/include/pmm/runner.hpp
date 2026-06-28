@@ -152,7 +152,9 @@ private:
     std::map<std::string, orderbook::BookSignals> signal_by_token_;
     std::map<std::string, double> signal_log_at_;  // token -> 上次记标定日志的单调时刻 (节流)
     std::map<std::string, double> fade_last_s_;     // token -> 上次 fade 的 mono 秒 (冷却: 防紧抖动)
+    std::map<std::string, int> fade_since_poll_;    // token -> 自上次维护轮以来的 fade 次数 (signal_mu_ 下)
     std::mutex signal_mu_;
+    std::map<std::string, int> fade_streak_;        // cond -> 连续"本轮有 fade"的 poll 数 (仅主循环访问, 免锁)
     void compute_and_store_signals(const std::string& token);
 
     // 事件驱动主循环: 盘口移动 (REST resync) / WS reflex 立刻唤醒主循环跑决策 (实时响应, 不等定时器);

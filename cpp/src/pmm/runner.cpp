@@ -621,6 +621,7 @@ void LiveRunner::compute_and_store_signals(const std::string& token) {
                 auto it = fade_last_s_.find(token);
                 if (it == fade_last_s_.end() || now_s - it->second >= cfg_.fade_cooldown_s) {
                     fade_last_s_[token] = now_s;
+                    ++fade_since_poll_[token];  // 毒池检测计数
                     do_fade = true;
                 }
             }
@@ -1044,6 +1045,24 @@ void LiveRunner::reevaluate_held() {
     for (std::size_t i = 0; i < worklist.size(); ++i) {
         const auto& [cond, q] = worklist[i];
         const std::string tok = q.value("token_id", std::string{});
+        // fade 率毒池退出: 池连续 N 个 poll 都在 fade (顶着冷却上限) = 持续性失衡/毒流, 挂着也只被单边吃
+        // → 退出 + 冷却 (kCooldownReasons 含 fade_toxic), 别死磕。实盘实测 Beşiktaş 即此型。白名单不豁免此退出。
+        if (cfg_.fade_toxic_streak > 0) {
+            int faded = 0;
+            {
+                std::lock_guard<std::mutex> lk(signal_mu_);
+                if (auto fit = fade_since_poll_.find(tok); fit != fade_since_poll_.end()) {
+                    faded = fit->second;
+                    fit->second = 0;
+                }
+            }
+            if (faded > 0) ++fade_streak_[cond]; else fade_streak_[cond] = 0;
+            if (fade_streak_[cond] >= cfg_.fade_toxic_streak) {
+                fade_streak_[cond] = 0;
+                exit_held(cond, q, "fade_toxic");
+                continue;
+            }
+        }
         // 真实份额踢死池 (独立于 rescore, 即使 rescore 失败也能踢): bot 实测在带份额 EWMA × daily < 门槛
         // → 该池已被竞争稀释成 ~$0 (且大单挂在那易被整个扫掉 → 方向性亏损, 实测吃过亏), 退出腾资金给好池。
         if (auto eit = share_ewma_.find(tok); eit != share_ewma_.end()) {
@@ -1124,7 +1143,7 @@ void LiveRunner::exit_held(const std::string& cond, const json& quote, const std
     }
     static const std::set<std::string> kCooldownReasons = {
         "jump_risk_rose", "empty_band",   "reward_collapsed", "daily_cut",
-        "one_sided",      "fast_book",    "share_collapsed"};
+        "one_sided",      "fast_book",    "share_collapsed",  "fade_toxic"};
     const std::string token = quote.value("token_id", std::string{});
     const std::string no_token = quote.value("complement_token_id", std::string{});
     const int qid = quote.value("id", 0);
