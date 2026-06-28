@@ -73,6 +73,7 @@ private:
     void resync_once(const std::string& token);
     void publish_book_l2(const std::string& token);  // OrderBookL2 全档遥测 (resync 源头捕获)
     void publish_risk_equity();                       // EquitySnapshot + Position + RiskState 遥测
+    void reflex_pull(const std::string& token, const std::string& reason, double mid);  // 双边拉单 (mid-move/fade 共用)
     void start_discovery_thread();
     [[nodiscard]] bool report_stale();
     [[nodiscard]] std::optional<nlohmann::json> rescore(const std::string& cond, const std::string& token,

@@ -37,6 +37,10 @@ struct RunnerConfig {
     double tail_budget{20.0};         // 尾部-VaR: 单次成交最坏损失 ≤ 此 $ 额 (bug 修后逆选有界, 放宽→更大 size/更多池)
     double tail_k_sigma{3.0};         // 最坏跳变 = k×σ (3σ 尾部); 与 jump_vol_weight 配合估单次成交尾部
     int recenter_ticks{1};
+    // fade-on-imbalance (研究: 被动 maker 最大的洞 —— 静态挂着=知情流出口)。micro-price/订单流失衡是
+    // 短时移动的领先信号 (OBI 解释 ~65%) → 抢在 mid 越带前双边撤, 躲开毒流。防御性拉单, 非预测 skew。
+    double fade_micro_c{1.0};  // micro-price 偏离 mid ≥ 此 ¢ → 抢撤; 0=关
+    double fade_obi{0.7};      // |带内订单流失衡| (0-1) ≥ 此值 → 抢撤; 0=关
     double min_days_to_resolution{10.0};  // 剔除 N 天内结算的池 (近结算=催化剂风险); 0=关
     double max_vol_mult{2.5};  // 剔除 实现日波动 > N×奖励带宽 的跳池; 0=关
     double crossing_cost_c{0.0};

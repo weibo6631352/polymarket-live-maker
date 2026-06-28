@@ -589,6 +589,14 @@ void LiveRunner::compute_and_store_signals(const std::string& token) {
         std::lock_guard<std::mutex> lk(signal_mu_);
         signal_by_token_[token] = sig;
     }
+    // fade-on-imbalance: micro-price 大幅偏离 mid / 强订单流失衡 = 毒流来袭 → 抢在 mid 越带前双边撤。
+    // 研究 (IEX/Cont): 毒流集中在瞬间, 静态挂着 = 知情流的出口; OBI 解释 ~65% 短时移动。防御性拉单, 非预测 skew。
+    {
+        const double micro_lead_c = std::abs(sig.micro_price - mid) * 100.0;
+        if ((cfg_.fade_micro_c > 0.0 && micro_lead_c >= cfg_.fade_micro_c) ||
+            (cfg_.fade_obi > 0.0 && std::abs(sig.obi_band) >= cfg_.fade_obi))
+            reflex_pull(token, "fade_imbalance", mid);
+    }
     // 标定日志: 每 token 节流 1s 记一次 (10Hz 全记会爆; 1s 给更细标定); mid/micro_price/obi + 下一周期 Δmid 供回归。
     const double now_m = mono_now();
     {
@@ -606,28 +614,36 @@ void LiveRunner::compute_and_store_signals(const std::string& token) {
                      {"depth", round_to(sig.depth, 1)}});
 }
 
-void LiveRunner::on_ws_price(const std::string& token, double mid) {
+// 拉单: 撤 token 双边报价 (mid-move reflex 与 imbalance fade 共用)。已占位/无活跃引用则跳过。
+void LiveRunner::reflex_pull(const std::string& token, const std::string& reason, double mid) {
     std::string no_token;
     {
         std::lock_guard<std::mutex> lk(reflex_mu_);
-        auto it = reflex_refs_.find(token);
-        if (it == reflex_refs_.end() || reflex_cancelled_.count(token) != 0) return;
-        const auto [ref_mid, band] = it->second;
-        if (std::abs(mid - ref_mid) < band) return;
-        reflex_cancelled_.insert(token);  // 慢 I/O 前先占住
+        if (reflex_refs_.count(token) == 0 || reflex_cancelled_.count(token) != 0) return;
+        reflex_cancelled_.insert(token);  // 慢 I/O 前先占住 (并发再入直接跳过)
         auto cit = reflex_complement_.find(token);
         if (cit != reflex_complement_.end()) no_token = cit->second;
     }
     try {
         locked_submit({{"action", "CANCEL_ALL"}, {"token_id", token}});
-        // YES mid 漂 → NO mid 反向漂同幅, BUY-NO 腿同样过时, 一并撤掉。
+        // YES 腿过时 → 互补 BUY-NO 腿同样过时, 一并撤掉。
         if (!no_token.empty()) locked_submit({{"action", "CANCEL_ALL"}, {"token_id", no_token}});
-        event("reflex_cancel", {{"token", token}, {"mid", mid}});
-        wake_loop();  // 事件驱动: WS 撤单后立刻唤醒主循环在新 mid 重挂 (不留无报价空窗)
+        event("reflex_cancel", {{"token", token}, {"mid", mid}, {"reason", reason}});
+        wake_loop();  // 撤后立刻唤醒主循环在新 mid 重挂 (不留无报价空窗)
     } catch (...) {
         std::lock_guard<std::mutex> lk(reflex_mu_);
         reflex_cancelled_.erase(token);
     }
+}
+
+void LiveRunner::on_ws_price(const std::string& token, double mid) {
+    {
+        std::lock_guard<std::mutex> lk(reflex_mu_);
+        auto it = reflex_refs_.find(token);
+        if (it == reflex_refs_.end() || reflex_cancelled_.count(token) != 0) return;
+        if (std::abs(mid - it->second.first) < it->second.second) return;  // 未越 recenter 带
+    }
+    reflex_pull(token, "mid_move", mid);  // mid 越带 → 拉 (滞后信号: mid 已动)
 }
 
 void LiveRunner::start_discovery_thread() {
