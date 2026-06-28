@@ -1,44 +1,108 @@
-// pmm/telemetry/telemetry.idl — 实时遥测总线 schema (Fast-DDS)
+// pmm/telemetry/telemetry.idl — 全量实时遥测 schema (Fast-DDS)
 //
-// bot 作为 DDS Publisher 在各事件点发布; 桥接进程订阅这些 topic → WebSocket → Web 仪表盘。
-// 每个 topic 一个 struct。只读遥测 (展示/监控), 非交易热路径。
-// 字段对应 runner/engine 的现有状态 (心跳/报价/成交/持仓/净值/选池/急停/奖励)。
+// 目标: 全量观测、便于分析。不只发摘要, 把每个"决策的完整上下文"都打出来 ——
+//   定价为什么这么定 (QuoteDecision 含 σ/跳变/奖励/bleed/净/份额/尾部)、
+//   池为什么选/拒 (PoolEval 含每个滤网结果 + 全部指标)、
+//   每笔成交怎么被逆选的 (FillContext 含成交前后 mid + 盘口 + bleed)、
+//   盘口微结构 (BookSnapshot)。
+// bot 作为 Publisher 在每个决策点发布; 两个订阅者: ①记录器→SQLite(便于 SQL 分析) ②桥接→Web 仪表盘。
 
 module pmm { module telemetry {
 
-  // 心跳: ~1s 一发, 总览盘。订阅者据此判活/显示运行态。
+  // 心跳: ~1s, 总览盘。
   struct Heartbeat {
     long long ts_ms;
-    string    run_state;        // running / killed / stopped
+    string    run_state;            // running / killed / stopped
     double    uptime_s;
     double    usdc;
-    double    equity;           // usdc + 持仓市值
-    long      n_quotes;         // 活跃报价数
+    double    equity;               // usdc + 持仓市值
+    long      n_quotes;             // 活跃报价数
+    long      n_pools_tracked;      // 在管池数
+    double    book_resync_rps;      // 盘口刷新速率 (149hz 健康度)
   };
 
-  // 报价更新: 每次挂/改/撤报价。
-  struct QuoteUpdate {
+  // 报价决策: 每次定价的完整数学。分析"为什么这么定价/这么大 size"的核心。
+  struct QuoteDecision {
     long long ts_ms;
     string    condition_id;
     string    question;
     string    token;
-    string    side;             // BUY-YES / BUY-NO
+    string    side;                // BUY-YES / BUY-NO
     double    mid;
-    double    half_spread_c;    // 该池动态半价差 (optimal_half_spread)
+    double    max_spread_c;        // 奖励带宽
+    double    half_spread_c;       // 最终半价差 (optimal_half_spread 输出)
+    double    sigma_c;             // 实现波动 (¢)
+    double    jump_sigma_c;        // 跳变感知 σ (异常跳变抬升后)
+    double    jump_anomaly;        // 跳变异常倍数 (>1=异常)
+    double    est_reward;          // 估日奖励 (κ 校准后)
+    double    bleed_per_day;       // 估逆选 bleed
+    double    net_per_day;         // net = reward - bleed (优化目标)
+    double    existing_qmin;       // 竞争 (带内对手挂量, 1/κ 充气)
+    double    own_qmin;            // 自己挂量
+    double    share_w;             // 估份额 W(s)
     double    size;
-    string    status;           // active / skipped / cancelled
+    double    committed_capital;
+    double    tail_var;            // 尾部-VaR (单次成交最坏损失)
+    boolean   net_gate_pass;       // 净边际门是否通过
+    boolean   tail_capped;         // size 是否被尾部预算截断
+    string    status;              // active / skipped / cancelled
+    string    skip_reason;         // "" = 正常挂
   };
 
-  // 成交: 每笔 maker fill。bleed = 该笔逆选损失 (核心要盯的)。
-  struct Fill {
+  // 选池评估: 每个发现周期、每个候选 —— 全部指标 + 每个滤网的结果。分析"为什么选/拒"的核心。
+  struct PoolEval {
     long long ts_ms;
     string    condition_id;
+    string    question;
+    double    competitiveness;
+    double    days_to_resolution;
+    double    mid;
+    double    volume;
+    string    jump_verdict;        // SAFE / jumpy
+    boolean   empty_band;
+    double    vol_mult;            // 实现波动 / 带宽 (>2.5 被丢)
+    double    est_reward;
+    double    net_per_day;
+    boolean   safe_pass;           // 各滤网逐个结果
+    boolean   comp_pass;
+    boolean   mid_pass;
+    boolean   net_pass;
+    boolean   days_pass;
+    boolean   reward_pass;
+    boolean   selected;
+    string    reject_reason;       // "" = 选中
+  };
+
+  // 成交上下文: 每笔 maker fill 的完整逆选画面 —— 成交前后 mid (逆选移动)、盘口、bleed。
+  struct FillContext {
+    long long ts_ms;
+    string    condition_id;
+    string    question;
     string    token;
     string    side;
     double    size;
     double    price;
-    double    bleed;
-    string    leg;              // yes / no
+    string    leg;                 // yes / no
+    double    mid_before;          // 成交前 mid
+    double    mid_after;           // 成交后 mid (差 = 逆选移动)
+    double    bleed;               // 该笔逆选损失
+    double    book_bid;            // 成交时盘口
+    double    book_ask;
+    double    inventory_after;     // 成交后该腿持仓
+    boolean   reconciled;          // 是否触发 reconcile 纠腿
+  };
+
+  // 盘口快照: 关键点的微结构 (报价/成交/移动时)。
+  struct BookSnapshot {
+    long long ts_ms;
+    string    condition_id;
+    string    token;
+    double    mid;
+    double    best_bid;
+    double    best_ask;
+    double    bid_qty;
+    double    ask_qty;
+    double    inband_qmin;         // 带内最小挂量 (直接竞争度量)
   };
 
   // 持仓快照: 每个非零持仓 (链上真实)。
@@ -51,31 +115,22 @@ module pmm { module telemetry {
     double    value;
   };
 
-  // 净值快照: 每个采样周期。equity_dd_count = 急停持续性连续计数。
+  // 净值/盈亏快照: 完整分项。
   struct EquitySnapshot {
     long long ts_ms;
     double    usdc;
     double    position_value;
     double    equity;
-    long      equity_dd_count;
-  };
-
-  // 选池: 每个发现周期, 每个候选 (选中或拒绝 + 理由)。看语义选池有没有挡住毒池。
-  struct PoolSelection {
-    long long ts_ms;
-    string    condition_id;
-    string    question;
-    double    competitiveness;
-    double    days_to_resolution;
-    double    est_reward;
-    boolean   selected;
-    string    reject_reason;    // "" = 选中
+    long      equity_dd_count;     // 急停持续性连续计数
+    double    day_pnl;             // 当日盈亏
+    double    realized_bleed;      // 累计逆选
+    double    reward_accrued;      // 累计奖励
   };
 
   // 急停事件。
   struct KillEvent {
     long long ts_ms;
-    string    kind;             // signal / equity-drawdown / churn / manual
+    string    kind;                // signal / equity-drawdown / churn / manual
     string    reason;
   };
 
@@ -84,6 +139,16 @@ module pmm { module telemetry {
     long long ts_ms;
     double    daily_reward;
     double    official_total;
+  };
+
+  // 通用日志事件: reflex 撤单 / reconcile 纠腿 / 孤立清扫 / 链上查询(含延迟) / 发现周期 等。
+  // kind 区分; detail 是结构化字符串 (key=val), 兜住所有杂项, 不漏任何动作。
+  struct LogEvent {
+    long long ts_ms;
+    string    kind;                // reflex_cancel / reconcile / orphan_sweep / chain_query / discovery / ...
+    string    condition_id;        // "" = 全局
+    double    latency_ms;          // 相关延迟 (如链上查询耗时); 无则 0
+    string    detail;              // key=val; ... 自由结构化
   };
 
 }; };
