@@ -91,6 +91,10 @@ LiveRunner::LiveRunner(RunnerConfig cfg, Engine* engine, rewards::RewardsClient*
             dyn_whitelist_ = std::move(wl);
         }
         std::fprintf(stderr, "curator: applied %zu pools via DDS\n", n);
+        // 实时生效: 强制下一轮立即 reselect (不等 reeval 周期) + 唤醒主循环。reselect 用新有效白名单选池,
+        // 且把不再在白名单内的持仓池按 deselected 退出 → 整体换成 curator 选的池 (非追加)。
+        force_reselect_.store(true);
+        wake_loop();
     });
 }
 
@@ -373,7 +377,7 @@ void LiveRunner::run() {
                                          {"reject_reason", std::string{}}});
                 }
             }
-            if (now - last_reeval >= cfg_.reeval_interval_s) {
+            if (force_reselect_.exchange(false) || now - last_reeval >= cfg_.reeval_interval_s) {
                 tick_cooldowns();
                 reevaluate_held();
                 reselect();

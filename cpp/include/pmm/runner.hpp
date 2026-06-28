@@ -157,6 +157,7 @@ private:
     std::condition_variable loop_cv_;
     std::mutex loop_mu_;
     std::atomic<bool> loop_wake_{false};
+    std::atomic<bool> force_reselect_{false};  // curator 经 DDS 推白名单 → 立即强制 reselect (不等 reeval 周期)
     void wake_loop() {
         loop_wake_.store(true);
         std::lock_guard<std::mutex> lk(loop_mu_);
