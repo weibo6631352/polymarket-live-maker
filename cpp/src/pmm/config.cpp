@@ -2,6 +2,7 @@
 #include "pmm/config.hpp"
 
 #include <format>
+#include <sstream>
 #include <string>
 
 #include "pmm/app/dotenv.hpp"
@@ -65,6 +66,15 @@ RunnerConfig RunnerConfig::from_env() {
     c.recenter_ticks = i("LM_RECENTER_TICKS", 1);
     c.fade_micro_c = f("LM_FADE_MICRO_C", 1.0);  // fade-on-imbalance: micro-price 偏离阈 (¢)
     c.fade_obi = f("LM_FADE_OBI", 0.7);          // fade-on-imbalance: 订单流失衡阈 (0-1)
+    {  // 语义选池白名单 (逗号分隔 condition_id; 空=不限)
+        std::stringstream ss(pmm::env::str("LM_POOL_WHITELIST"));
+        std::string id;
+        while (std::getline(ss, id, ',')) {
+            const auto a = id.find_first_not_of(" \t");
+            const auto b = id.find_last_not_of(" \t");
+            if (a != std::string::npos) c.pool_whitelist.insert(id.substr(a, b - a + 1));
+        }
+    }
     c.min_days_to_resolution = f("LM_MIN_DAYS_TO_RESOLUTION", 10.0);  // R2: 剔除近结算催化剂池
     c.max_vol_mult = f("LM_MAX_VOL_MULT", 2.5);  // 剔除 实现日波动 > N×带宽 的跳池
     c.crossing_cost_c = f("LM_CROSSING_COST_C", 0.0);

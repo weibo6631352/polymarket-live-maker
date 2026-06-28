@@ -718,6 +718,7 @@ void LiveRunner::reselect() {
     p.reward_calib = cfg_.reward_calib;  // 利润校准 κ
     p.max_competitiveness = cfg_.max_competitiveness;  // 硬剔除新闻/毒池 (重新启用)
     p.extreme_mid_margin = cfg_.extreme_mid_margin;    // 剔除近极端价池 (逆选/趋势源)
+    p.pool_whitelist = cfg_.pool_whitelist;            // 语义选池白名单 (非空只做名单内)
     p.cooldown = cd;
     std::vector<rewards::PoolReport> scored_pools;
     {

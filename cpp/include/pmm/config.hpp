@@ -3,6 +3,7 @@
 // 字段、默认值、env 名称与 Python RunnerConfig.from_env 一一对应。
 #pragma once
 
+#include <set>
 #include <string>
 
 namespace pmm {
@@ -31,6 +32,9 @@ struct RunnerConfig {
     // market_competitiveness 高 = 被关注/新闻驱动 = 毒。盘口/净门/跳变σ 挡不住 (安静时 σ 低), 截断才挡得住。
     double max_competitiveness{1.5};  // 硬剔除 competitiveness > 此值的新闻/毒池; 0=关
     double extreme_mid_margin{0.2};   // 剔除 mid<0.2 或 >0.8 的近极端价池 (逆选/趋势源: South Korea)
+    // 语义选池白名单: 非空 → 只做这些 condition_id。研究纠正轴: 宽基行为盈余市场(体育/真人秀, 散户高估
+    // YES 喂做市方) 好; 单名新闻/地缘(审判/转会/政变, 内幕+横扫) 毒。LLM 按此轴精选, 数字滤网认不出。
+    std::set<std::string> pool_whitelist;
     double jump_vol_weight{0.7};      // 跳变感知 bleed: 挂宽到"罕见成交" (奖励来自挂在带里, 成交是纯成本)。
                                       // 0.4 实测把 spread 收太紧 → 30min 11 笔成交 churn → 净亏; 利润靠多池/大size, 非紧 spread
     bool net_edge_gate{true};         // 净边际门: 跳变感知 net=reward-bleed ≤ 0 的池不报价 (毒池自然出局)

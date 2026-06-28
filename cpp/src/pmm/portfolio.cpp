@@ -129,6 +129,8 @@ std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,
     std::vector<const rewards::PoolReport*> cands;
     for (const auto& p : scan_report.pools) {
         if (cd.count(p.condition_id) != 0 || cd.count(p.token) != 0) continue;
+        // 语义选池白名单: 非空时只放行名单内的 condition_id (LLM 精选宽基行为盈余池, 排单名新闻毒池)。
+        if (!params.pool_whitelist.empty() && params.pool_whitelist.count(p.condition_id) == 0) continue;
         if (params.require_safe && !(p.jump_verdict == "SAFE" && !p.empty_band)) continue;
         // 硬剔除新闻/毒池: market_competitiveness > 上限 → 跳过。高竞争度 = 被关注/新闻驱动 = 新闻一动就逆选
         // (实测删此截断后 bot 做进 Tyler 判决/McGonigle 事件池 → 亏)。盘口/净门/跳变σ 安静时挡不住, 截断挡得住。
