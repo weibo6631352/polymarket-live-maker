@@ -103,7 +103,8 @@ public:
 
     [[nodiscard]] std::vector<nlohmann::json> sampling_markets(int max_pages = 100);
     // B: /rewards/markets/multi → {condition_id: RewardMulti(竞争度, 剩余额度$, 24h量)}; 选池用 PM 权威数据。
-    [[nodiscard]] std::map<std::string, RewardMulti> reward_markets_multi(int max_pages = 4);
+    // max_pages=20: 官方约 1875 个奖励池跨 ~15 页(每页 500); 4 页只覆盖 ~27% → comp/vol 大量缺失。20 页全覆盖。
+    [[nodiscard]] std::map<std::string, RewardMulti> reward_markets_multi(int max_pages = 20);
     [[nodiscard]] nlohmann::json book(const std::string& token_id);
     [[nodiscard]] std::vector<orderbook::PricePoint> prices_history(const std::string& token_id,
                                                                     const std::string& interval = "max",

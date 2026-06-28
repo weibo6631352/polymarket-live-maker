@@ -313,11 +313,15 @@ std::map<std::string, RewardMulti> RewardsClient::reward_markets_multi(int max_p
         std::string path = "/rewards/markets/multi?page_size=500";
         if (!cursor.empty()) path += "&next_cursor=" + cursor;
         json data;
-        try {
-            data = get(path);
-        } catch (...) {
-            break;  // 失败不致命: 选池退回不带这层增强
+        bool ok = false;
+        for (int attempt = 0; attempt < 2 && !ok; ++attempt) {  // 瞬时失败重试一次, 不因单次网络抖动丢整轮 comp/vol 增强
+            try {
+                data = get(path);
+                ok = true;
+            } catch (...) {
+            }
         }
+        if (!ok) break;  // 连重试也失败才放弃 (下个发现周期自愈)
         const json* d = data.is_object() ? ju::find(data, "data") : nullptr;
         const json page = (d != nullptr) ? *d : (data.is_array() ? data : json::array());
         if (!page.is_array() || page.empty()) break;
