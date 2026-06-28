@@ -77,7 +77,7 @@ private:
                                                         double own_size, double own_hs);
     void exit_held(const std::string& cond, const nlohmann::json& quote, const std::string& reason);
     [[nodiscard]] bool use_live_path() const;
-    void place(const std::string& cond, const nlohmann::json& pool);
+    bool place(const std::string& cond, const nlohmann::json& pool);  // false = 净边际门跳过 (未下单)
     [[nodiscard]] FillsByToken poll_fills();
     void shutdown();
     nlohmann::json locked_submit(const nlohmann::json& action);

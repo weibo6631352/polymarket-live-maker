@@ -297,12 +297,17 @@ double realized_sigma_c_from_history(const std::vector<PricePoint>& history, dou
         max_abs_dev = std::max(max_abs_dev, std::abs(d - mean));  // 最大单步偏移 = 已显露的跳变幅度
     }
     const double var = var_sum / n;
+    const double stdev = std::sqrt(var);
     const double scale = std::sqrt(poll_seconds / step);
-    const double stdev_sigma = std::sqrt(var) * scale;
-    if (jump_weight <= 0.0) return stdev_sigma;  // parity
-    // 跳变感知: 一次跳变被 stdev 摊薄 → 用最大单步移动作 σ 下限, 让 bleed 计进尾部 → 挂宽/净负避开毒池。
-    const double jump_sigma = jump_weight * max_abs_dev * scale;
-    return std::max(stdev_sigma, jump_sigma);
+    const double stdev_sigma = stdev * scale;
+    if (jump_weight <= 0.0 || stdev < 1e-9) return stdev_sigma;  // parity / 退化
+    // 跳变感知: 正态 n 样本的预期最大 |move| ≈ stdev×√(2 ln n)。实际最大移动超出此值 = 异常跳变 (catalyst),
+    // 被 stdev 摊薄看不见。按超出倍数 (anomaly−1) 抬升 σ → bleed 计进尾部 → 毒池自动挂宽/净负。正常池
+    // anomaly≈1 → 不动 (不误伤)。这比"取 max 作 σ 下限"更克制 (后者会广泛高估正常池)。
+    const double exp_max = stdev * std::sqrt(2.0 * std::log(std::max(2.0, n)));
+    const double anomaly = (exp_max > 1e-9) ? (max_abs_dev / exp_max) : 1.0;
+    const double factor = (anomaly > 1.0) ? (1.0 + jump_weight * (anomaly - 1.0)) : 1.0;
+    return stdev_sigma * factor;
 }
 
 OptimalHalfSpread optimal_half_spread(double daily_rate, double max_spread_c, double min_size,

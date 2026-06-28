@@ -593,7 +593,7 @@ void LiveRunner::reselect() {
     double committed = 0.0;
     for (const auto& [cond, m] : placed_) committed += m.value("committed_capital", 0.0);
     int n_want = static_cast<int>(want.size());
-    int n_placed = 0, n_lowrew = 0, n_budget = 0, n_failed = 0;
+    int n_placed = 0, n_lowrew = 0, n_budget = 0, n_failed = 0, n_lownet = 0;
     for (const auto& [cond, s] : want) {
         if (placed_.count(cond) != 0) continue;
         if (s.value("est_daily_reward", 0.0) < cfg_.min_pool_reward) {
@@ -606,7 +606,10 @@ void LiveRunner::reselect() {
             continue;
         }
         try {
-            place(cond, s);
+            if (!place(cond, s)) {  // 净边际门跳过 (毒池, 未下单) → 不占选池槽
+                ++n_lownet;
+                continue;
+            }
             committed += cap;
             placed_[cond] = s;
             placed_at_[cond] = mono_now();
@@ -624,16 +627,24 @@ void LiveRunner::reselect() {
         }
     }
     // 每轮选池小结: 选中多少 / 真下多少 / 各种跳过原因 — 否则 0 下单时无从判断卡在哪。
-    std::fprintf(stderr, "reselect: want=%d placed=%d (skip low_reward=%d over_budget=%d failed=%d)\n",
-                 n_want, n_placed, n_lowrew, n_budget, n_failed);
+    std::fprintf(stderr,
+                 "reselect: want=%d placed=%d (skip low_reward=%d over_budget=%d low_net=%d failed=%d)\n",
+                 n_want, n_placed, n_lowrew, n_budget, n_lownet, n_failed);
     sync_ws_subscriptions();
 }
 
-void LiveRunner::place(const std::string& cond, const json& pool) {
+bool LiveRunner::place(const std::string& cond, const json& pool) {
     double hs = pool.value("half_spread_c", 0.0);
     if (cfg_.use_optimal_spread) {
         try {
             const json rec = engine().suggest_maker_half_spread(cond, "yes", 0.0, cfg_.poll_seconds);
+            // 净边际门 (专家 #2): 跳变感知 bleed 后 net=reward-bleed ≤ 0 → 奖励被逆选吃光 → 不报价, 让毒池
+            // 自然出局 (取代手调 comp/mid 启发式)。rec 缺字段时默认放行 (不误杀)。
+            if (cfg_.net_edge_gate && rec.value("net_per_day", 1.0) <= 0.0) {
+                std::fprintf(stderr, "net-gate: %s net/day=%.3f <= 0 (bleed eats reward) — not quoting\n",
+                             cond.substr(0, 10).c_str(), rec.value("net_per_day", 0.0));
+                return false;
+            }
             const double v = rec.value("half_spread_c", 0.0);
             if (v > 0.0) hs = v;
         } catch (...) {
@@ -648,6 +659,7 @@ void LiveRunner::place(const std::string& cond, const json& pool) {
     } else {
         engine().place_maker_quote(cond, "yes", opts);
     }
+    return true;
 }
 
 void LiveRunner::reevaluate_held() {
