@@ -830,6 +830,11 @@ FillsByToken LiveRunner::poll_fills() {
         rf.price = f.value("price", 0.0);
         const std::string tok = f.value("token_id", std::string{});
         out[tok].push_back(rf);
+        // 在途记账: 记下这笔自己的成交 (BUY +size / SELL -size), 滞后窗口内 believed=链上+在途。
+        if (!tok.empty()) {
+            const bool is_buy = !rf.side.empty() && (rf.side[0] == 'B' || rf.side[0] == 'b');
+            inflight_.on_fill(tok, is_buy ? rf.size : -rf.size, rf.price, mono_now());
+        }
         // 防churn熔断: 这个 token 60s 内被吃太多次 = 被趋势反复扫 (逆选 churn) → KILL (现实, 不依赖账本)。
         if (!tok.empty()) {
             const double tn = mono_now();
@@ -848,6 +853,9 @@ std::vector<json> LiveRunner::poll_once() {
     std::vector<json> rows;
     if (use_live_path()) {
         const FillsByToken fills = poll_fills();
+        // 在途更新后立刻把 believed 持仓 (链上+在途) 推给引擎的链上守卫 → 刚成交的池即时被挡 (不等 15s 刷新)。
+        if (engine_ != nullptr)
+            engine_->set_chain_positions(inflight_.believed_positions(last_chain_positions_));
         std::set<std::string> forced;
         {
             std::lock_guard<std::mutex> lk(reflex_mu_);
@@ -957,22 +965,18 @@ std::optional<std::string> LiveRunner::kill_check() {
                 const std::string funder = pmm::env::str("POLYMARKET_FUNDER");
                 last_pos_value_ = engine_->api().chain_position_value(funder);
                 last_chain_positions_ = engine_->api().chain_positions(funder);  // 根因守卫用 (持仓的池不再报价)
-                engine_->set_chain_positions(last_chain_positions_);
+                inflight_.reconcile(last_chain_positions_, now);  // 链上追上→退役在途; 滞后窗口外才看链上
+                engine_->set_chain_positions(inflight_.believed_positions(last_chain_positions_));
             }
-            // 持续性: 仅在每次 15s 采样更新计数 (非每次调用)。链上查询刚买入后滞后→净值假跌; 连续 3 次(~45s)
-            // 都跌破才认定真亏 (滞后会在 1-2 次内自愈)。真亏持续 → 照样刹住, 仅延迟 ~45s (持仓有界, 可接受)。
-            const double eq = last_usdc_ + last_pos_value_;
-            if (last_usdc_ > 0.0 && eq < *usdc_start_ - cfg_.max_loss)
-                equity_dd_count_++;
-            else
-                equity_dd_count_ = 0;
         }
-        if (equity_dd_count_ >= 3) {
-            char buf[200];
+        // 滞后感知净值: USDC + 链上已结算市值 + 在途净成本(刚买未结算的仓)。链上低估刚买的仓时, 在途补回
+        // → 不再假急停 (取代旧的"连续3次"权宜)。真亏 = 持仓逆向跌价 → 链上市值真跌 → 照样刹住, 即时无延迟。
+        const double equity = last_usdc_ + last_pos_value_ + inflight_.net_cost();
+        if (last_usdc_ > 0.0 && equity < *usdc_start_ - cfg_.max_loss) {
+            char buf[210];
             std::snprintf(buf, sizeof(buf),
-                          "real-equity-drawdown x%d (now $%.2f [usdc %.2f+pos %.2f] < baseline $%.2f - maxloss $%.0f)",
-                          equity_dd_count_, last_usdc_ + last_pos_value_, last_usdc_, last_pos_value_, *usdc_start_,
-                          cfg_.max_loss);
+                          "real-equity-drawdown (now $%.2f [usdc %.2f+pos %.2f+inflight %.2f] < baseline $%.2f - maxloss $%.0f)",
+                          equity, last_usdc_, last_pos_value_, inflight_.net_cost(), *usdc_start_, cfg_.max_loss);
             return std::string(buf);
         }
     }
