@@ -42,7 +42,29 @@ Even fully fixed, $1k yields ~$/day (thin, execution-intensive; pros compete the
 test is whether the active stack (fade + semantic-selection + merge) flips the sign vs the old
 static config's ~-$190 — not big profit at this scale.
 
-## Still TODO (optional, not on the critical path to run)
-- CTF merge sig_type=1 proxy-factory `exec` wrapper (positions held by proxy 0x78dE, not the EOA) —
-  the only piece left for a REAL merge; merge is double-gated OFF until then.
-- Tune `LM_FADE_MICRO_C` / `LM_FADE_OBI` from live fade-vs-fill telemetry.
+---
+## STATUS (2026-06-28): everything doable is DONE; the rest genuinely needs the live test
+
+### ✅ VERIFIED in dry-live (no money, on the box)
+- **Semantic selection works**: the numeric filters select TOXIC pools (verified: they picked the
+  Tyler-Robinson trial + the McGonigle award — the exact pools we lost on). The whitelist OVERRIDE
+  steered the bot to quote the LLM-curated broad-based pool (Dodgers) instead. So the bot quotes
+  what *I* semantically approve, avoiding the toxic news pools.
+- **fade-on-imbalance FIRES**: 7,962 `reflex_cancel reason=fade_imbalance` on real imbalances
+  (obi_band~0.96, micro_lead~2.4¢); 9,128 signal events; books are fully liquid (347K L2 snapshots,
+  both sides). The research's #1 fix is live-verified working.
+- **placed=0 root cause**: a drained dry ledger ($45), NOT the filters. Fixed (low_reward bypass for
+  whitelisted + fresh capital). The earlier scares (empty books / WS-bug) were MY measurement errors
+  (the signal/fade events go to telemetry, not stderr — I was grepping the journal).
+- **Full observability live**: dashboard reachable via `ssh -L 8787:localhost:8787` (or the tunnel
+  helper); telemetry recording to state/telemetry.db.
+
+### 🔒 LEFT for the SEPARATE live test (real money / on-chain — physically un-doable in dry-live)
+1. **Live P&L** — does the active stack (semantic-selection + fade) flip the sign vs the static
+   config's ~-$190? Needs `PM_TRADER_LIVE=1` + small `LM_CAPITAL`. Only measurable on REAL fills.
+2. **Fade threshold tuning** (`LM_FADE_OBI` / `LM_FADE_MICRO_C`) — fade fires often on liquid/active
+   pools; calibrate to "fire only on genuinely toxic flow" using live fade-vs-fill P&L data.
+3. **Merge real-funds arming** — inner target/collateral must be pinned for THIS account (CTF+USDC.e
+   as encoded vs the newer Ctf-Collateral-Adapter `0xada100db…`+pUSD `0xc011a7…` seen on-chain)
+   before `LM_MERGE_ARM_REAL_FUNDS=1`. Proxy routing (sig_type=1) is solved + dry-verified.
+4. **Autonomous LLM curation** — set `LM_ANTHROPIC_KEY` to enable (the static whitelist works without it).
