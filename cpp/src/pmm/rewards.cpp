@@ -409,7 +409,8 @@ std::vector<orderbook::PricePoint> RewardsClient::prices_history(const std::stri
 // ---------------------------------------------------------------------------
 
 ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump_risk,
-                double min_days_to_resolution, double max_vol_mult, double reward_calib) {
+                double min_days_to_resolution, double max_vol_mult, double reward_calib,
+                const std::set<std::string>& whitelist) {
     const std::vector<json> markets = client.sampling_markets();
     const double now = static_cast<double>(std::time(nullptr));
 
@@ -502,8 +503,10 @@ ScanResult scan(RewardsClient& client, double min_daily, int top, bool with_jump
         // (那类靠 max_mid_vel_cps 入场护栏 + FAK 自平 + 安全退出兜底)。
         // 取 全史 与 近窗 波动的较大者 → 既抓"长期就跳"也抓"近期升温"(calm-before-catalyst, 如真人秀临近决赛)。
         const double vol_c = std::max(r->daily_vol_c.value_or(0.0), r->recent_vol_c.value_or(0.0));
-        if (max_vol_mult > 0.0 && vol_c > 0.0 && r->max_spread_c > 0.0 &&
-            vol_c > max_vol_mult * r->max_spread_c) {
+        // 白名单池绕过"跳动剔除": LLM 选的宽基行为池常因临近赛事/比赛跳动被扫描层剔掉, 但那正是有散户
+        // 行为盈余 + fade 抗跳的地方 → 放行进入可做集 (功能性的 depleted<$1 仍剔)。
+        if (max_vol_mult > 0.0 && whitelist.count(r->condition_id) == 0 && vol_c > 0.0 &&
+            r->max_spread_c > 0.0 && vol_c > max_vol_mult * r->max_spread_c) {
             ++vol_dropped;
             continue;
         }

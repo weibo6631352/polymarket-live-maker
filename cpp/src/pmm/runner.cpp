@@ -698,7 +698,7 @@ void LiveRunner::rediscover() {
     try {
         rewards::ScanResult res = rewards::scan(scanner(), cfg_.min_daily, cfg_.scan_top, true,
                                                 cfg_.min_days_to_resolution, cfg_.max_vol_mult,
-                                                cfg_.reward_calib);
+                                                cfg_.reward_calib, cfg_.pool_whitelist);
         const int n_scanned = res.pools_scored;  // move 前抓计数 (供 DiscoveryScan 遥测)
         const int n_safe = res.safe_count;
         {

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -119,6 +120,7 @@ struct ScanResult {
 
 [[nodiscard]] ScanResult scan(RewardsClient& client, double min_daily = MIN_DAILY, int top = 30,
                               bool with_jump_risk = true, double min_days_to_resolution = 0.0,
-                              double max_vol_mult = 0.0, double reward_calib = 1.0);
+                              double max_vol_mult = 0.0, double reward_calib = 1.0,
+                              const std::set<std::string>& whitelist = {});
 
 }  // namespace pmm::rewards
