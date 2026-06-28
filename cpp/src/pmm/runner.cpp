@@ -959,13 +959,20 @@ std::optional<std::string> LiveRunner::kill_check() {
                 last_chain_positions_ = engine_->api().chain_positions(funder);  // 根因守卫用 (持仓的池不再报价)
                 engine_->set_chain_positions(last_chain_positions_);
             }
+            // 持续性: 仅在每次 15s 采样更新计数 (非每次调用)。链上查询刚买入后滞后→净值假跌; 连续 3 次(~45s)
+            // 都跌破才认定真亏 (滞后会在 1-2 次内自愈)。真亏持续 → 照样刹住, 仅延迟 ~45s (持仓有界, 可接受)。
+            const double eq = last_usdc_ + last_pos_value_;
+            if (last_usdc_ > 0.0 && eq < *usdc_start_ - cfg_.max_loss)
+                equity_dd_count_++;
+            else
+                equity_dd_count_ = 0;
         }
-        const double equity = last_usdc_ + last_pos_value_;
-        if (last_usdc_ > 0.0 && equity < *usdc_start_ - cfg_.max_loss) {
-            char buf[180];
+        if (equity_dd_count_ >= 3) {
+            char buf[200];
             std::snprintf(buf, sizeof(buf),
-                          "real-equity-drawdown (now $%.2f [usdc %.2f+pos %.2f] < baseline $%.2f - maxloss $%.0f)",
-                          equity, last_usdc_, last_pos_value_, *usdc_start_, cfg_.max_loss);
+                          "real-equity-drawdown x%d (now $%.2f [usdc %.2f+pos %.2f] < baseline $%.2f - maxloss $%.0f)",
+                          equity_dd_count_, last_usdc_ + last_pos_value_, last_usdc_, last_pos_value_, *usdc_start_,
+                          cfg_.max_loss);
             return std::string(buf);
         }
     }

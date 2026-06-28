@@ -160,6 +160,9 @@ private:
     double last_usdc_{0.0};             // 上次查到的真实 USDC (节流缓存)
     double last_pos_value_{0.0};        // 上次查到的链上持仓市值 (净值 = USDC + 此值)
     double last_usdc_check_{0.0};       // 上次查询单调时刻 (节流 ~15s)
+    // 净值急停持续性计数: 链上持仓查询在刚买入后会滞后(低估持仓市值)→ 净值瞬时假跌。要求连续 K 次 15s
+    // 采样都跌破才急停 (~45s) → 滤掉结算滞后的假跌, 真亏(持续)照样刹住。每次 15s 采样更新, 非每次调用。
+    int equity_dd_count_{0};
     // 链上真实持仓 (token->size), ~15s 刷新。根因守卫: 持有未平仓位的池绝不再报价 → 不再被反复填成大孤立
     // (修执行死结: 趋势逆选 + 平仓结算延迟 → 累积)。平仓清掉后自然解锁。
     std::map<std::string, double> last_chain_positions_;
