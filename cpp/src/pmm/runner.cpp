@@ -858,11 +858,6 @@ FillsByToken LiveRunner::poll_fills() {
         rf.price = f.value("price", 0.0);
         const std::string tok = f.value("token_id", std::string{});
         out[tok].push_back(rf);
-        // 在途记账: 记下这笔自己的成交 (BUY +size / SELL -size), 滞后窗口内 believed=链上+在途。
-        if (!tok.empty()) {
-            const bool is_buy = !rf.side.empty() && (rf.side[0] == 'B' || rf.side[0] == 'b');
-            inflight_.on_fill(tok, is_buy ? rf.size : -rf.size, rf.price, mono_now());
-        }
         // 防churn熔断: 这个 token 60s 内被吃太多次 = 被趋势反复扫 (逆选 churn) → KILL (现实, 不依赖账本)。
         if (!tok.empty()) {
             const double tn = mono_now();
@@ -881,9 +876,6 @@ std::vector<json> LiveRunner::poll_once() {
     std::vector<json> rows;
     if (use_live_path()) {
         const FillsByToken fills = poll_fills();
-        // 在途更新后立刻把 believed 持仓 (链上+在途) 推给引擎的链上守卫 → 刚成交的池即时被挡 (不等 15s 刷新)。
-        if (engine_ != nullptr)
-            engine_->set_chain_positions(inflight_.believed_positions(last_chain_positions_));
         std::set<std::string> forced;
         {
             std::lock_guard<std::mutex> lk(reflex_mu_);
@@ -997,18 +989,23 @@ std::optional<std::string> LiveRunner::kill_check() {
                 // 记在 YES token 上 → poll_fills 记成 YES 腿 → flatten 去平 YES(没持有)→ 永久孤立 (实测 Messi)。
                 // 校正后 flatten 对的是链上真实持有的腿 → 能平掉。链上为准, 与 fill 怎么记无关。
                 engine_->reconcile_inventory(last_chain_positions_);
-                inflight_.reconcile(last_chain_positions_, now);  // 链上追上→退役在途; 滞后窗口外才看链上
-                engine_->set_chain_positions(inflight_.believed_positions(last_chain_positions_));
+                engine_->set_chain_positions(last_chain_positions_);  // 根因守卫用链上真实持仓
             }
+            // 净值急停持续性: 链上持仓查询刚买后滞后→净值瞬时假跌。连续 3 次 15s 采样(~45s)都跌破才急停 →
+            // 滤掉结算滞后的假跌, 真亏(持续)照样刹住。不用在途 net_cost: /data/trades 把 BUY-NO 记成 SELL-YES,
+            // 在途净成本变负 → 净值假跌 → 假急停 (实测 5min 内停机)。链上市值 + 持续性才是稳的现实信号。
+            const double eq = last_usdc_ + last_pos_value_;
+            if (last_usdc_ > 0.0 && eq < *usdc_start_ - cfg_.max_loss)
+                equity_dd_count_++;
+            else
+                equity_dd_count_ = 0;
         }
-        // 滞后感知净值: USDC + 链上已结算市值 + 在途净成本(刚买未结算的仓)。链上低估刚买的仓时, 在途补回
-        // → 不再假急停 (取代旧的"连续3次"权宜)。真亏 = 持仓逆向跌价 → 链上市值真跌 → 照样刹住, 即时无延迟。
-        const double equity = last_usdc_ + last_pos_value_ + inflight_.net_cost();
-        if (last_usdc_ > 0.0 && equity < *usdc_start_ - cfg_.max_loss) {
-            char buf[210];
+        if (equity_dd_count_ >= 3) {
+            char buf[200];
             std::snprintf(buf, sizeof(buf),
-                          "real-equity-drawdown (now $%.2f [usdc %.2f+pos %.2f+inflight %.2f] < baseline $%.2f - maxloss $%.0f)",
-                          equity, last_usdc_, last_pos_value_, inflight_.net_cost(), *usdc_start_, cfg_.max_loss);
+                          "real-equity-drawdown x%d (now $%.2f [usdc %.2f+pos %.2f] < baseline $%.2f - maxloss $%.0f)",
+                          equity_dd_count_, last_usdc_ + last_pos_value_, last_usdc_, last_pos_value_, *usdc_start_,
+                          cfg_.max_loss);
             return std::string(buf);
         }
     }
