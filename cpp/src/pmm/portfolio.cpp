@@ -139,6 +139,11 @@ std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,
         if (params.max_competitiveness > 0.0 && p.competitiveness >= 0.0 &&
             p.competitiveness > params.max_competitiveness)
             continue;
+        // 剔除近极端价池 (mid < margin 或 > 1-margin)。极端价下 BUY 腿易落在 mid 之上 = 立即逆选, 且 pin/趋势
+        // 风险大 (实测 South Korea YES0.15/NO0.85: BUY-NO@0.92 高于 mid → 逆向成交 + YES 0.15→0.06 方向亏)。
+        if (params.extreme_mid_margin > 0.0 && p.mid > 0.0 &&
+            (p.mid < params.extreme_mid_margin || p.mid > 1.0 - params.extreme_mid_margin))
+            continue;
         cands.push_back(&p);
     }
 

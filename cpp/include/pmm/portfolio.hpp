@@ -47,6 +47,7 @@ struct SelectParams {
     double reward_calib{1.0};     // 利润校准 κ (注水按真实份额; 竞争充气 1/κ)
     double compet_aversion{0.0};  // PM market_competitiveness 惩罚强度 (挤池降权; 0=关, parity)
     double max_competitiveness{0.0};  // 硬剔除 competitiveness > 此值的拥挤池 (churn源); 0=关 (parity)
+    double extreme_mid_margin{0.0};   // 剔除 mid<margin 或 >1-margin 的近极端价池 (逆选/趋势源); 0=关 (parity)
     std::set<std::string> cooldown;
 };
 
