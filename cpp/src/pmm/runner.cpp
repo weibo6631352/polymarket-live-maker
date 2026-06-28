@@ -72,6 +72,21 @@ LiveRunner::LiveRunner(RunnerConfig cfg, Engine* engine, rewards::RewardsClient*
         owned_scanner_ = std::make_unique<rewards::RewardsClient>(rate_limiter_.get());
         scanner_ = owned_scanner_.get();
     }
+    // 自主 LLM 选池: 启用且有 key 才建 curator_。api_key 是运行期机密 → 直接读 env (同 PM 私钥),
+    // 绝不进 RunnerConfig (避免 banner/ConfigSnapshot 打日志)。无 key → 不建 → 行为不变 (回退数字滤网)。
+    if (cfg_.llm_curation) {
+        const std::string key = pmm::env::strip(pmm::env::str("LM_ANTHROPIC_KEY"));
+        if (!key.empty()) {
+            curation::CurationConfig ccfg;
+            ccfg.api_key = key;
+            ccfg.model = cfg_.curation_model;
+            curator_ = std::make_unique<curation::Curator>(std::move(ccfg));
+            std::fprintf(stderr, "curation: LLM pool-curation ENABLED (model=%s)\n",
+                         cfg_.curation_model.c_str());
+        } else {
+            std::fprintf(stderr, "curation: LM_LLM_CURATION on but LM_ANTHROPIC_KEY empty -> disabled\n");
+        }
+    }
 }
 
 LiveRunner::~LiveRunner() {
@@ -663,6 +678,7 @@ void LiveRunner::start_discovery_thread() {
 
 void LiveRunner::rediscover() {
     const double t0 = mono_now();
+    std::vector<curation::Candidate> cands;  // 发现成功 + LLM 选池启用时填充; 网络调用留到锁外
     try {
         rewards::ScanResult res = rewards::scan(scanner(), cfg_.min_daily, cfg_.scan_top, true,
                                                 cfg_.min_days_to_resolution, cfg_.max_vol_mult,
@@ -673,6 +689,10 @@ void LiveRunner::rediscover() {
             std::lock_guard<std::mutex> lk(report_mu_);
             report_ = std::move(res);
             last_scan_ok_ = mono_now();
+            if (curator_) {  // 锁内从新鲜 report_ 抓候选 (问题/cond/mid); 网络 curate 留到锁外
+                for (const auto& pr : report_.pools)
+                    cands.push_back({pr.question, pr.condition_id, pr.mid});
+            }
         }
         std::lock_guard<std::mutex> lk(report_mu_);
         std::fprintf(stderr, "discovery: %d safe of %d scored\n", report_.safe_count, report_.pools_scored);
@@ -690,6 +710,20 @@ void LiveRunner::rediscover() {
                                  {"scan_duration_ms", (mono_now() - t0) * 1000.0}});
     } catch (...) {
         // 保留上一份好 report; staleness guard 处理
+    }
+    // 自主 LLM 选池: 在所有锁外做 (网络最多 ~15s, 不能卡住主环的 reselect)。失败/超时 → Curator 返回
+    // last-good (绝不清空动态白名单); 无 key → curator_ 不存在 → 跳过 (行为不变)。
+    if (curator_ && !cands.empty()) {
+        const std::set<std::string> approved = curator_->curate(cands);
+        {
+            std::lock_guard<std::mutex> lk(report_mu_);
+            dyn_whitelist_ = approved;
+        }
+        std::fprintf(stderr, "curation: LLM approved %zu of %zu candidate pools\n", approved.size(),
+                     cands.size());
+        event("curation", {{"approved_count", static_cast<int>(approved.size())},
+                           {"candidates", static_cast<int>(cands.size())},
+                           {"approved", json(approved)}});
     }
 }
 
@@ -718,11 +752,14 @@ void LiveRunner::reselect() {
     p.reward_calib = cfg_.reward_calib;  // 利润校准 κ
     p.max_competitiveness = cfg_.max_competitiveness;  // 硬剔除新闻/毒池 (重新启用)
     p.extreme_mid_margin = cfg_.extreme_mid_margin;    // 剔除近极端价池 (逆选/趋势源)
-    p.pool_whitelist = cfg_.pool_whitelist;            // 语义选池白名单 (非空只做名单内)
     p.cooldown = cd;
     std::vector<rewards::PoolReport> scored_pools;
     {
         std::lock_guard<std::mutex> lk(report_mu_);
+        // 有效白名单 = cfg_.pool_whitelist (静态人工覆盖, 始终通过) ∪ dyn_whitelist_ (LLM 批准, 动态)。
+        // 都空 → 空白名单 → 数字滤网正常生效 (行为不变); 非空 → 只做名单内 (LLM 批准的池绕过脆滤网)。
+        p.pool_whitelist = cfg_.pool_whitelist;            // 语义选池白名单 (非空只做名单内)
+        for (const auto& c : dyn_whitelist_) p.pool_whitelist.insert(c);
         selected_ = portfolio::select_pools(report_, p);
         scored_pools = report_.pools;  // 复制供 PoolEval 遥测 (锁外发布, 不长持 report_mu_)
     }
@@ -895,8 +932,13 @@ bool LiveRunner::place(const std::string& cond, const json& pool) {
             // 净边际门 (专家 #2): 跳变感知 bleed 后 net=reward-bleed ≤ 0 → 奖励被逆选吃光 → 不报价, 让毒池
             // 自然出局 (取代手调 comp/mid 启发式)。rec 缺字段时默认放行 (不误杀)。
             // 白名单池绕过净门: κ-bleed 模型保守/跳变盲, 会把宽基好池判净负误杀; LLM 判过 + fade 管逆选。
-            if (cfg_.net_edge_gate && cfg_.pool_whitelist.count(cond) == 0 &&
-                rec.value("net_per_day", 1.0) <= 0.0) {
+            // 有效白名单 = 静态 ∪ LLM 动态 (dyn_whitelist_ 与 report_ 同锁; place 不持 report_mu_, 短锁查)。
+            bool whitelisted = cfg_.pool_whitelist.count(cond) != 0;
+            if (!whitelisted) {
+                std::lock_guard<std::mutex> lk(report_mu_);
+                whitelisted = dyn_whitelist_.count(cond) != 0;
+            }
+            if (cfg_.net_edge_gate && !whitelisted && rec.value("net_per_day", 1.0) <= 0.0) {
                 std::fprintf(stderr, "net-gate: %s net/day=%.3f <= 0 (bleed eats reward) — not quoting\n",
                              cond.substr(0, 10).c_str(), rec.value("net_per_day", 0.0));
                 net_gate_pass = false;

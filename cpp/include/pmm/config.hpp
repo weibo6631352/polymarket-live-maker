@@ -35,6 +35,12 @@ struct RunnerConfig {
     // 语义选池白名单: 非空 → 只做这些 condition_id。研究纠正轴: 宽基行为盈余市场(体育/真人秀, 散户高估
     // YES 喂做市方) 好; 单名新闻/地缘(审判/转会/政变, 内幕+横扫) 毒。LLM 按此轴精选, 数字滤网认不出。
     std::set<std::string> pool_whitelist;
+    // 自主 LLM 选池 (Anthropic Claude): 每发现周期让 LLM 精选宽基行为盈余池, 批准集合并进有效白名单
+    // (绕过脆的数字语义滤网)。LM_LLM_CURATION 默认关; 检测到 LM_ANTHROPIC_KEY 时自动开。
+    // api_key 本身是运行期机密 (LM_ANTHROPIC_KEY), 故意不放进 RunnerConfig (绝不被 banner/snapshot 打日志),
+    // runner 构造时直接读 env (同 POLYMARKET_PRIVATE_KEY 的处理)。
+    bool llm_curation{false};
+    std::string curation_model{"claude-sonnet-4-6"};  // LM_CURATION_MODEL
     double jump_vol_weight{0.7};      // 跳变感知 bleed: 挂宽到"罕见成交" (奖励来自挂在带里, 成交是纯成本)。
                                       // 0.4 实测把 spread 收太紧 → 30min 11 笔成交 churn → 净亏; 利润靠多池/大size, 非紧 spread
     bool net_edge_gate{true};         // 净边际门: 跳变感知 net=reward-bleed ≤ 0 的池不报价 (毒池自然出局)

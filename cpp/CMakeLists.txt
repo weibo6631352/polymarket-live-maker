@@ -170,6 +170,7 @@ add_library(pmm_core STATIC
     src/pmm/api.cpp
     src/pmm/rewards.cpp
     src/pmm/portfolio.cpp
+    src/pmm/curation.cpp
     src/pmm/maker_live.cpp
     src/pmm/clob_submitter.cpp
     src/pmm/engine.cpp
@@ -220,6 +221,9 @@ target_link_libraries(pmm_db_smoke PRIVATE pmm_core)
 
 add_executable(pmm_config_smoke tests/config_smoke_main.cpp)
 target_link_libraries(pmm_config_smoke PRIVATE pmm_core)
+
+add_executable(pmm_curation_smoke tests/curation_smoke_main.cpp)
+target_link_libraries(pmm_curation_smoke PRIVATE pmm_core)
 
 add_executable(pmm_orderbook_parity tests/orderbook_parity_main.cpp)
 target_link_libraries(pmm_orderbook_parity PRIVATE pmm_core)

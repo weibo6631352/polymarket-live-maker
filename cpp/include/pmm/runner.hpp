@@ -20,6 +20,7 @@
 #include <nlohmann/json.hpp>
 
 #include "pmm/config.hpp"
+#include "pmm/curation.hpp"
 #include "pmm/engine.hpp"
 #include "pmm/events.hpp"
 #include "pmm/orderbook.hpp"
@@ -111,6 +112,10 @@ private:
 
     std::mutex report_mu_;  // 后台 discovery 写 report_/last_scan_ok_, 主环读
     rewards::ScanResult report_;
+    // 自主 LLM 选池动态白名单 (发现线程经 curator_ 写 / reselect 读, 与 report_ 同锁 report_mu_)。
+    // 有效白名单 = cfg_.pool_whitelist (静态人工覆盖) ∪ dyn_whitelist_ (LLM 批准)。
+    std::set<std::string> dyn_whitelist_;
+    std::unique_ptr<curation::Curator> curator_;  // 非空 = LLM 选池启用 (构造时按 cfg_.llm_curation 建)
     std::vector<portfolio::SelectedPool> selected_;
     std::map<std::string, nlohmann::json> placed_;  // cond -> 选中池 dict
     std::map<std::string, double> placed_at_;

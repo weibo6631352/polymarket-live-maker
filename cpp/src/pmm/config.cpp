@@ -75,6 +75,12 @@ RunnerConfig RunnerConfig::from_env() {
             if (a != std::string::npos) c.pool_whitelist.insert(id.substr(a, b - a + 1));
         }
     }
+    {  // 自主 LLM 选池: 默认关; 检测到 LM_ANTHROPIC_KEY 时自动开 (LM_LLM_CURATION 显式覆盖)。
+        const bool have_key = !strip(str("LM_ANTHROPIC_KEY")).empty();
+        c.llm_curation = flag_ne("LM_LLM_CURATION", "0", have_key ? "1" : "0");
+        std::string m = strip(str("LM_CURATION_MODEL"));
+        c.curation_model = m.empty() ? "claude-sonnet-4-6" : m;
+    }
     c.min_days_to_resolution = f("LM_MIN_DAYS_TO_RESOLUTION", 10.0);  // R2: 剔除近结算催化剂池
     c.max_vol_mult = f("LM_MAX_VOL_MULT", 2.5);  // 剔除 实现日波动 > N×带宽 的跳池
     c.crossing_cost_c = f("LM_CROSSING_COST_C", 0.0);
