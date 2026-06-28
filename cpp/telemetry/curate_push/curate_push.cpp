@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 
+#include <fastdds/dds/core/status/PublicationMatchedStatus.hpp>
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/publisher/DataWriter.hpp>
@@ -58,21 +59,33 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(800));  // 等与 bot reader 发现匹配
+    // 等到至少有一个匹配的 reader (运行中的 bot) 再写, 最多 ~3s。
+    efd::PublicationMatchedStatus ms;
+    bool matched = false;
+    for (int i = 0; i < 30; ++i) {
+        dw->get_publication_matched_status(ms);
+        if (ms.current_count > 0) {
+            matched = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 
     CuratorCommand cmd;
     cmd.ts_ms(static_cast<std::int64_t>(std::time(nullptr)) * 1000);
     cmd.whitelist(whitelist);
     cmd.note(note);
-    const bool ok = dw->write(&cmd);
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));  // 让 RELIABLE 送达后再退
+    dw->write(&cmd);
+    // RELIABLE 确认送达 (最多 3s); TRANSIENT_LOCAL 兜底晚到的 reader。
+    const bool acked = dw->wait_for_acknowledgments(efd::Duration_t{3, 0}) == efd::RETCODE_OK;
 
     const std::size_t n =
         whitelist.empty()
             ? 0
             : static_cast<std::size_t>(std::count(whitelist.begin(), whitelist.end(), ',') + 1);
-    std::fprintf(stderr, "curate_push: %s %zu pools (note=%s)\n", ok ? "sent" : "WRITE-FAILED", n,
-                 note.c_str());
+    const bool ok = matched && acked;
+    std::fprintf(stderr, "curate_push: %s %zu pools (matched=%d acked=%d note=%s)\n",
+                 ok ? "delivered" : "NO-BOT-MATCHED", n, matched ? 1 : 0, acked ? 1 : 0, note.c_str());
 
     dp->delete_contained_entities();
     efd::DomainParticipantFactory::get_instance()->delete_participant(dp);
