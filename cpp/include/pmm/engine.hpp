@@ -91,6 +91,8 @@ public:
     }
     // 利润校准 κ: 真实奖励是毛估的 κ 倍 (实测 ~0.237)。竞争对手分充气 1/κ → 估计份额/奖励降到真实水平。
     void set_reward_calib(double k) { reward_calib_ = (k > 1e-6 && k <= 1.0) ? k : 1.0; }
+    // 根因守卫: 注入链上真实持仓 (token->size)。下单前若持有该池任一腿 → 不报价 (持有未平仓位的池绝不再填)。
+    void set_chain_positions(const std::map<std::string, double>& cp) { chain_positions_ = cp; }
     // 注入实时 WS book 源 (新鲜且连接活时优先于 REST; nullptr = 总走 REST)。
     void set_book_source(ws::MarketChannel* s) noexcept { book_source_ = s; }
 
@@ -134,6 +136,7 @@ private:
     double micro_gate_c_{0.2};   // 触发门: micro-price 领先 >= 此值(¢) 才偏移 (强信号=净正)
     double micro_beta_{0.5};     // 偏移领先的比例 (保守)
     double reward_calib_{1.0};   // 利润校准 κ (真实/毛估); 1.0=不校准 (默认, 测试); runner 设为 ~0.237
+    std::map<std::string, double> chain_positions_;  // 链上真实持仓 (token->size); 根因守卫: 持仓的池不报价
     ws::MarketChannel* book_source_{nullptr};  // 实时 WS book (可选); nullptr = REST
 };
 

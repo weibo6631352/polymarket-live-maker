@@ -952,8 +952,12 @@ std::optional<std::string> LiveRunner::kill_check() {
             last_usdc_check_ = now;
             if (auto bal = submitter_->usdc_balance(); bal && *bal >= 0.0) last_usdc_ = *bal;
             // 真实净值 = USDC + 链上持仓市值: 持仓不算亏 (只有逆向跌价才算) → 不会因正常成交持仓误杀。
-            if (engine_ != nullptr)
-                last_pos_value_ = engine_->api().chain_position_value(pmm::env::str("POLYMARKET_FUNDER"));
+            if (engine_ != nullptr) {
+                const std::string funder = pmm::env::str("POLYMARKET_FUNDER");
+                last_pos_value_ = engine_->api().chain_position_value(funder);
+                last_chain_positions_ = engine_->api().chain_positions(funder);  // 根因守卫用 (持仓的池不再报价)
+                engine_->set_chain_positions(last_chain_positions_);
+            }
         }
         const double equity = last_usdc_ + last_pos_value_;
         if (last_usdc_ > 0.0 && equity < *usdc_start_ - cfg_.max_loss) {

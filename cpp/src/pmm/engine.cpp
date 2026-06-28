@@ -441,6 +441,20 @@ json Engine::place_maker_quote_live(const std::string& slug_or_id, const maker::
                                                            : q["last_mid"].get<double>();
     const std::string yes_token = q.value("token_id", std::string{});
     const std::string no_token = q.value("complement_token_id", std::string{});
+    // 根因守卫: 若链上还持有该池任一腿 (上次成交未平干净, 结算延迟) → 绝不再报价。否则会被反复填成大孤立
+    // (实测 Tyler $427 / South Korea $206 死结)。平仓清掉后 chain_positions_ 刷新自然解锁。
+    {
+        auto held = [&](const std::string& tok) {
+            if (tok.empty()) return false;
+            auto it = chain_positions_.find(tok);
+            return it != chain_positions_.end() && std::abs(it->second) >= 1.0;
+        };
+        if (held(yes_token) || held(no_token)) {
+            std::fprintf(stderr, "place guard: holding on-chain position on %s/%s — NOT quoting (avoid re-fill)\n",
+                         yes_token.substr(0, 10).c_str(), no_token.substr(0, 10).c_str());
+            return {{"status", "skipped_holding"}, {"yes_token", yes_token}, {"no_token", no_token}};
+        }
+    }
     // 盘口感知 (P0): 取 YES 盘口顶部, 让两腿躲在盘口后面、不顶在最前被扫。
     double bb = 0.0, ba = 0.0;
     double center_shift = 0.0;
