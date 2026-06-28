@@ -339,28 +339,38 @@ std::map<std::string, RewardMulti> RewardsClient::reward_markets_multi(int max_p
             break;
         }
         for (const auto& m : page) {
-            const json* cv = ju::find(m, "condition_id");
-            if (cv == nullptr) continue;
-            const std::string cond = ju::to_str(*cv);
-            if (cond.empty()) continue;
-            double compet = 0.0;
-            if (const json* c = ju::find(m, "market_competitiveness")) compet = ju::to_double(*c);
-            double remaining = -1.0;
-            if (const json* rc = ju::find(m, "rewards_config")) {
-                if (rc->is_array() && !rc->empty()) {
-                    remaining = 0.0;
-                    for (const auto& cfg : *rc)
-                        if (const json* rem = ju::find(cfg, "remaining_reward_amount"))
-                            remaining += ju::to_double(*rem);
+            // 每市场独立 try: 单条字段类型异常 (如 volume_24hr 偶为 null/字符串) 不能掀翻整轮增强。
+            try {
+                const json* cv = ju::find(m, "condition_id");
+                if (cv == nullptr) continue;
+                const std::string cond = ju::to_str(*cv);
+                if (cond.empty()) continue;
+                double compet = 0.0;
+                if (const json* c = ju::find(m, "market_competitiveness"))
+                    if (c->is_number()) compet = ju::to_double(*c);
+                double remaining = -1.0;
+                if (const json* rc = ju::find(m, "rewards_config")) {
+                    if (rc->is_array() && !rc->empty()) {
+                        remaining = 0.0;
+                        for (const auto& cfg : *rc)
+                            if (const json* rem = ju::find(cfg, "remaining_reward_amount"))
+                                if (rem->is_number()) remaining += ju::to_double(*rem);
+                    }
                 }
+                double vol24 = 0.0;
+                if (const json* v = ju::find(m, "volume_24hr"))
+                    if (v->is_number()) vol24 = ju::to_double(*v);
+                out[cond] = RewardMulti{compet, remaining, vol24};
+            } catch (const std::exception& e) {
+                if (last_err.empty()) last_err = std::string("mkt:") + e.what();
+            } catch (...) {
+                if (last_err.empty()) last_err = "mkt:unknown";
             }
-            double vol24 = 0.0;
-            if (const json* v = ju::find(m, "volume_24hr")) vol24 = ju::to_double(*v);
-            out[cond] = RewardMulti{compet, remaining, vol24};
         }
         std::string nxt;
         if (data.is_object())
-            if (const json* n = ju::find(data, "next_cursor")) nxt = ju::to_str(*n);
+            if (const json* n = ju::find(data, "next_cursor"))
+                if (n->is_string()) nxt = ju::to_str(*n);
         if (nxt.empty() || nxt == "LTE=" || nxt == cursor) {
             stop = "cursor_end";
             break;
