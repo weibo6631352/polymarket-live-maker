@@ -894,7 +894,9 @@ bool LiveRunner::place(const std::string& cond, const json& pool) {
             sigma_c = rec.value("sigma_c", 0.0);
             // 净边际门 (专家 #2): 跳变感知 bleed 后 net=reward-bleed ≤ 0 → 奖励被逆选吃光 → 不报价, 让毒池
             // 自然出局 (取代手调 comp/mid 启发式)。rec 缺字段时默认放行 (不误杀)。
-            if (cfg_.net_edge_gate && rec.value("net_per_day", 1.0) <= 0.0) {
+            // 白名单池绕过净门: κ-bleed 模型保守/跳变盲, 会把宽基好池判净负误杀; LLM 判过 + fade 管逆选。
+            if (cfg_.net_edge_gate && cfg_.pool_whitelist.count(cond) == 0 &&
+                rec.value("net_per_day", 1.0) <= 0.0) {
                 std::fprintf(stderr, "net-gate: %s net/day=%.3f <= 0 (bleed eats reward) — not quoting\n",
                              cond.substr(0, 10).c_str(), rec.value("net_per_day", 0.0));
                 net_gate_pass = false;

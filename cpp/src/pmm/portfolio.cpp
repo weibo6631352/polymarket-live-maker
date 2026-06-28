@@ -129,19 +129,23 @@ std::vector<SelectedPool> select_pools(const rewards::ScanResult& scan_report,
     std::vector<const rewards::PoolReport*> cands;
     for (const auto& p : scan_report.pools) {
         if (cd.count(p.condition_id) != 0 || cd.count(p.token) != 0) continue;
-        // 语义选池白名单: 非空时只放行名单内的 condition_id (LLM 精选宽基行为盈余池, 排单名新闻毒池)。
-        if (!params.pool_whitelist.empty() && params.pool_whitelist.count(p.condition_id) == 0) continue;
-        if (params.require_safe && !(p.jump_verdict == "SAFE" && !p.empty_band)) continue;
-        // 硬剔除新闻/毒池: market_competitiveness > 上限 → 跳过。高竞争度 = 被关注/新闻驱动 = 新闻一动就逆选
-        // (实测删此截断后 bot 做进 Tyler 判决/McGonigle 事件池 → 亏)。盘口/净门/跳变σ 安静时挡不住, 截断挡得住。
-        if (params.max_competitiveness > 0.0 && p.competitiveness >= 0.0 &&
-            p.competitiveness > params.max_competitiveness)
-            continue;
-        // 剔除近极端价池 (mid < margin 或 > 1-margin)。极端价下 BUY 腿易落在 mid 之上 = 立即逆选, 且 pin/趋势
-        // 风险大 (实测 South Korea YES0.15/NO0.85: BUY-NO@0.92 高于 mid → 逆向成交 + YES 0.15→0.06 方向亏)。
+        // 语义选池白名单: 非空时, 名单外的池直接排除。
+        const bool wl_active = !params.pool_whitelist.empty();
+        if (wl_active && params.pool_whitelist.count(p.condition_id) == 0) continue;
+        // 功能性 makeable 滤网 (白名单也必须过 —— 是"能不能两边做市"的物理约束, 非语义判断):
+        if (p.empty_band) continue;  // 空带无法挂
+        // 极端价 (mid<margin 或 >1-margin): BUY 腿易落在 mid 之上 = 立即逆选 + pin/趋势 (实测 South Korea)。
         if (params.extreme_mid_margin > 0.0 && p.mid > 0.0 &&
             (p.mid < params.extreme_mid_margin || p.mid > 1.0 - params.extreme_mid_margin))
             continue;
+        // 语义毒性滤网 (跳变/竞争度): 数字认不出语义毒性, 反而误杀宽基好池 (实测 9 safe → placed=0 全被砍)。
+        // 白名单内的池 LLM 已按"宽基行为盈余 vs 单名新闻毒"判过 + fade 管逆选 → 绕过这两道。
+        if (!wl_active) {
+            if (params.require_safe && p.jump_verdict != "SAFE") continue;
+            if (params.max_competitiveness > 0.0 && p.competitiveness >= 0.0 &&
+                p.competitiveness > params.max_competitiveness)
+                continue;
+        }
         cands.push_back(&p);
     }
 
