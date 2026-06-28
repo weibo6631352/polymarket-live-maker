@@ -120,6 +120,7 @@ void w_PoolEval(const nlohmann::json& j, efd::DataWriter* w) {
     s.volume(GD("volume"));
     s.reward_rate_per_day(GD("reward_rate_per_day"));
     s.volume_24hr(GD("volume_24hr"));
+    s.min_capital(GD("min_capital"));
     s.jump_verdict(GS("jump_verdict"));
     s.empty_band(GB("empty_band"));
     s.vol_mult(GD("vol_mult"));

@@ -352,6 +352,8 @@ void LiveRunner::run() {
                 for (const auto& pr : snap) {
                     const double vm =
                         (pr.daily_vol_c && pr.max_spread_c > 0.0) ? *pr.daily_vol_c / pr.max_spread_c : 0.0;
+                    const double hs_c = pr.tick * 100.0 * cfg_.half_spread_ticks;
+                    const double min_cap = std::max(0.0, pr.min_size * (1.0 - 2.0 * (hs_c / 100.0)));
                     publisher_->publish(telemetry::topic::kPoolEval,
                                         {{"ts_ms", telemetry_wall_ms()},
                                          {"condition_id", pr.condition_id},
@@ -362,6 +364,7 @@ void LiveRunner::run() {
                                          {"volume", pr.inband_notional},
                                          {"reward_rate_per_day", pr.daily},
                                          {"volume_24hr", pr.volume_24hr},
+                                         {"min_capital", min_cap},
                                          {"jump_verdict", pr.jump_verdict},
                                          {"empty_band", pr.empty_band},
                                          {"vol_mult", vm},
@@ -848,9 +851,14 @@ void LiveRunner::reselect() {
             const bool is_sel = want.count(pr.condition_id) != 0;
             const double vol_mult =
                 (pr.daily_vol_c && pr.max_spread_c > 0.0) ? *pr.daily_vol_c / pr.max_spread_c : 0.0;
+            const double hs_c = pr.tick * 100.0 * cfg_.half_spread_ticks;
+            const double min_cap = std::max(0.0, pr.min_size * (1.0 - 2.0 * (hs_c / 100.0)));
+            const bool affordable = min_cap <= cfg_.capital + 1e-6;
             std::string reject;
             if (!is_sel) {
-                if (!safe_pass) reject = "jumpy";
+                // 先判可负担: min_size 两腿承诺资本 > 本金则买不起 —— 这是物理硬门, 白名单也卡 (故置于跳变/竞争之前)。
+                if (!affordable) reject = "unaffordable";
+                else if (!safe_pass) reject = "jumpy";
                 else if (!comp_pass) reject = "competitive";
                 else if (!mid_pass) reject = "extreme_mid";
                 else if (pr.empty_band) reject = "empty_band";
@@ -867,6 +875,7 @@ void LiveRunner::reselect() {
                                  {"volume", pr.inband_notional},
                                  {"reward_rate_per_day", pr.daily},  // 原始日奖励率 (份额分子)
                                  {"volume_24hr", pr.volume_24hr},
+                                 {"min_capital", min_cap},
                                  {"jump_verdict", pr.jump_verdict},
                                  {"empty_band", pr.empty_band},
                                  {"vol_mult", vol_mult},

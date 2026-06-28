@@ -52,6 +52,9 @@ public:
 int main(int argc, char** argv) {
     // 默认 18s: 略大于 bot 的 PoolEval 周期重发间隔 (15s), 保证无参一跑就拿到全量当前候选集。
     const double secs = argc > 1 ? std::atof(argv[1]) : 18.0;
+    // argv[2] = 本金 ($, 默认 80 对齐 pmm-dry): 用于标注每池可负担性。min_capital > 本金的池 bot 选不中
+    // (在奖励 min_size 挂两腿就超预算) → afford=N, curator 别推这些。
+    const double capital = argc > 2 ? std::atof(argv[2]) : 80.0;
 
     efd::DomainParticipant* dp = efd::DomainParticipantFactory::get_instance()->create_participant(
         0, efd::PARTICIPANT_QOS_DEFAULT);
@@ -95,15 +98,17 @@ int main(int argc, char** argv) {
               [](const PoolEval& a, const PoolEval& b) { return a.est_reward() > b.est_reward(); });
 
     std::printf(
-        "# %zu candidate pools (PoolEval, sorted by est_reward). "
-        "cols: cond | mid | comp | vol24$ | rawrate$/d | est_rew | net/d | days | jump | empty | "
+        "# %zu candidate pools (PoolEval, sorted by est_reward; capital=$%.0f). "
+        "cols: cond | mid | comp | vol24$ | rawrate$/d | est_rew | net/d | min$ | afford | empty | "
         "question\n",
-        v.size());
+        v.size(), capital);
     for (auto& s : v) {
-        std::printf("%s | %.3f | %.1f | %.0f | %.1f | %.2f | %.2f | %.1f | %s | %d | %s\n",
+        const double minc = s.min_capital();
+        const bool afford = minc <= capital + 1e-6;  // min_size 两腿承诺资本是否在本金内 (否则 bot 选不中)
+        std::printf("%s | %.3f | %.1f | %.0f | %.1f | %.2f | %.2f | %.0f | %s | %d | %s\n",
                     s.condition_id().c_str(), s.mid(), s.competitiveness(), s.volume_24hr(),
-                    s.reward_rate_per_day(), s.est_reward(), s.net_per_day(), s.days_to_resolution(),
-                    s.jump_verdict().c_str(), s.empty_band() ? 1 : 0, s.question().c_str());
+                    s.reward_rate_per_day(), s.est_reward(), s.net_per_day(), minc, afford ? "Y" : "N",
+                    s.empty_band() ? 1 : 0, s.question().c_str());
     }
 
     dp->delete_contained_entities();

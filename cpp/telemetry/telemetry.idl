@@ -63,6 +63,7 @@ module pmm { module telemetry {
     double    volume;
     double    reward_rate_per_day;   // 原始日奖励率 ($/天, 未 κ 校准) —— curator 算奖励份额的分子
     double    volume_24hr;           // PM 24h 成交额 ($) —— 流量信号
+    double    min_capital;           // 在奖励 min_size 两腿做市所需承诺资本 ($); > 本金则买不起 → 选不中 (curator 据此避开)
     string    jump_verdict;        // SAFE / jumpy
     boolean   empty_band;
     double    vol_mult;            // 实现波动 / 带宽 (>2.5 被丢)
