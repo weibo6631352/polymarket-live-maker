@@ -102,6 +102,10 @@ add_library(pmm_crypto STATIC
     src/pmm/crypto/eip712_v2.cpp
     src/pmm/crypto/secp256k1_signer.cpp
     src/pmm/wire/clob_wire.cpp
+    # CTF merge 平仓: 纯 ABI calldata 编码 + RLP + EIP-1559 tx 签名 (复用 keccak/secp256k1, 无 curl)。
+    src/pmm/chain/rlp.cpp
+    src/pmm/chain/ctf.cpp
+    src/pmm/chain/eip1559.cpp
 )
 target_compile_features(pmm_crypto PUBLIC cxx_std_20)
 target_link_libraries(pmm_crypto
@@ -173,6 +177,9 @@ add_library(pmm_core STATIC
     src/pmm/runner.cpp
     src/pmm/maker_sim.cpp
     src/pmm/review.cpp
+    # Polygon JSON-RPC 客户端 (nonce/gas/sendRawTx) + merge 平仓决策/双闸执行器 (curl + json)。
+    src/pmm/chain/polygon_rpc.cpp
+    src/pmm/chain/merge_flatten.cpp
     ${PMM_TELEMETRY_SRC}
 )
 target_compile_features(pmm_core PUBLIC cxx_std_20)
@@ -265,6 +272,11 @@ target_link_libraries(pmm_maker_sim_parity PRIVATE pmm_core)
 add_executable(pmm_review_parity tests/review_parity_main.cpp)
 target_link_libraries(pmm_review_parity PRIVATE pmm_core)
 
+# CTF merge 平仓: DRY 编码/签名验证 (calldata + EIP-1559 raw tx 逐字节对齐 eth_abi/eth_account 参考)。
+add_executable(pmm_merge_smoke tests/merge_encode_main.cpp)
+target_include_directories(pmm_merge_smoke PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pmm_merge_smoke PRIVATE pmm_core)
+
 # ---- 生产入口: live-maker (自主做市轮询循环) ----
 add_executable(live-maker apps/runner_main.cpp)
 target_link_libraries(live-maker PRIVATE pmm_core)
@@ -284,6 +296,10 @@ target_link_libraries(balance-check PRIVATE pmm_core)
 # ---- 人工平仓: flatten (市价平掉未跟踪库存换回 USDC; REAL ORDER) ----
 add_executable(flatten apps/flatten_main.cpp)
 target_link_libraries(flatten PRIVATE pmm_core)
+
+# ---- DRY 工具: merge-encode (打印 CTF mergePositions calldata + 已签 raw tx; 绝不广播) ----
+add_executable(merge-encode apps/merge_encode_main.cpp)
+target_link_libraries(merge-encode PRIVATE pmm_core)
 
 # ---- 遥测消费侧: telemetry_tap (Fast-DDS 订阅者 → stdout JSON; 仅 WITH_TELEMETRY) ----
 # 桥接 web 仪表盘 (ws_server.py) + 记录器 (recorder.py)。pmm_core PRIVATE 链 fastdds 不传递, 故显式再链。

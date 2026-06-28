@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "pmm/env.hpp"
 #include "pmm/orderbook.hpp"
 #include "pmm/round.hpp"
 
@@ -257,6 +258,22 @@ json Engine::flatten_live(const maker::Submitter& submitter, const std::string& 
                           double inventory) {
     if (std::abs(inventory) < 1e-9) return nullptr;
     const std::string side = inventory > 0 ? "SELL" : "BUY";
+    // ---- 平仓路由 stub (CTF merge) — 双闸默认 OFF, 生产零行为变化 ----
+    // 设计: 持一边多头 (side==SELL) 时, 与其穿薄盘卖出, 不如买互补腿 + CTF mergePositions 赎回 USDC。
+    //   决策器/编码器/签名器已实现并 DRY 验证 (见 pmm/chain/merge_flatten.hpp + pmm_merge_smoke);
+    //   真正上链需 LM_FLATTEN_VIA_MERGE=1 且 LM_MERGE_ARM_REAL_FUNDS=1 (用户监督下), 此处不触发任何 tx。
+    // 接线点 (待用户启用时补全): 取本腿 bid 盘 + 互补腿 ask 盘 + market.condition_id → chain::EvaluateFlatten
+    //   → 若 merge 更优则 chain::MergeExecutor::MaybeMerge(...)。当前仅在开关打开时记一条提示, 仍走盘口平仓。
+    if (side == "SELL" && pmm::env::flag_eq("LM_FLATTEN_VIA_MERGE", "1", "0")) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr,
+                         "flatten_live: LM_FLATTEN_VIA_MERGE set — CTF merge route is designed but "
+                         "NOT armed (no on-chain tx); using proven book-crossing flatten. "
+                         "Arm with LM_MERGE_ARM_REAL_FUNDS=1 under supervision.\n");
+        }
+    }
     return submitter({{"action", "FLATTEN"}, {"token_id", token_id}, {"side", side},
                       {"size", std::abs(inventory)}});
 }
