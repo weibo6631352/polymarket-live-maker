@@ -123,7 +123,36 @@ target_include_directories(nlohmann_json INTERFACE ${CMAKE_SOURCE_DIR}/third_par
 # 默认 OFF → 编 no-op publisher.cpp (Mac 本地/单测零依赖, publish 全空操作)。
 option(WITH_TELEMETRY "Build Fast-DDS telemetry publisher" OFF)
 if(WITH_TELEMETRY)
-    set(PMM_TELEMETRY_SRC src/pmm/telemetry/dds_publisher.cpp)
+    # ---- Fast-DDS codegen (盒子构建: cmake -DCMAKE_PREFIX_PATH=$HOME/dds) ----
+    # fastddsgen 把 telemetry.idl 生成 PubSubTypes/TypeObjectSupport .cxx; dds_publisher.cpp include 之。
+    find_package(fastcdr REQUIRED)
+    find_package(fastdds REQUIRED)
+
+    set(FASTDDSGEN "$ENV{HOME}/dds-build/Fast-DDS-Gen/scripts/fastddsgen"
+        CACHE FILEPATH "Path to fastddsgen launcher")
+
+    set(TGEN ${CMAKE_BINARY_DIR}/telemetry_gen)
+    file(MAKE_DIRECTORY ${TGEN})
+
+    # WORKING_DIRECTORY = idl 所在目录 → fastddsgen 把绝对 idl 路径相对化为 basename, 输出平铺到 ${TGEN}
+    # (否则会把整条目录路径复刻到 ${TGEN} 下, OUTPUT 路径无法预测)。-replace 覆盖旧产物。
+    add_custom_command(
+        OUTPUT
+            ${TGEN}/telemetryPubSubTypes.cxx
+            ${TGEN}/telemetryTypeObjectSupport.cxx
+        COMMAND ${FASTDDSGEN} -replace -d ${TGEN}
+                ${CMAKE_CURRENT_SOURCE_DIR}/telemetry/telemetry.idl
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/telemetry
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/telemetry/telemetry.idl
+        COMMENT "fastddsgen: telemetry.idl -> ${TGEN}"
+        VERBATIM
+    )
+
+    set(PMM_TELEMETRY_SRC
+        src/pmm/telemetry/dds_publisher.cpp
+        ${TGEN}/telemetryPubSubTypes.cxx
+        ${TGEN}/telemetryTypeObjectSupport.cxx
+    )
 else()
     set(PMM_TELEMETRY_SRC src/pmm/telemetry/publisher.cpp)
 endif()
@@ -149,6 +178,19 @@ add_library(pmm_core STATIC
 target_compile_features(pmm_core PUBLIC cxx_std_20)
 # OpenSSL::SSL: PersistentHttps 的 TLS 客户端 (带 openssl 头路径 + libssl/libcrypto)。
 target_link_libraries(pmm_core PUBLIC pmm_crypto SQLite::SQLite3 nlohmann_json OpenSSL::SSL CURL::libcurl)
+
+# ---- Fast-DDS 链接 (仅 WITH_TELEMETRY=ON): 生成头 include 路径 + 编译开关 + fastdds/fastcdr ----
+if(WITH_TELEMETRY)
+    # 生成的 PubSubTypes/CdrAux 含 eProsima 内部转换, -Wconversion/-Wold-style-cast 会大量误报 → 关警告。
+    set_source_files_properties(
+        ${TGEN}/telemetryPubSubTypes.cxx
+        ${TGEN}/telemetryTypeObjectSupport.cxx
+        PROPERTIES COMPILE_OPTIONS "-w"
+    )
+    target_include_directories(pmm_core PRIVATE ${TGEN})
+    target_compile_definitions(pmm_core PRIVATE PMM_WITH_TELEMETRY)
+    target_link_libraries(pmm_core PRIVATE fastdds fastcdr)
+endif()
 
 # ---- 测试 (tests/): smoke + 数值 parity 自检 (apps/ 只放可发布程序) ----
 add_executable(pmm_smoke tests/smoke_main.cpp)
