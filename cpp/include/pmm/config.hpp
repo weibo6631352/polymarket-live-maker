@@ -27,7 +27,9 @@ struct RunnerConfig {
     // 把竞争对手分 existing_qmin 充气 1/κ → 估计份额/奖励降到真实水平 → 最优半宽变宽 (少被逆选)。
     double reward_calib{0.237};
     bool waterfill{true};       // 注水配资 (边际 κ×奖励/$ 均衡; 取代 capital∝score)
-    // 竞争交给盘口 (book_inband_qmin 直接测) + 净边际门 + 跳变 σ; 不再用 market_competitiveness (冗余代理)。
+    // 竞争度截断重新启用: 实测删掉后 bot 做进新闻毒池 (Tyler 判决 comp~2-4 / McGonigle 事件) → 新闻逆选亏。
+    // market_competitiveness 高 = 被关注/新闻驱动 = 毒。盘口/净门/跳变σ 挡不住 (安静时 σ 低), 截断才挡得住。
+    double max_competitiveness{1.5};  // 硬剔除 competitiveness > 此值的新闻/毒池; 0=关
     double extreme_mid_margin{0.2};   // 剔除 mid<0.2 或 >0.8 的近极端价池 (逆选/趋势源: South Korea)
     double jump_vol_weight{0.7};      // 跳变感知 bleed: 挂宽到"罕见成交" (奖励来自挂在带里, 成交是纯成本)。
                                       // 0.4 实测把 spread 收太紧 → 30min 11 笔成交 churn → 净亏; 利润靠多池/大size, 非紧 spread

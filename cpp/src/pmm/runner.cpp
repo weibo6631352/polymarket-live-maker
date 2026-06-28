@@ -560,6 +560,7 @@ void LiveRunner::reselect() {
     p.max_token_overlap = cfg_.max_token_overlap;
     p.waterfill = cfg_.waterfill;        // 注水配资 (边际 κ×奖励/$ 均衡)
     p.reward_calib = cfg_.reward_calib;  // 利润校准 κ
+    p.max_competitiveness = cfg_.max_competitiveness;  // 硬剔除新闻/毒池 (重新启用)
     p.extreme_mid_margin = cfg_.extreme_mid_margin;    // 剔除近极端价池 (逆选/趋势源)
     p.cooldown = cd;
     {

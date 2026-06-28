@@ -45,6 +45,7 @@ struct SelectParams {
     double max_pool_frac{0.25};
     bool waterfill{false};        // true: 注水配资 (边际 κ×奖励/$ 均衡); false: capital∝score (旧, parity)
     double reward_calib{1.0};     // 利润校准 κ (注水按真实份额; 竞争充气 1/κ)
+    double max_competitiveness{0.0};  // 硬剔除 competitiveness > 此值的新闻/毒池; 0=关 (parity)
     double extreme_mid_margin{0.0};   // 剔除 mid<margin 或 >1-margin 的近极端价池 (逆选/趋势源); 0=关 (parity)
     std::set<std::string> cooldown;
 };
