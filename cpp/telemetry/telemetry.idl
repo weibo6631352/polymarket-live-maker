@@ -1,0 +1,89 @@
+// pmm/telemetry/telemetry.idl — 实时遥测总线 schema (Fast-DDS)
+//
+// bot 作为 DDS Publisher 在各事件点发布; 桥接进程订阅这些 topic → WebSocket → Web 仪表盘。
+// 每个 topic 一个 struct。只读遥测 (展示/监控), 非交易热路径。
+// 字段对应 runner/engine 的现有状态 (心跳/报价/成交/持仓/净值/选池/急停/奖励)。
+
+module pmm { module telemetry {
+
+  // 心跳: ~1s 一发, 总览盘。订阅者据此判活/显示运行态。
+  struct Heartbeat {
+    long long ts_ms;
+    string    run_state;        // running / killed / stopped
+    double    uptime_s;
+    double    usdc;
+    double    equity;           // usdc + 持仓市值
+    long      n_quotes;         // 活跃报价数
+  };
+
+  // 报价更新: 每次挂/改/撤报价。
+  struct QuoteUpdate {
+    long long ts_ms;
+    string    condition_id;
+    string    question;
+    string    token;
+    string    side;             // BUY-YES / BUY-NO
+    double    mid;
+    double    half_spread_c;    // 该池动态半价差 (optimal_half_spread)
+    double    size;
+    string    status;           // active / skipped / cancelled
+  };
+
+  // 成交: 每笔 maker fill。bleed = 该笔逆选损失 (核心要盯的)。
+  struct Fill {
+    long long ts_ms;
+    string    condition_id;
+    string    token;
+    string    side;
+    double    size;
+    double    price;
+    double    bleed;
+    string    leg;              // yes / no
+  };
+
+  // 持仓快照: 每个非零持仓 (链上真实)。
+  struct Position {
+    long long ts_ms;
+    string    condition_id;
+    string    token;
+    string    outcome;
+    double    size;
+    double    value;
+  };
+
+  // 净值快照: 每个采样周期。equity_dd_count = 急停持续性连续计数。
+  struct EquitySnapshot {
+    long long ts_ms;
+    double    usdc;
+    double    position_value;
+    double    equity;
+    long      equity_dd_count;
+  };
+
+  // 选池: 每个发现周期, 每个候选 (选中或拒绝 + 理由)。看语义选池有没有挡住毒池。
+  struct PoolSelection {
+    long long ts_ms;
+    string    condition_id;
+    string    question;
+    double    competitiveness;
+    double    days_to_resolution;
+    double    est_reward;
+    boolean   selected;
+    string    reject_reason;    // "" = 选中
+  };
+
+  // 急停事件。
+  struct KillEvent {
+    long long ts_ms;
+    string    kind;             // signal / equity-drawdown / churn / manual
+    string    reason;
+  };
+
+  // 奖励快照。
+  struct RewardSnapshot {
+    long long ts_ms;
+    double    daily_reward;
+    double    official_total;
+  };
+
+}; };
