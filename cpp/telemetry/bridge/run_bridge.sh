@@ -14,6 +14,9 @@
 # Env overrides (all optional): PMM_REPO, PMM_DDS, PMM_TELEMETRY_DB, PMM_TAP.
 set -uo pipefail
 
+# systemd services don't inherit $HOME -> default it before `set -u` references it.
+: "${HOME:=/root}"
+
 REPO="${PMM_REPO:-$HOME/polymarket-live-maker}"
 DDS="${PMM_DDS:-$HOME/dds}"
 DB="${PMM_TELEMETRY_DB:-$REPO/state/telemetry.db}"
