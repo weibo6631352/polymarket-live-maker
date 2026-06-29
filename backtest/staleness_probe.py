@@ -148,3 +148,52 @@ else:
             best = (int(lag*BIN), c)
         print("  %4d   %+.3f" % (int(lag*BIN), c))
     print("PEAK correlation at lag=%dms (corr=%+.3f)  <- PM's typical response lag to BTC" % best)
+
+    # === EVENT-BASED: per BTC jump, the PM ask response lag + mispricing magnitude vs the spread ===
+    pm_ask = [(e[0], e[2]) for e in evs if e[1] == "pm"]
+    pm_bid = [(e[0], e[3]) for e in evs if e[1] == "pm"]
+    spreads = sorted(a - b for (_, a), (_, b) in zip(pm_ask, pm_bid) if a > b)
+    med_spread = spreads[len(spreads)//2] if spreads else 0.0
+    jumps = []
+    for i in range(len(btc)):
+        t, px = btc[i]
+        j = i
+        while j > 0 and t - btc[j][0] < 1000:
+            j -= 1
+        if j < i and btc[j][1] > 0 and abs(px/btc[j][1]-1) > 0.0002:
+            jumps.append((t, 1 if px > btc[j][1] else -1))
+    dj = []
+    for t, d in jumps:
+        if not dj or t - dj[-1][0] > 2000:
+            dj.append((t, d))
+    def val_at(series, t):
+        v = None
+        for tt, x in series:
+            if tt <= t: v = x
+            else: break
+        return v
+    lags = []; mags = []
+    for t, d in dj:
+        if d <= 0:
+            continue
+        a0 = val_at(pm_ask, t)
+        if a0 is None:
+            continue
+        resp_t = None; a1 = a0
+        for tt, a in pm_ask:
+            if tt <= t:
+                continue
+            if tt - t > 3000:
+                break
+            if a > a0 + 0.001 and resp_t is None:
+                resp_t = tt
+            a1 = max(a1, a)
+        if resp_t:
+            lags.append(resp_t - t); mags.append(a1 - a0)
+    print("\n=== EVENT-BASED (BTC up-jumps >0.02%%/1s) ===")
+    print("jumps=%d  up-jumps-with-ask-response=%d  median_spread=%.3f" % (len(dj), len(lags), med_spread))
+    if lags:
+        sl = sorted(lags); sm = sorted(mags)
+        print("ask response lag ms: median=%.0f" % sl[len(sl)//2])
+        print("ask mispricing magnitude: median=%.3f  (vs spread %.3f)" % (sm[len(sm)//2], med_spread))
+        print("-> profitable-snipeable if magnitude > spread AND lag >> our ~100ms latency")
