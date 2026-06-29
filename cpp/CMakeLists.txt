@@ -298,6 +298,10 @@ target_link_libraries(balance-check PRIVATE pmm_core)
 add_executable(scalp-trial apps/scalp_trial_main.cpp)
 target_link_libraries(scalp-trial PRIVATE pmm_core)
 
+# ---- wss-probe: Phase 0 sniper plan — measure PM CLOB WSS rate/granularity/format (read-only) ----
+add_executable(wss-probe apps/wss_probe_main.cpp)
+target_link_libraries(wss-probe PRIVATE pmm_core)
+
 # ---- 人工平仓: flatten (市价平掉未跟踪库存换回 USDC; REAL ORDER) ----
 add_executable(flatten apps/flatten_main.cpp)
 target_link_libraries(flatten PRIVATE pmm_core)
