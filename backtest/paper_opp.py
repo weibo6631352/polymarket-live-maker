@@ -95,7 +95,8 @@ class St:
         self.pm_bid = self.pm_ask = self.pm_depth = None
         self.pm_upd_ts = 0.0
         self.s_at_pm = None    # BTC price when PM last quoted
-        self.win = None        # {cond, s_open, end, token}
+        self.last_px = None    # latest dense BTC price
+        self.win = None        # {cond, s_open, end, token, start}
         self.opps = []         # flagged opportunities
         self.lags = []         # edge-window samples
         self.misp_start = None
@@ -128,6 +129,7 @@ def fair_up(s, S, now):
 
 
 async def binance_task(asset, s, stop):
+    last_keep = 0.0
     while time.time() < stop:
         try:
             async with websockets.connect(BIN[asset], ping_interval=10) as ws:
@@ -137,9 +139,11 @@ async def binance_task(asset, s, stop):
                     if d.get("e") == "trade":
                         t = float(d["T"]) / 1000.0
                         S = float(d["p"])
-                        s.btc.append((t, S))
-                        if len(s.btc) > 600:
-                            s.btc = s.btc[-400:]
+                        s.last_px = S
+                        if t - last_keep >= 0.5:           # downsample to ~2/sec
+                            s.btc.append((t, S)); last_keep = t
+                            if len(s.btc) > 5200:          # retain ~40min @2/sec (covers window+settle)
+                                s.btc = s.btc[-5000:]
                         analyze(s, S, time.time())
         except Exception:  # noqa: BLE001
             await asyncio.sleep(1)
@@ -164,8 +168,9 @@ def analyze(s, S, now):
                    "depth": s.pm_depth, "cond": s.win["cond"],
                    "entry": s.pm_ask if side == "UP" else (1 - s.pm_bid)}
             s.opps.append(rec)
-            s.windows.setdefault(s.win["cond"], {"s_open": s.win["s_open"], "end": s.win["end"],
-                                                 "settled": None, "flagged": []})["flagged"].append(rec)
+            s.windows.setdefault(s.win["cond"], {"start": s.win.get("start"), "s_open": s.win["s_open"],
+                                                 "end": s.win["end"], "settled": None, "close": None,
+                                                 "flagged": []})["flagged"].append(rec)
     else:
         if s.misp_start is not None:              # mispricing cleared (BTC reverted) before PM repriced
             s.misp_start = None
@@ -181,7 +186,9 @@ async def pm_task(asset, s, stop):
         s_open = s_at(s, start)                    # BTC price at the window OPEN (true reference)
         if s_open is None:                         # joined too late / no series coverage -> skip window
             await asyncio.sleep(min(20, max(2, end - time.time() - 4))); continue
-        s.win = {"cond": cond, "token": token, "end": end, "s_open": s_open}
+        s.win = {"cond": cond, "token": token, "end": end, "s_open": s_open, "start": start}
+        s.windows.setdefault(cond, {"start": start, "s_open": s_open, "end": end,
+                                    "settled": None, "close": None, "flagged": []})
         bids, asks = {}, {}
         try:
             async with websockets.connect(PM_WS, ping_interval=10, max_size=None) as ws:
@@ -209,7 +216,7 @@ async def pm_task(asset, s, stop):
                             s.pm_bid, s.pm_ask = bb, ba
                             s.pm_depth = bids.get(bb, 0) + asks.get(ba, 0)
                             s.pm_upd_ts = now
-                            s.s_at_pm = s.btc[-1][1] if s.btc else None
+                            s.s_at_pm = s.last_px
         except Exception:  # noqa: BLE001
             await asyncio.sleep(1)
 
@@ -232,15 +239,24 @@ def find_token(asset):
 
 
 async def settle_task(s, stop):
-    loop = asyncio.get_event_loop()
     while time.time() < stop:
-        await asyncio.sleep(60)
-        # settle windows past close using BTC series (close vs open) = ground truth
-        for cond, w in s.windows.items():
+        await asyncio.sleep(20)
+        for cond, w in list(s.windows.items()):
             if w["settled"] is None and time.time() > w["end"] + 2 and w["s_open"]:
                 close = next((px for (t, px) in reversed(s.btc) if t <= w["end"]), None)
-                if close is not None:
-                    w["settled"] = 1 if close > w["s_open"] else 0
+                if close is None:                  # series no longer covers end (shouldn't happen now)
+                    continue
+                w["close"] = close
+                w["settled"] = 1 if close > w["s_open"] else 0
+                pts = [px for (t, px) in s.btc if w.get("start", 0) <= t <= w["end"]]
+                mv = (close - w["s_open"]) / w["s_open"] * 100
+                rng = ((max(pts) - min(pts)) / w["s_open"] * 100) if pts else 0.0
+                fl = w["flagged"]
+                pnl = sum((((1 if w["settled"] else 0) if r["side"] == "UP"
+                            else (1 if not w["settled"] else 0)) - r["entry"]) for r in fl)
+                print(f"SETTLE {cond[:10]} open={w['s_open']:.1f} close={close:.1f} move={mv:+.3f}% "
+                      f"range={rng:.3f}% flagged={len(fl)} "
+                      f"edge_c={100*max((r['edge'] for r in fl), default=0):.1f} pnl={pnl:+.3f}", flush=True)
         write_agg(s)
 
 
