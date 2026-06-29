@@ -24,16 +24,22 @@ def discover():
                 continue
             tau = end - nowu
             tks = json.loads(m.get("clobTokenIds") or "[]")
-            if tks and 100 <= tau <= 298:
+            if tks and 120 <= tau <= 300:
                 cands.append((tau, tks[0], m.get("question")))
     if not cands:
         return None
     cands.sort(reverse=True)  # freshest (largest tau) first
     return cands[0]
 
-picked = discover()
+picked = None
+for attempt in range(22):  # wait out the inter-window gap (a window starts every ~5min)
+    picked = discover()
+    if picked:
+        break
+    print("waiting for a fresh window (attempt %d)..." % (attempt + 1))
+    time.sleep(8)
 if not picked:
-    print("no fresh BTC window (tau 100-298s) right now — re-run in a moment")
+    print("no fresh BTC window after waiting — re-run later")
     raise SystemExit
 TAU, TOK, Q = picked
 RUN_MS = min(180000.0, (TAU - 25) * 1000.0)
