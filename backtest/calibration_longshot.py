@@ -46,23 +46,35 @@ def resolved_markets(pages, minvol):
                 if len(op) != 2 or len(tk) != 2 or vol < minvol:
                     continue
                 yes_res = float(op[0]) > 0.5            # outcomePrices[0] = Yes settle (1 or 0)
-                out.append((tk[0], yes_res, vol, str(x.get("question", ""))[:40]))
+                out.append((x.get("conditionId"), yes_res, vol, str(x.get("question", ""))[:40]))
             except Exception:  # noqa: BLE001
                 continue
         time.sleep(0.1)
     return out
 
 
-def life_price(yes_token):
-    h = get(f"{CLOB}/prices-history?market={yes_token}&interval=max&fidelity=10")
-    if not isinstance(h, dict):
+DA = "https://data-api.polymarket.com"
+
+
+def life_price(cond):
+    # representative Yes price from real trades (prices-history is empty for closed markets).
+    # median over the OLDEST available trades (paginate toward the tail) = ex-ante-ish, less
+    # confounded by the resolution drift than the most-recent trades.
+    last = None
+    off = 0
+    while off <= 2500:
+        tr = get(f"{DA}/trades?market={cond}&limit=500&offset={off}")
+        if not isinstance(tr, list) or not tr:
+            break
+        last = tr
+        if len(tr) < 500:
+            break
+        off += 500
+    if not last:
         return None
-    pts = h.get("history") or []
-    ps = [float(q["p"]) for q in pts if 0.0 < float(q.get("p", 0)) < 1.0]
-    if len(ps) < 3:
-        return None
-    ps.sort()
-    return ps[len(ps) // 2]  # median over life (representative active price)
+    ps = sorted(float(t["price"]) for t in last
+                if t.get("outcomeIndex", 0) == 0 and 0.0 < float(t.get("price", 0)) < 1.0)
+    return ps[len(ps) // 2] if len(ps) >= 3 else None
 
 
 def main():
