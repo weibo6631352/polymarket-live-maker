@@ -64,52 +64,47 @@ def best_of(levels):
     return out
 
 
-async def stream_pm(get_token, pm_evt, stop, raw):
-    """Reconnect/re-subscribe as windows roll. Records (pm_server_ts, mid, best_size)."""
-    while time.time() < stop:
-        tok = get_token()
-        if not tok:
-            await asyncio.sleep(2); continue
-        bids, asks = {}, {}
-        try:
-            async with websockets.connect(PM_WS, ping_interval=10, max_size=None) as ws:
-                await ws.send(json.dumps({"assets_ids": [tok], "type": "market"}))
-                nraw = 0
-                sub_until = time.time() + 280
-                while time.time() < min(stop, sub_until):
+async def stream_pm(tok, pm_evt, stop, raw):
+    """Static token (no blocking calls in the loop). Records (pm_server_ts, mid, best_size)."""
+    bids, asks = {}, {}
+    try:
+        async with websockets.connect(PM_WS, ping_interval=10, max_size=None) as ws:
+            await ws.send(json.dumps({"assets_ids": [tok], "type": "market"}))
+            nraw = 0
+            while time.time() < stop:
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=max(0.1, stop - time.time()))
+                except Exception:  # noqa: BLE001
+                    break
+                if raw and nraw < 3:
+                    print("PM>", msg[:200], flush=True); nraw += 1
+                try:
+                    data = json.loads(msg)
+                except Exception:  # noqa: BLE001
+                    continue
+                for ev in (data if isinstance(data, list) else [data]):
                     try:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=5)
+                        sts = float(ev.get("timestamp", 0)) / 1000.0
                     except Exception:  # noqa: BLE001
-                        break
-                    if raw and nraw < 3:
-                        print("PM>", msg[:200], flush=True); nraw += 1
-                    try:
-                        data = json.loads(msg)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    for ev in (data if isinstance(data, list) else [data]):
-                        try:
-                            sts = float(ev.get("timestamp", 0)) / 1000.0
-                        except Exception:  # noqa: BLE001
-                            sts = time.time()
-                        if sts < 1e9:
-                            sts = time.time()
-                        if ev.get("bids") is not None or ev.get("asks") is not None:
-                            bids = best_of(ev.get("bids")); asks = best_of(ev.get("asks"))
-                        else:
-                            for c in ev.get("changes", []):
-                                try:
-                                    p, s, side = float(c["price"]), float(c["size"]), str(c.get("side", "")).upper()
-                                    (bids if side in ("BUY", "BID") else asks)[p] = s
-                                except Exception:  # noqa: BLE001
-                                    pass
-                        bb = max((p for p, s in bids.items() if s > 0), default=None)
-                        ba = min((p for p, s in asks.items() if s > 0), default=None)
-                        if bb is not None and ba is not None:
-                            depth = bids.get(bb, 0) + asks.get(ba, 0)
-                            pm_evt.append((sts, (bb + ba) / 2.0, depth))
-        except Exception:  # noqa: BLE001
-            await asyncio.sleep(1)
+                        sts = time.time()
+                    if sts < 1e9:
+                        sts = time.time()
+                    if ev.get("bids") is not None or ev.get("asks") is not None:
+                        bids = best_of(ev.get("bids")); asks = best_of(ev.get("asks"))
+                    else:
+                        for c in ev.get("changes", []):
+                            try:
+                                p, s, side = float(c["price"]), float(c["size"]), str(c.get("side", "")).upper()
+                                (bids if side in ("BUY", "BID") else asks)[p] = s
+                            except Exception:  # noqa: BLE001
+                                pass
+                    bb = max((p for p, s in bids.items() if s > 0), default=None)
+                    ba = min((p for p, s in asks.items() if s > 0), default=None)
+                    if bb is not None and ba is not None:
+                        depth = bids.get(bb, 0) + asks.get(ba, 0)
+                        pm_evt.append((sts, (bb + ba) / 2.0, depth))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def stream_binance(asset, btc_evt, stop, raw):
@@ -131,21 +126,32 @@ async def stream_binance(asset, btc_evt, stop, raw):
                 pass
 
 
-async def run(asset, secs, probe, thresh):
-    state = {"tok": None, "q": "", "end": 0}
-
-    def get_token():
-        if state["end"] < time.time() + 20:
-            r = find_live_token(asset)
-            if r:
-                state["tok"], state["q"], state["end"] = r
-        return state["tok"]
-    get_token()
-    print(f"# market: {state['q']}  (rolls across windows)  measuring {secs}s", flush=True)
-    pm_evt, btc_evt = [], []
-    stop = time.time() + (15 if probe else secs)
-    await asyncio.gather(stream_pm(get_token, pm_evt, stop, probe),
+async def one_burst(asset, dur, probe, pm_evt, btc_evt):
+    r = find_live_token(asset)              # SYNC find, OUTSIDE the event loop
+    if not r:
+        return None
+    tok, q, end = r
+    dur = min(dur, max(15, end - time.time() - 6))
+    stop = time.time() + dur
+    await asyncio.gather(stream_pm(tok, pm_evt, stop, probe),
                          stream_binance(asset, btc_evt, stop, probe))
+    return q
+
+
+async def run(asset, secs, probe, thresh):
+    pm_evt, btc_evt = [], []
+    if probe:
+        q = await one_burst(asset, 15, True, pm_evt, btc_evt)
+        print(f"# market: {q}", flush=True)
+    else:
+        t_end = time.time() + secs
+        n = 0
+        while time.time() < t_end:
+            q = await one_burst(asset, 80, False, pm_evt, btc_evt)
+            n += 1
+            print(f"# burst {n}: {q}  cumulative PM={len(pm_evt)} BTC={len(btc_evt)}", flush=True)
+            if q is None:
+                await asyncio.sleep(3)
     print(f"# captured: PM book updates={len(pm_evt)}  Binance trades={len(btc_evt)}", flush=True)
     if probe or len(pm_evt) < 5 or len(btc_evt) < 20:
         print("# (probe or too few PM updates — market quiet)"); return
