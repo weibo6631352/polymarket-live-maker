@@ -7,7 +7,7 @@
 import json, ssl, time, threading, calendar, urllib.request, websocket
 
 THRESH = 0.0003   # 0.03% Binance move over ~3s = snipe trigger
-LAT = 150         # our assumed fill latency ms (the corrected, applied-to-fill version)
+LATS = [100, 150, 250, 400, 600]   # test capture across our plausible latency range
 HOLDBACK = 20     # stop entering this many s before window end
 
 def hg(u):
@@ -42,11 +42,11 @@ def binance_open(end_unix):
     except Exception:
         return None
 
-RUN_MS = 3600000.0  # 60 min
+RUN_MS = 5400000.0  # 90 min
 start = now_ms()
 btc_hist = []
 btc_lock = threading.Lock()
-results = []
+results = {L: [] for L in LATS}
 res_lock = threading.Lock()
 
 def binance():
@@ -158,23 +158,26 @@ def pm():
             continue
         up_won = end_btc > opn
         for trig_t, fav in triggers:
-            fill = ask_at(ah[fav], trig_t + LAT)   # the ask we'd really fill at, LAT ms after detect
-            if fill and 0.03 < fill < 0.97:
-                won = (fav == up_tok and up_won) or (fav == dn_tok and not up_won)
-                with res_lock:
-                    results.append((1 if won else 0, (1.0 if won else 0.0) - fill, fill))
+            won = (fav == up_tok and up_won) or (fav == dn_tok and not up_won)
+            for Lv in LATS:
+                fill = ask_at(ah[fav], trig_t + Lv)
+                if fill and 0.03 < fill < 0.97:
+                    with res_lock:
+                        results[Lv].append((1 if won else 0, (1.0 if won else 0.0) - fill))
 
 t1 = threading.Thread(target=binance); t2 = threading.Thread(target=pm)
 t1.start(); t2.start(); t1.join(); t2.join()
 
-n = len(results)
-print("simulated snipe entries (LAT=%dms applied, resolved at true end): %d" % (LAT, n))
-if n:
-    wins = sum(w for w, _, _ in results)
-    pnl = sum(p for _, p, _ in results)
-    avgfill = sum(f for _, _, f in results) / n
-    print("win-rate=%d%%  avg_fill_price=%.3f  total_edge(per $1)=$%.2f  avg_edge/entry=%+.4f" % (
-        100 * wins // n, avgfill, pnl, pnl / n))
-    print("-> PROFITABLE at our latency if win-rate>>50%% and avg_edge>0 over decent n")
+n0 = len(results[LATS[0]])
+print("simulated snipe entries (resolved at true window end via Binance):")
+if n0:
+    print("LAT_ms   n   win%%   avg_edge/entry   total(per $1)")
+    for Lv in LATS:
+        r = results[Lv]
+        if not r:
+            continue
+        wins = sum(w for w, _ in r); pnl = sum(p for _, p in r)
+        print("  %4d  %3d   %3d%%    %+.4f        $%.2f" % (Lv, len(r), 100 * wins // len(r), pnl / len(r), pnl))
+    print("-> PROFITABLE & ROBUST if win-rate and avg_edge stay positive across the whole latency range")
 else:
     print("no entries — run longer / higher vol")
