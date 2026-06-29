@@ -24,7 +24,7 @@ def iso_to_unix(s):
 
 now = time.gmtime()
 now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", now)
-past_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 6*3600))  # last 6h
+past_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 14*3600))  # last 6h
 url = ("https://gamma-api.polymarket.com/markets?closed=true&limit=500&order=endDate&ascending=false"
        f"&end_date_min={past_iso}&end_date_max={now_iso}")
 mk = get(url) or []
@@ -49,7 +49,7 @@ for m in mk:
     up_won = 1 if str(op[0]) == "1" else 0
     wins.append({"end": end, "start": end - 300, "up_won": up_won, "up_tok": toks[0]})
 
-wins = wins[:60]
+wins = wins[:160]
 print(f"resolved BTC up/down windows pulled: {len(wins)} (sigma={SIGMA})")
 
 n=0; my_brier=0.0; pm_brier=0.0; both=0
