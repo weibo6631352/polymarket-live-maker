@@ -32,26 +32,24 @@ def find_live_market(asset):
     name = "Bitcoin" if asset == "BTC" else "Ethereum"
     now = time.time()
     best = None
-    for off in (0, 500, 1000, 1500):
-        ms = get(f"https://gamma-api.polymarket.com/markets?closed=false&limit=500&offset={off}") or []
-        if not isinstance(ms, list) or not ms:
-            break
-        for m in ms:
-            q = str(m.get("question", ""))
-            if name not in q or "Up or Down" not in q:
-                continue
-            try:
-                import datetime as dt
-                end = dt.datetime.fromisoformat(str(m.get("endDate", "")).replace("Z", "+00:00")).timestamp()
-            except Exception:  # noqa: BLE001
-                continue
-            if end < now or end > now + 1800:        # want a window ending in the next 30 min
-                continue
-            tk = json.loads(m.get("clobTokenIds") or "[]")
-            if len(tk) != 2:
-                continue
-            if best is None or end < best[3]:
-                best = (m.get("conditionId"), tk[0], q[:46], end)
+    import datetime as dt
+    # current windows surface via most-recently-STARTED, not endDate
+    ms = get("https://gamma-api.polymarket.com/markets?closed=false&limit=100&order=startDate&ascending=false") or []
+    for m in (ms if isinstance(ms, list) else []):
+        q = str(m.get("question", ""))
+        if name not in q or "Up or Down" not in q:
+            continue
+        try:
+            end = dt.datetime.fromisoformat(str(m.get("endDate", "")).replace("Z", "+00:00")).timestamp()
+        except Exception:  # noqa: BLE001
+            continue
+        if end < now + 20:                 # need at least a little runway left in the window
+            continue
+        tk = json.loads(m.get("clobTokenIds") or "[]")
+        if len(tk) != 2:
+            continue
+        if best is None or end > best[3]:  # most remaining time
+            best = (m.get("conditionId"), tk[0], q[:46], end)
     return best
 
 
@@ -113,7 +111,8 @@ async def run(asset, secs, probe):
     cond, token, q, end = mk
     print(f"# live market: {q}  ends in {end-time.time():.0f}s  cond={cond[:14]}", flush=True)
     store, ksamp = [], []
-    stop = time.time() + (12 if probe else secs)
+    dur = 12 if probe else min(secs, max(20, end - time.time() - 8))   # don't outlive the 5-min window
+    stop = time.time() + dur
     await asyncio.gather(stream_pm(token, store, stop), stream_kraken(asset, store, stop, ksamp))
     pm = [(t, v) for (t, s, v) in store if s == "PM" and v is not None]
     pmchg = [t for (t, s, v) in store if s in ("PM", "PMchg")]
