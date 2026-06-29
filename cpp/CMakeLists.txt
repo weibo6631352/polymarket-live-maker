@@ -302,6 +302,10 @@ target_link_libraries(scalp-trial PRIVATE pmm_core)
 add_executable(wss-probe apps/wss_probe_main.cpp)
 target_link_libraries(wss-probe PRIVATE pmm_core)
 
+# ---- binance-sniper: DRY-LIVE crypto-micro sniper (verified seconds-Binance-move edge); orders gated ----
+add_executable(binance-sniper apps/binance_sniper_main.cpp)
+target_link_libraries(binance-sniper PRIVATE pmm_core)
+
 # ---- 人工平仓: flatten (市价平掉未跟踪库存换回 USDC; REAL ORDER) ----
 add_executable(flatten apps/flatten_main.cpp)
 target_link_libraries(flatten PRIVATE pmm_core)
