@@ -294,6 +294,10 @@ target_link_libraries(order-smoke PRIVATE pmm_core)
 add_executable(balance-check apps/balance_check_main.cpp)
 target_link_libraries(balance-check PRIVATE pmm_core)
 
+# ---- scalp-trial: 硬限额真钱 crypto-scalp 试验 (Kraken WS 价 + gamma 窗口 + ClobSubmitter; $30 死止损 + 双重门) ----
+add_executable(scalp-trial apps/scalp_trial_main.cpp)
+target_link_libraries(scalp-trial PRIVATE pmm_core)
+
 # ---- 人工平仓: flatten (市价平掉未跟踪库存换回 USDC; REAL ORDER) ----
 add_executable(flatten apps/flatten_main.cpp)
 target_link_libraries(flatten PRIVATE pmm_core)
