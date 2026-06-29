@@ -127,7 +127,7 @@ struct Window {
 std::vector<Window> discover() {
     std::vector<Window> out;
     const std::string body = http_get(
-        "https://gamma-api.polymarket.com/markets?closed=false&limit=1500&order=startDate&ascending=false");
+        "https://gamma-api.polymarket.com/markets?closed=false&limit=500&order=endDate&ascending=true");
     if (body.empty()) return out;
     json d;
     try { d = json::parse(body); } catch (...) { return out; }
@@ -152,6 +152,8 @@ std::vector<Window> discover() {
             end_unix = static_cast<double>(timegm(&tm));
         }
         if (end_unix <= 0) continue;
+        const double tnow = now_unix();
+        if (end_unix < tnow - 30 || end_unix > tnow + 650) continue;  // only current + next window
         Window w;
         w.asset = is_btc ? "BTC" : "ETH";
         w.up_tok = toks[0]; w.down_tok = toks[1]; w.end_unix = end_unix;
