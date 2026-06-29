@@ -10,9 +10,10 @@ MARGIN, PMIN = 0.04, 0.15
 
 def get(url):
     try:
-        with urllib.request.urlopen(url, timeout=15) as r:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
             return json.load(r)
-    except Exception as e:
+    except Exception:
         return None
 
 def norm_cdf(z):
