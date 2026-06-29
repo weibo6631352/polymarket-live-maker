@@ -18,7 +18,7 @@ import curated_backtest as cb  # noqa: E402
 import websockets  # noqa: E402
 
 PM_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-KRAKEN_WS = "wss://ws.kraken.com"
+OKX_WS = "wss://ws.okx.com:8443/ws/v5/public"
 
 
 def get(u):
@@ -104,10 +104,10 @@ async def stream_pm(token, store, stop, raw):
                     store.append((t, "PM", m))
 
 
-async def stream_kraken(asset, store, stop, raw):
-    pair = "XBT/USD" if asset == "BTC" else "ETH/USD"
-    async with websockets.connect(KRAKEN_WS, ping_interval=10) as ws:
-        await ws.send(json.dumps({"event": "subscribe", "pair": [pair], "subscription": {"name": "trade"}}))
+async def stream_okx(asset, store, stop, raw):
+    inst = "BTC-USDT" if asset == "BTC" else "ETH-USDT"
+    async with websockets.connect(OKX_WS, ping_interval=10) as ws:
+        await ws.send(json.dumps({"op": "subscribe", "args": [{"channel": "trades", "instId": inst}]}))
         nraw = 0
         while time.time() < stop:
             try:
@@ -116,15 +116,15 @@ async def stream_kraken(asset, store, stop, raw):
                 break
             t = time.time()
             if raw and nraw < 4:
-                print("KRK>", msg[:200], flush=True); nraw += 1
+                print("OKX>", msg[:200], flush=True); nraw += 1
             try:
                 data = json.loads(msg)
             except Exception:  # noqa: BLE001
                 continue
-            if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
-                for tr in data[1]:                       # [price, vol, time, side, ordtype, misc]
+            if isinstance(data, dict) and data.get("data"):
+                for d in data["data"]:
                     try:
-                        px, evt = float(tr[0]), float(tr[2])
+                        px, evt = float(d["px"]), float(d["ts"]) / 1000.0
                         store.append((t, "KRK", px))
                         store.append((evt, "KRKevt", px))   # exchange event time (feed latency)
                     except Exception:  # noqa: BLE001
@@ -140,7 +140,7 @@ async def run(asset, secs, probe):
     store = []
     d = 12 if probe else min(secs, max(20, end - time.time() - 8))
     stop = time.time() + d
-    await asyncio.gather(stream_pm(token, store, stop, probe), stream_kraken(asset, store, stop, probe))
+    await asyncio.gather(stream_pm(token, store, stop, probe), stream_okx(asset, store, stop, probe))
     pm = [(t, v) for (t, s, v) in store if s == "PM"]
     krk = [(t, v) for (t, s, v) in store if s == "KRK"]
     kevt = [(t, v) for (t, s, v) in store if s == "KRKevt"]
