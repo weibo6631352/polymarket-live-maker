@@ -31,7 +31,7 @@ def discover():
     cands.sort(reverse=True)
     return cands[0]
 
-RUN_MS = 1200000.0  # 20 min
+RUN_MS = 1800000.0  # 30 min
 start = now_ms()
 events = []   # btc: (t,'btc',px,0,0) ; pm: (t,'pm',seg,ask,bid)
 lock = threading.Lock()
@@ -180,5 +180,49 @@ if lags:
     print("spread at jump:        median=%.3f" % md(ss))
     print("NET (mag - spread):    median=%.3f  mean=%.3f  >0frac=%.0f%%" % (md(sn), sum(net)/len(net), 100*sum(1 for x in net if x > 0)/len(net)))
     print("-> profitable if NET>0 consistently AND lag >> our latency")
+
+    # CRITICAL: at OUR latency L we fill at the ask a_at(t+L) (already partly risen as faster snipers
+    # take it); captured net = (a1 - a_fill) - spread. This is what WE actually get, not the total edge.
+    def ask_at_seg(lst, t):
+        v = None
+        for tt, a, b in lst:
+            if tt <= t:
+                v = a
+            else:
+                break
+        return v
+    print("=== CAPTURE vs OUR latency (the real go/no-go) ===")
+    for L in [50, 100, 150, 200, 300, 500]:
+        nets = []
+        for t, d, r in dj:
+            if d <= 0:
+                continue
+            s = seg_at(t)
+            if s is None:
+                continue
+            lst = pm_by_seg[s]
+            a0 = b0 = None
+            for tt, a, b in lst:
+                if tt <= t:
+                    a0 = a; b0 = b
+                else:
+                    break
+            if a0 is None:
+                continue
+            a1 = a0
+            for tt, a, b in lst:
+                if t < tt <= t + 3000:
+                    a1 = max(a1, a)
+            if a1 <= a0 + 0.001:
+                continue
+            a_fill = ask_at_seg(lst, t + L)
+            if a_fill is None:
+                continue
+            spread = (a0 - b0) if b0 else 0.01
+            nets.append((a1 - a_fill) - spread)
+        if nets:
+            sn = sorted(nets)
+            print("  L=%4dms: n=%d median_net=%+.4f mean=%+.4f >0frac=%.0f%%" % (
+                L, len(nets), sn[len(sn)//2], sum(nets)/len(nets), 100*sum(1 for x in nets if x > 0)/len(nets)))
 else:
     print("no up-jumps with a detectable ask response -> no BTC-lag snipe signal in this sample")
