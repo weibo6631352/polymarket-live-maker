@@ -19,9 +19,10 @@ def pctl(xs, p):
     return xs[min(len(xs) - 1, int(p * len(xs)))] if xs else float("nan")
 
 
-def warm_rtts(host, port, path, n=20):
+def warm_rtts(host, port, path, n=20, bust=False):
     """One persistent TLS conn; sequential keep-alive GETs; per-request send->first-byte RTT (warm).
-    Returns (rtts_ms, cf_ray)."""
+    bust=True appends a unique query each request to force a Cloudflare cache-MISS (origin every time =
+    what an uncacheable order POST sees). Returns (rtts_ms, cf_ray)."""
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -29,10 +30,11 @@ def warm_rtts(host, port, path, n=20):
     raw.settimeout(8)
     raw.connect((host, port))
     ss = ctx.wrap_socket(raw, server_hostname=host)
-    req = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: lat/1.0\r\n"
-           f"Connection: keep-alive\r\nAccept: */*\r\n\r\n").encode()
     out, cf = [], ""
     for i in range(n + 2):
+        p = f"{path}{'?' if '?' not in path else '&'}cb={i}_{int(time.time()*1000)}" if bust else path
+        req = (f"GET {p} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: lat/1.0\r\n"
+               f"Connection: keep-alive\r\nAccept: */*\r\nCache-Control: no-cache\r\n\r\n").encode()
         t0 = time.perf_counter()
         ss.sendall(req)
         first = ss.recv(8192)
@@ -104,12 +106,13 @@ def line(name, host, port):
 def main():
     print("# CORRECTED warm latency probe (read-only, no orders)\n")
     print("## PM CLOB order-path WARM RTT (persistent keep-alive conn, per-request send->first-byte):")
-    try:
-        rtts, cf = warm_rtts("clob.polymarket.com", 443, "/time")
-        print(f"   clob.polymarket.com/time  WARM RTT  min={min(rtts):.1f}  median={statistics.median(rtts):.1f}"
-              f"  p90={pctl(rtts,0.9):.1f}ms  (n={len(rtts)})   cf-ray PoP={cf[-3:] if cf else '?'}")
-    except Exception as e:  # noqa: BLE001
-        print(f"   warm measure failed: {e}")
+    for bust, lbl in ((False, "cacheable /time (cache hits possible)"), (True, "CACHE-BUSTED (origin every req = order-like)")):
+        try:
+            rtts, cf = warm_rtts("clob.polymarket.com", 443, "/time", n=30, bust=bust)
+            print(f"   [{lbl}]  min={min(rtts):.1f} p10={pctl(rtts,0.1):.1f} median={statistics.median(rtts):.1f}"
+                  f" p90={pctl(rtts,0.9):.1f}ms  PoP={cf[-3:] if cf else '?'}")
+        except Exception as e:  # noqa: BLE001
+            print(f"   warm measure failed: {e}")
 
     print("\n## FAST EU crypto WS feeds (TCP RTT; one-way signal ~= RTT/2):")
     line("Kraken WS", "ws.kraken.com", 443)
