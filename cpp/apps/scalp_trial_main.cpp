@@ -178,6 +178,7 @@ double best_ask(const std::string& tok) {
 }  // namespace
 
 int main() {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);  // line-buffered -> real-time log visibility (esp. live)
     Safety sf{env_d("LM_SCALP_MAXLOSS", 30.0), env_d("LM_SCALP_ORDER", 2.0),
               env_i("LM_SCALP_MAXTRADES", 40),
               std::getenv("LM_SCALP_KILLFILE") ? std::getenv("LM_SCALP_KILLFILE") : "state/scalp.kill"};
