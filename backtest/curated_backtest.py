@@ -137,12 +137,15 @@ def category(p):
                             "chancellor", "governor", "senate", "house seat", "democratic", "republican",
                             "convicted", "indict", "deal by", "nuclear", "ceasefire", "resign", "impeach")):
         return "politics_news"
-    if any(k in q for k in ("win the", "winner", "champion", "golden boot", "top scorer", "to win",
-                            "relegated", "promoted", "win group", "advance", "ballon", "title", "cup",
-                            "league", "playoff", "finals", " mvp", "world cup", "premier")):
-        return "sports_outright"
-    if any(k in q for k in (" vs ", "vs.", "o/u", "over/under", " win on ", "to score", "clean sheet")):
+    # single-game / esports MATCHES first (so 'League of Legends' etc. don't leak into outrights)
+    if any(k in q for k in (" vs ", "vs.", "o/u", "over/under", " win on ", "to score", "clean sheet",
+                            "second half", "- game ", "spread:", "moneyline", "lol:", "valorant",
+                            "counter-strike", "dota", "cs2:", "rocket league", "overwatch", "map ")):
         return "sports_match"
+    if any(k in q for k in ("win the", "winner", "champion", "golden boot", "top scorer", "to win",
+                            "relegated", "promoted", "win group", "advance", "ballon", "title", " cup",
+                            "playoff", "finals", " mvp", "world cup", "premier", "reach the", "semifinal")):
+        return "sports_outright"
     return "other"
 
 
@@ -202,9 +205,11 @@ def fetch_trades(cond, since_ts):
 
 
 # --------------------------------------------------------------------------- simulation
-def simulate(pool, trades, half_spread_ticks, horizon_s, share_gross):
+def simulate(pool, trades, half_spread_ticks, horizon_s, share_gross, fill_ratio=1.0):
     """Two-sided min_size maker re-centered each print at mid +/- S. Fills when a real print
-    gaps THROUGH the quote; adverse selection = inventory marked at the price `horizon_s` later."""
+    gaps THROUGH the quote; adverse selection = inventory marked at the price `horizon_s` later.
+    fill_ratio (0,1] = the share of each sweep I actually capture — a small maker among queue
+    competition eats only part of the adverse flow (full=1.0 is the worst-case pickoff)."""
     tick = pool["tick"]
     S = half_spread_ticks * tick
     min_size = pool["min_size"] if pool["min_size"] > 0 else 100.0
@@ -232,11 +237,11 @@ def simulate(pool, trades, half_spread_ticks, horizon_s, share_gross):
         b = mid - S
         a = mid + S
         if side == "SELL" and p <= b + 1e-12:      # sweep through my bid -> I buy YES at b
-            q = min(min_size, size)
+            q = min(min_size, size) * fill_ratio
             inv += q
             fills.append((ts, q, b))
         elif side == "BUY" and p >= a - 1e-12:      # lift through my ask -> I sell YES at a
-            q = min(min_size, size)
+            q = min(min_size, size) * fill_ratio
             inv -= q
             fills.append((ts, -q, a))
         mid = p
@@ -339,8 +344,8 @@ def main():
 
     # ---- per-category verdict: lean on breakeven_share (share-estimate-INDEPENDENT) ----
     print(f"\n# book ok {len(results)-book_fail}/{len(results)} (NB=no book -> share defaulted to ceil)\n")
-    print(f"# {'category':16s} {'pools':5s} {'fills':6s} {'med_be':7s} {'%be<=.40':8s} {'netS2T120':10s}"
-          "  (be=AS/(k*daily*days); <=0.40 => net-pos at achievable share)")
+    print(f"# {'category':16s} {'pools':5s} {'fills':6s} {'med_be':7s} {'%be<1':6s} {'%be<.4':7s} {'netFULL':9s}"
+          "  (be=AS/(k*daily*days); net-pos<=>be<1 at equal capture, <0.4 at share-ceiling)")
     cats = {}
     for (pp, base, comp, sh, be, ok) in results:
         cats.setdefault(pp["cat"], []).append((pp, base, be))
@@ -348,18 +353,24 @@ def main():
         rs = cats[c]
         bes = sorted(b for (_, _, b) in rs)
         med = statistics.median(bes) if bes else float("nan")
-        frac = sum(1 for b in bes if b <= SHARE_CEIL) / len(bes)
+        frac1 = sum(1 for b in bes if b < 1.0) / len(bes)
+        frac4 = sum(1 for b in bes if b <= SHARE_CEIL) / len(bes)
         netsum = sum(b["net"] for (_, b, _) in rs)
         fillsum = sum(b["fills"] for (_, b, _) in rs)
-        print(f"# {c:16s} {len(rs):<5d} {fillsum:<6d} {med:<7.2f} {frac*100:<8.0f} {netsum:+10.1f}")
+        print(f"# {c:16s} {len(rs):<5d} {fillsum:<6d} {med:<7.2f} {frac1*100:<6.0f} {frac4*100:<7.0f} {netsum:+9.1f}")
 
-    # AS-horizon sensitivity on the curated TARGET (sports_outright), share fixed per pool
-    so_rows = [r for r in results if r[0]["cat"] == "sports_outright"]
-    print("\n# sports_outright NET vs adverse-horizon T (S=2 ticks):")
-    for h in AS_HORIZONS_S:
-        tot = sum((simulate(pp, fetch_trades_cache.get(pp["cond"]), HALF_SPREAD_TICKS[1], h, sh) or {"net": 0})["net"]
-                  for (pp, _b, _c, sh, _be, _ok) in so_rows if fetch_trades_cache.get(pp["cond"]))
-        print(f"#   T={h}s: NET={tot:+.1f}")
+    # queue-capture sensitivity: net by category at fill_ratio in {1.0 (worst-case full pickoff), 0.5, 0.25}
+    print("\n# NET by category vs fill_ratio (queue capture of each sweep; S=2tk T=120s):")
+    print(f"# {'category':16s} {'fr=1.0':>9s} {'fr=0.5':>9s} {'fr=0.25':>9s}")
+    for c in sorted(cats):
+        rs = [r for r in results if r[0]["cat"] == c]
+        cells = []
+        for fr in (1.0, 0.5, 0.25):
+            tot = sum((simulate(pp, fetch_trades_cache.get(pp["cond"]), HALF_SPREAD_TICKS[1], AS_HORIZONS_S[1], sh, fr)
+                       or {"net": 0})["net"]
+                      for (pp, _b, _c, sh, _be, _ok) in rs if fetch_trades_cache.get(pp["cond"]))
+            cells.append(tot)
+        print(f"# {c:16s} " + " ".join(f"{v:+9.1f}" for v in cells))
 
     print("\n# === VERDICT (does curating sports_outright break the reward/adverse coupling?) ===")
 
