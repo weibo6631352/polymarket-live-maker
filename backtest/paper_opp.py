@@ -66,16 +66,26 @@ def normcdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
 
-def parse_end(title):
-    m = re.search(r'-\s*([A-Za-z]+\s+\d+),.*?-(\d+:\d+[AP]M)\s*ET', title)
-    if not m:
-        return None
+def _ts(date_s, time_s):
     try:
-        naive = dt.datetime.strptime(f"{m.group(1)} {dt.datetime.utcnow().year} {m.group(2)}",
-                                     "%B %d %Y %I:%M%p")
+        naive = dt.datetime.strptime(f"{date_s} {dt.datetime.utcnow().year} {time_s}", "%B %d %Y %I:%M%p")
         return (naive + dt.timedelta(hours=4)).replace(tzinfo=dt.timezone.utc).timestamp()  # ET(EDT)->UTC
     except Exception:  # noqa: BLE001
         return None
+
+
+def parse_end(title):
+    m = re.search(r'-\s*([A-Za-z]+\s+\d+),.*?-(\d+:\d+[AP]M)\s*ET', title)
+    return _ts(m.group(1), m.group(2)) if m else None
+
+
+def parse_start(title):
+    m = re.search(r'-\s*([A-Za-z]+\s+\d+),\s*(\d+:\d+[AP]M)-', title)
+    return _ts(m.group(1), m.group(2)) if m else None
+
+
+def s_at(s, ts):
+    return next((px for (t, px) in reversed(s.btc) if t <= ts), None)
 
 
 class St:
@@ -137,28 +147,28 @@ async def binance_task(asset, s, stop):
 
 def analyze(s, S, now):
     update_sigma(s)
-    if s.pm_bid is None or s.s_at_pm is None or not s.win:
+    if s.pm_bid is None or not s.win or not s.win.get("s_open"):
         return
     fp = fair_up(s, S, now)
     if fp is None:
         return
-    pm_mid = (s.pm_bid + s.pm_ask) / 2.0
-    spread = s.pm_ask - s.pm_bid
-    # buy Up at ask if fair > ask; sell Up (buy Down) at bid if fair < bid
-    edge = 0.0
-    side = None
+    edge, side = 0.0, None
     if fp > s.pm_ask + 0.005:
-        edge = fp - s.pm_ask; side = "UP"
+        edge, side = fp - s.pm_ask, "UP"          # fair Up > PM ask -> buy Up cheap
     elif fp < s.pm_bid - 0.005:
-        edge = s.pm_bid - fp; side = "DOWN"
+        edge, side = s.pm_bid - fp, "DOWN"        # fair Up < PM bid -> buy Down cheap
     if side and edge > 0.01:
-        if s.misp_start is None:
+        if s.misp_start is None:                  # NEW episode -> flag ONCE
             s.misp_start = now
-        rec = {"t": now, "side": side, "edge": edge, "fair": fp, "ask": s.pm_ask, "bid": s.pm_bid,
-               "depth": s.pm_depth, "cond": s.win["cond"], "entry": s.pm_ask if side == "UP" else (1 - s.pm_bid)}
-        s.opps.append(rec)
-        s.windows.setdefault(s.win["cond"], {"s_open": s.win["s_open"], "end": s.win["end"],
-                                             "settled": None, "flagged": []})["flagged"].append(rec)
+            rec = {"t": now, "side": side, "edge": edge, "fair": fp, "ask": s.pm_ask, "bid": s.pm_bid,
+                   "depth": s.pm_depth, "cond": s.win["cond"],
+                   "entry": s.pm_ask if side == "UP" else (1 - s.pm_bid)}
+            s.opps.append(rec)
+            s.windows.setdefault(s.win["cond"], {"s_open": s.win["s_open"], "end": s.win["end"],
+                                                 "settled": None, "flagged": []})["flagged"].append(rec)
+    else:
+        if s.misp_start is not None:              # mispricing cleared (BTC reverted) before PM repriced
+            s.misp_start = None
 
 
 async def pm_task(asset, s, stop):
@@ -167,8 +177,10 @@ async def pm_task(asset, s, stop):
         r = await loop.run_in_executor(None, find_token, asset)   # blocking gamma OFF the loop
         if not r:
             await asyncio.sleep(5); continue
-        cond, token, end, q = r
-        s_open = s.btc[-1][1] if s.btc else None
+        cond, token, end, q, start = r
+        s_open = s_at(s, start)                    # BTC price at the window OPEN (true reference)
+        if s_open is None:                         # joined too late / no series coverage -> skip window
+            await asyncio.sleep(min(20, max(2, end - time.time() - 4))); continue
         s.win = {"cond": cond, "token": token, "end": end, "s_open": s_open}
         bids, asks = {}, {}
         try:
@@ -211,10 +223,11 @@ def find_token(asset):
         if NAME[asset] not in q or "Up or Down" not in q:
             continue
         end = parse_end(q)
+        start = parse_start(q)
         tk = json.loads(m.get("clobTokenIds") or "[]")
-        if end and end > now + 30 and len(tk) == 2:
+        if end and start and end > now + 30 and len(tk) == 2:
             if best is None or end < best[2]:        # current window = soonest valid end
-                best = (m.get("conditionId"), tk[0], end, q[:46])
+                best = (m.get("conditionId"), tk[0], end, q[:46], start)
     return best
 
 
