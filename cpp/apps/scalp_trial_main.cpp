@@ -126,8 +126,12 @@ struct Window {
 // discover the CURRENT live BTC/ETH up/down windows (gamma).
 std::vector<Window> discover() {
     std::vector<Window> out;
+    std::time_t tmin = std::time(nullptr) - 120;  // include windows ending within the last ~2min too
+    char iso[32];
+    std::strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&tmin));
     const std::string body = http_get(
-        "https://gamma-api.polymarket.com/markets?closed=false&limit=500&order=endDate&ascending=true");
+        std::string("https://gamma-api.polymarket.com/markets?closed=false&limit=500"
+                    "&order=endDate&ascending=true&end_date_min=") + iso);
     if (body.empty()) return out;
     json d;
     try { d = json::parse(body); } catch (...) { return out; }
