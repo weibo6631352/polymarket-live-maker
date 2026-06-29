@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Measure the crypto-scalping EDGE WINDOW: ms-lag between BTC spot moving (Kraken WS) and the PM
-'Bitcoin Up or Down [short window]' order book repricing. ZERO real money — read-only WS, no orders.
+"""Measure the crypto-scalping EDGE WINDOW + depth using SERVER-SIDE timestamps. ZERO real money —
+read-only WS, no orders.
 
-Streams concurrently, timestamps locally, maintains the PM book (mid on every change), uses Kraken
-'trade' channel (every tick), then cross-correlates PM-mid vs spot for the lead-lag = the lag scalpers
-exploit. Also reports Kraken feed latency (event ts vs our recv) + PM update cadence.
-Run on the box: python3 backtest/edge_window.py [--probe] [--secs 70] [--asset BTC|ETH]
+Lag = PM book-update server timestamp - exchange match timestamp (both server-side, NTP-comparable) =
+the TRUE time PM's quote stays stale after spot moves, independent of OUR client latency. Uses Binance
+trade feed for dense, accurately-timestamped BTC moves (its high feed latency is irrelevant: we use the
+match timestamp, not receive time). Also reports the DEPTH (size resting at the stale quote before it
+moves). Rolls across consecutive micro-markets to catch volatility.
+Run on the box: python3 backtest/edge_window.py [--probe] [--secs 300] [--asset BTC|ETH] [--thresh 0.3]
 """
 import sys
 import json
@@ -18,7 +20,8 @@ import curated_backtest as cb  # noqa: E402
 import websockets  # noqa: E402
 
 PM_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-OKX_WS = "wss://ws.okx.com:8443/ws/v5/public"
+BINANCE_WS = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+BINANCE_ETH = "wss://stream.binance.com:9443/ws/ethusdt@trade"
 
 
 def get(u):
@@ -28,10 +31,10 @@ def get(u):
         return None
 
 
-def find_live_market(asset):
+def find_live_token(asset):
     name = "Bitcoin" if asset == "BTC" else "Ethereum"
     now = time.time()
-    ms = get(f"https://gamma-api.polymarket.com/markets?closed=false&limit=100&order=startDate&ascending=false") or []
+    ms = get("https://gamma-api.polymarket.com/markets?closed=false&limit=100&order=startDate&ascending=false") or []
     cands = []
     for m in (ms if isinstance(ms, list) else []):
         q = str(m.get("question", ""))
@@ -43,15 +46,12 @@ def find_live_market(asset):
         except Exception:  # noqa: BLE001
             continue
         tk = json.loads(m.get("clobTokenIds") or "[]")
-        rem, dur = end - now, end - start
-        if rem > 45 and len(tk) == 2:
-            cands.append((dur, rem, m.get("conditionId"), tk[0], q[:46], end))
+        if end > now + 30 and len(tk) == 2:
+            cands.append((end - start, end, tk[0], q[:42]))
     if not cands:
         return None
-    # prefer the SHORTEST-window (most actively-scalped micro-market) with enough runway
-    cands.sort(key=lambda c: (c[0], -c[1]))
-    d, rem, cond, tok, q, end = cands[0]
-    return (cond, tok, q, end, dur)
+    cands.sort(key=lambda c: c[0])     # shortest window = most actively scalped
+    return cands[0][2], cands[0][3], cands[0][1]
 
 
 def best_of(levels):
@@ -64,125 +64,122 @@ def best_of(levels):
     return out
 
 
-async def stream_pm(token, store, stop, raw):
-    bids, asks = {}, {}
-
-    def mid():
-        bb = max((p for p, s in bids.items() if s > 0), default=None)
-        ba = min((p for p, s in asks.items() if s > 0), default=None)
-        return (bb + ba) / 2.0 if (bb is not None and ba is not None) else None
-
-    async with websockets.connect(PM_WS, ping_interval=10, max_size=None) as ws:
-        await ws.send(json.dumps({"assets_ids": [token], "type": "market"}))
-        nraw = 0
-        while time.time() < stop:
-            try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=max(0.1, stop - time.time()))
-            except Exception:  # noqa: BLE001
-                break
-            t = time.time()
-            if raw and nraw < 4:
-                print("PM>", msg[:260], flush=True); nraw += 1
-            try:
-                data = json.loads(msg)
-            except Exception:  # noqa: BLE001
-                continue
-            for ev in (data if isinstance(data, list) else [data]):
-                et = ev.get("event_type") or ev.get("type")
-                if ev.get("bids") is not None or ev.get("asks") is not None:   # full book
-                    bids.clear(); bids.update(best_of(ev.get("bids")))
-                    asks.clear(); asks.update(best_of(ev.get("asks")))
-                elif et in ("price_change", "agg_orderbook") or ev.get("changes"):
-                    for c in ev.get("changes", []):
-                        try:
-                            p, s, side = float(c["price"]), float(c["size"]), str(c.get("side", "")).upper()
-                        except Exception:  # noqa: BLE001
-                            continue
-                        (bids if side in ("BUY", "BID") else asks)[p] = s
-                m = mid()
-                if m is not None:
-                    store.append((t, "PM", m))
-
-
-async def stream_okx(asset, store, stop, raw):
-    inst = "BTC-USDT" if asset == "BTC" else "ETH-USDT"
-    async with websockets.connect(OKX_WS, ping_interval=10) as ws:
-        await ws.send(json.dumps({"op": "subscribe", "args": [{"channel": "trades", "instId": inst}]}))
-        nraw = 0
-        while time.time() < stop:
-            try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=max(0.1, stop - time.time()))
-            except Exception:  # noqa: BLE001
-                break
-            t = time.time()
-            if raw and nraw < 4:
-                print("OKX>", msg[:200], flush=True); nraw += 1
-            try:
-                data = json.loads(msg)
-            except Exception:  # noqa: BLE001
-                continue
-            if isinstance(data, dict) and data.get("data"):
-                for d in data["data"]:
+async def stream_pm(get_token, pm_evt, stop, raw):
+    """Reconnect/re-subscribe as windows roll. Records (pm_server_ts, mid, best_size)."""
+    while time.time() < stop:
+        tok = get_token()
+        if not tok:
+            await asyncio.sleep(2); continue
+        bids, asks = {}, {}
+        try:
+            async with websockets.connect(PM_WS, ping_interval=10, max_size=None) as ws:
+                await ws.send(json.dumps({"assets_ids": [tok], "type": "market"}))
+                nraw = 0
+                sub_until = time.time() + 280
+                while time.time() < min(stop, sub_until):
                     try:
-                        px, evt = float(d["px"]), float(d["ts"]) / 1000.0
-                        store.append((t, "KRK", px))
-                        store.append((evt, "KRKevt", px))   # exchange event time (feed latency)
+                        msg = await asyncio.wait_for(ws.recv(), timeout=5)
                     except Exception:  # noqa: BLE001
-                        pass
+                        break
+                    if raw and nraw < 3:
+                        print("PM>", msg[:200], flush=True); nraw += 1
+                    try:
+                        data = json.loads(msg)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    for ev in (data if isinstance(data, list) else [data]):
+                        try:
+                            sts = float(ev.get("timestamp", 0)) / 1000.0
+                        except Exception:  # noqa: BLE001
+                            sts = time.time()
+                        if sts < 1e9:
+                            sts = time.time()
+                        if ev.get("bids") is not None or ev.get("asks") is not None:
+                            bids = best_of(ev.get("bids")); asks = best_of(ev.get("asks"))
+                        else:
+                            for c in ev.get("changes", []):
+                                try:
+                                    p, s, side = float(c["price"]), float(c["size"]), str(c.get("side", "")).upper()
+                                    (bids if side in ("BUY", "BID") else asks)[p] = s
+                                except Exception:  # noqa: BLE001
+                                    pass
+                        bb = max((p for p, s in bids.items() if s > 0), default=None)
+                        ba = min((p for p, s in asks.items() if s > 0), default=None)
+                        if bb is not None and ba is not None:
+                            depth = bids.get(bb, 0) + asks.get(ba, 0)
+                            pm_evt.append((sts, (bb + ba) / 2.0, depth))
+        except Exception:  # noqa: BLE001
+            await asyncio.sleep(1)
 
 
-async def run(asset, secs, probe):
-    mk = find_live_market(asset)
-    if not mk:
-        print(f"# no live {asset} micro-market found"); return
-    cond, token, q, end, dur = mk
-    print(f"# live market: {q}  window={dur/60:.0f}min  ends in {end-time.time():.0f}s", flush=True)
-    store = []
-    d = 12 if probe else min(secs, max(20, end - time.time() - 8))
-    stop = time.time() + d
-    await asyncio.gather(stream_pm(token, store, stop, probe), stream_okx(asset, store, stop, probe))
-    pm = [(t, v) for (t, s, v) in store if s == "PM"]
-    krk = [(t, v) for (t, s, v) in store if s == "KRK"]
-    kevt = [(t, v) for (t, s, v) in store if s == "KRKevt"]
-    print(f"# captured over {d:.0f}s: PM mid updates={len(pm)} Kraken trades={len(krk)}", flush=True)
-    if probe:
-        print("# PM mids:", [round(v, 3) for _, v in pm[-5:]], " Kraken:", [round(v, 1) for _, v in krk[-5:]])
-        return
-    if len(pm) < 8 or len(krk) < 8:
-        print("# too few updates (market quiet) — retry in an active window"); return
-    # Kraken feed latency: our recv time - exchange event time
-    fl = sorted((rt - et) * 1000 for (rt, _), (et, _) in zip(krk, kevt))
-    if fl:
-        print(f"# Kraken feed latency (recv - exchange ts): median={fl[len(fl)//2]:.0f}ms")
-    def cad(ts):
-        d = sorted(t for t, _ in ts); g = sorted(d[i] - d[i-1] for i in range(1, len(d)))
-        return g[len(g)//2]*1000 if g else 0
-    print(f"# cadence: PM mid update median={cad(pm):.0f}ms ; Kraken trade median={cad(krk):.0f}ms")
-    # edge window: each Kraken move >= $0.5 -> time to next PM mid change
-    lags = []
-    pm_s = sorted(pm)
-    for i in range(1, len(krk)):
-        if abs(krk[i][1] - krk[i-1][1]) >= 0.5:
-            tm = krk[i][0]
-            base = next((v for (tp, v) in reversed(pm_s) if tp <= tm), None)
+async def stream_binance(asset, btc_evt, stop, raw):
+    url = BINANCE_WS if asset == "BTC" else BINANCE_ETH
+    async with websockets.connect(url, ping_interval=10) as ws:
+        nraw = 0
+        while time.time() < stop:
+            try:
+                msg = await asyncio.wait_for(ws.recv(), timeout=max(0.1, stop - time.time()))
+            except Exception:  # noqa: BLE001
+                break
+            if raw and nraw < 3:
+                print("BIN>", msg[:160], flush=True); nraw += 1
+            try:
+                d = json.loads(msg)
+                if d.get("e") == "trade":
+                    btc_evt.append((float(d["T"]) / 1000.0, float(d["p"])))   # match server ts, price
+            except Exception:  # noqa: BLE001
+                pass
+
+
+async def run(asset, secs, probe, thresh):
+    state = {"tok": None, "q": "", "end": 0}
+
+    def get_token():
+        if state["end"] < time.time() + 20:
+            r = find_live_token(asset)
+            if r:
+                state["tok"], state["q"], state["end"] = r
+        return state["tok"]
+    get_token()
+    print(f"# market: {state['q']}  (rolls across windows)  measuring {secs}s", flush=True)
+    pm_evt, btc_evt = [], []
+    stop = time.time() + (15 if probe else secs)
+    await asyncio.gather(stream_pm(get_token, pm_evt, stop, probe),
+                         stream_binance(asset, btc_evt, stop, probe))
+    print(f"# captured: PM book updates={len(pm_evt)}  Binance trades={len(btc_evt)}", flush=True)
+    if probe or len(pm_evt) < 5 or len(btc_evt) < 20:
+        print("# (probe or too few PM updates — market quiet)"); return
+    pm_evt.sort(); btc_evt.sort()
+    lags, depths = [], []
+    for i in range(1, len(btc_evt)):
+        if abs(btc_evt[i][1] - btc_evt[i - 1][1]) >= thresh:
+            tbtc = btc_evt[i][0]
+            base = next((m for (ts, m, d) in reversed(pm_evt) if ts <= tbtc), None)
             if base is None:
                 continue
-            nxt = next(((tp - tm) * 1000 for (tp, v) in pm_s if tp > tm and abs(v - base) > 1e-9), None)
-            if nxt is not None and nxt < 8000:
-                lags.append(nxt)
+            for (ts, m, d) in pm_evt:
+                if ts > tbtc and abs(m - base) > 1e-9:
+                    lag = (ts - tbtc) * 1000
+                    if -500 < lag < 10000:
+                        lags.append(lag); depths.append(d)
+                    break
     if lags:
         lags.sort()
-        print(f"# *** EDGE WINDOW: PM reprices after BTC move in median={lags[len(lags)//2]:.0f}ms "
-              f"p25={lags[len(lags)//4]:.0f} p75={lags[3*len(lags)//4]:.0f}ms (n={len(lags)}) ***")
+        print(f"# *** EDGE WINDOW (server-ts): PM reprices {lags[len(lags)//2]:.0f}ms after a "
+              f">=${thresh} BTC move  (p25={lags[len(lags)//4]:.0f} p75={lags[3*len(lags)//4]:.0f}ms, "
+              f"n={len(lags)}) ***")
+        ds = sorted(depths)
+        print(f"# DEPTH at the stale quote (best bid+ask size): median={ds[len(ds)//2]:.0f} shares")
     else:
-        print("# no BTC-move->PM-reprice pairs (quiet/efficient)")
+        print(f"# no >=${thresh} BTC-move -> PM-reprice pairs captured (BTC quiet this run)")
 
 
 def main():
     probe = "--probe" in sys.argv
-    secs = int(sys.argv[sys.argv.index("--secs") + 1]) if "--secs" in sys.argv else 70
+    secs = int(sys.argv[sys.argv.index("--secs") + 1]) if "--secs" in sys.argv else 300
     asset = sys.argv[sys.argv.index("--asset") + 1] if "--asset" in sys.argv else "BTC"
-    asyncio.get_event_loop().run_until_complete(run(asset, secs, probe))
+    thresh = float(sys.argv[sys.argv.index("--thresh") + 1]) if "--thresh" in sys.argv else 0.3
+    asyncio.get_event_loop().run_until_complete(run(asset, secs, probe, thresh))
 
 
 if __name__ == "__main__":
