@@ -230,7 +230,7 @@ def main():
             if a is None or bd is None:
                 continue
             priced.append((rank, (a + bd) / 2.0, m))
-        priced.sort()
+        priced.sort(key=lambda x: (x[0], x[1]))  # sort by (rank, mid); never compare the dict
         for i in range(len(priced)):
             for j in range(i + 1, len(priced)):
                 r_lo, p_lo, m_lo = priced[i]
