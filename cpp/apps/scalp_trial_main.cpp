@@ -18,9 +18,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <map>
 #include <string>
 #include <sys/stat.h>
 #include <thread>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -198,7 +200,7 @@ int main() {
 
     std::thread feed(kraken_feed);
     const auto t_start = clk::now();
-    std::vector<Window> windows;
+    std::map<std::string, Window> seen;  // persistent: up_tok -> window with captured open_px
     double last_discover = 0;
     // current open position (serial): token + side-prob-at-entry + shares + cost + the window end
     struct Pos { std::string asset, tok; bool up; double shares, cost, end_unix, open_px; } pos{};
@@ -206,14 +208,18 @@ int main() {
     while (!sf.stopped && std::chrono::duration<double>(clk::now() - t_start).count() < run_secs) {
         const double t = now_unix();
         // refresh windows every 20s; capture open price the first time a window is seen live
-        if (t - last_discover > 20) {
-            windows = discover();
+        if (t - last_discover > 15) {
             last_discover = t;
-            for (auto& w : windows) {
-                if (!w.open_captured) {
-                    double px = (w.asset == "BTC") ? g_btc.load() : g_eth.load();
-                    if (px > 0) { w.open_px = px; w.open_captured = true; }
+            for (auto& w : discover()) {
+                if (seen.count(w.up_tok)) continue;            // already tracking -> keep its captured open
+                const double start = w.end_unix - 300.0;       // 5-min window
+                if (t >= start - 5 && t < start + 25) {        // caught it within ~25s of its open
+                    const double px = (w.asset == "BTC") ? g_btc.load() : g_eth.load();
+                    if (px > 0) { w.open_px = px; w.open_captured = true; seen[w.up_tok] = w; }
                 }
+            }
+            for (auto it = seen.begin(); it != seen.end();) {  // prune ended windows
+                if (t > it->second.end_unix + 60) it = seen.erase(it); else ++it;
             }
         }
         // 1) if a position is open, check for resolution at window end -> realize
@@ -230,7 +236,8 @@ int main() {
         }
         // 2) else look for a mispriced takeable window
         else if (sf.can_open()) {
-            for (auto& w : windows) {
+            for (auto& kv : seen) {
+                Window& w = kv.second;
                 if (!w.open_captured || w.open_px <= 0) continue;
                 double tau = w.end_unix - t;
                 if (tau < 30 || tau > 290) continue;             // trade mid-window only
