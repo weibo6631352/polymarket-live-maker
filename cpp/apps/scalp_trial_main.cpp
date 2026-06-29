@@ -202,7 +202,7 @@ int main() {
     std::thread feed(kraken_feed);
     const auto t_start = clk::now();
     std::map<std::string, Window> seen;  // persistent: up_tok -> window with captured open_px
-    double last_discover = 0;
+    double last_discover = 0, last_hb = 0;
     // current open position (serial): token + side-prob-at-entry + shares + cost + the window end
     struct Pos { std::string asset, tok; bool up; double shares, cost, end_unix, open_px; } pos{};
 
@@ -221,6 +221,22 @@ int main() {
             }
             for (auto it = seen.begin(); it != seen.end();) {  // prune ended windows
                 if (t > it->second.end_unix + 60) it = seen.erase(it); else ++it;
+            }
+        }
+        // heartbeat: prove feed + discovery + fair-value are live (DRY visibility + LIVE monitoring)
+        if (t - last_hb > 30) {
+            last_hb = t;
+            std::printf("[HB] btc=%.1f eth=%.1f tracked=%zu cum=$%.2f trades=%d%s\n",
+                        g_btc.load(), g_eth.load(), seen.size(), sf.cum_realized, sf.trades,
+                        sf.open ? " POS-OPEN" : "");
+            for (auto& kv : seen) {
+                Window& w = kv.second;
+                const double tau = w.end_unix - t;
+                if (tau < 0) continue;
+                const double px = (w.asset == "BTC") ? g_btc.load() : g_eth.load();
+                const double z = std::log(px / w.open_px) / (sigma * std::sqrt(std::max(tau, 1.0) / 300.0));
+                std::printf("     %s tau=%.0fs open=%.1f now=%.1f fairP_up=%.3f\n",
+                            w.asset.c_str(), tau, w.open_px, px, norm_cdf(z));
             }
         }
         // 1) if a position is open, check for resolution at window end -> realize
