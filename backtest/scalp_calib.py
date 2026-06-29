@@ -6,7 +6,7 @@
 import json, math, urllib.request, urllib.parse, time, sys
 
 SIGMA = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0025
-MARGIN, PMIN = 0.04, 0.15
+MARGIN, PMIN, SPREAD = 0.04, 0.15, 0.01  # 1c spread observed on 5-min windows; entry pays ~half-spread vs mid
 
 def get(url):
     try:
@@ -25,31 +25,33 @@ def iso_to_unix(s):
 now = time.gmtime()
 now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", now)
 past_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 14*3600))  # last 6h
-url = ("https://gamma-api.polymarket.com/markets?closed=true&limit=500&order=endDate&ascending=false"
-       f"&end_date_min={past_iso}&end_date_max={now_iso}")
-mk = get(url) or []
+base = ("https://gamma-api.polymarket.com/markets?closed=true&limit=500&order=endDate&ascending=false"
+        f"&end_date_min={past_iso}&end_date_max={now_iso}")
 wins = []
-for m in mk:
-    q = (m.get("question") or "").lower()
-    if "up or down" not in q or "bitcoin" not in q:
-        continue
-    try:
-        end = iso_to_unix(m["endDate"])
-    except Exception:
-        continue
-    # 5-min windows only (skip 15-min/hourly): question time-range spans 5 min
-    op = m.get("outcomePrices")
-    if isinstance(op, str):
-        op = json.loads(op)
-    toks = m.get("clobTokenIds")
-    if isinstance(toks, str):
-        toks = json.loads(toks)
-    if not op or not toks or len(toks) < 2:
-        continue
-    up_won = 1 if str(op[0]) == "1" else 0
-    wins.append({"end": end, "start": end - 300, "up_won": up_won, "up_tok": toks[0]})
-
-wins = wins[:160]
+for off in range(0, 10000, 500):  # paginate past the 500-cap until we have enough BTC windows
+    mk = get(base + f"&offset={off}") or []
+    if not mk:
+        break
+    for m in mk:
+        q = (m.get("question") or "").lower()
+        if "up or down" not in q or "bitcoin" not in q:
+            continue
+        try:
+            end = iso_to_unix(m["endDate"])
+        except Exception:
+            continue
+        op = m.get("outcomePrices")
+        if isinstance(op, str):
+            op = json.loads(op)
+        toks = m.get("clobTokenIds")
+        if isinstance(toks, str):
+            toks = json.loads(toks)
+        if not op or not toks or len(toks) < 2:
+            continue
+        wins.append({"end": end, "start": end - 300, "up_won": 1 if str(op[0]) == "1" else 0, "up_tok": toks[0]})
+    if len(wins) >= 200:
+        break
+wins = wins[:200]
 print(f"resolved BTC up/down windows pulled: {len(wins)} (sigma={SIGMA})")
 
 n=0; my_brier=0.0; pm_brier=0.0; both=0
@@ -104,9 +106,9 @@ for w in wins:
         buy_up = PMIN<up_ask<1-PMIN and up_ask < my-MARGIN
         buy_dn = PMIN<dn_ask<1-PMIN and dn_ask < (1-my)-MARGIN
         if buy_up:
-            pnl += (1.0 if o==1 else 0.0) - up_ask; trades+=1; wins_n+= (o==1)
+            pnl += (1.0 if o==1 else 0.0) - (up_ask + SPREAD/2); trades+=1; wins_n+= (o==1)  # pay ask=mid+half-spread
         elif buy_dn:
-            pnl += (1.0 if o==0 else 0.0) - dn_ask; trades+=1; wins_n+= (o==0)
+            pnl += (1.0 if o==0 else 0.0) - (dn_ask + SPREAD/2); trades+=1; wins_n+= (o==0)
         break  # one trade per window (first qualifying point) to mimic the serial bot
 
 print(f"\n=== CALIBRATION (n={both} sample-points across {n} windows) ===")
