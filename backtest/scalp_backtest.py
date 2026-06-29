@@ -61,8 +61,8 @@ def parse_window(title):
 def fetch_windows(hours):
     now = time.time()
     out = []
-    for back in range(0, hours, 3):       # 3h pages to stay under limits
-        lo = dt.datetime.utcfromtimestamp(now - (back+3)*3600).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for back in range(0, hours, 1):       # 1h pages (gamma caps ~100 markets/query -> avoid truncation)
+        lo = dt.datetime.utcfromtimestamp(now - (back+1)*3600).strftime("%Y-%m-%dT%H:%M:%SZ")
         hi = dt.datetime.utcfromtimestamp(now - back*3600 + 60).strftime("%Y-%m-%dT%H:%M:%SZ")
         ms = get(f"{GAMMA}/markets?closed=true&limit=500&end_date_min={lo}&end_date_max={hi}&order=endDate&ascending=false") or []
         for m in (ms if isinstance(ms, list) else []):
