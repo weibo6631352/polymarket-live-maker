@@ -42,7 +42,7 @@ def binance_open(end_unix):
     except Exception:
         return None
 
-RUN_MS = 5400000.0  # 90 min
+RUN_MS = 7200000.0  # 2 hr (bigger sample toward very-certain)
 start = now_ms()
 btc_hist = []
 btc_lock = threading.Lock()
