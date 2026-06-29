@@ -190,6 +190,8 @@ int main() {
               std::getenv("LM_SCALP_KILLFILE") ? std::getenv("LM_SCALP_KILLFILE") : "state/scalp.kill"};
     const double sigma = env_d("LM_SCALP_SIGMA", 0.0025);   // ~5min BTC vol fraction
     const double margin = env_d("LM_SCALP_MARGIN", 0.04);   // required edge over fair (covers fee+slip)
+    const double pmin = env_d("LM_SCALP_PMIN", 0.15);       // skip extreme sides — model error is catastrophic
+                                                            // (and payoff lottery-like) below pmin / above 1-pmin
     const double run_secs = env_d("LM_SCALP_RUNSECS", 7200);
 
     const bool LIVE = std::getenv("PM_TRADER_LIVE") && std::string(std::getenv("PM_TRADER_LIVE")) == "1" &&
@@ -248,8 +250,9 @@ int main() {
                 if (tau < 0) continue;
                 const double px = (w.asset == "BTC") ? g_btc.load() : g_eth.load();
                 const double z = std::log(px / w.open_px) / (sigma * std::sqrt(std::max(tau, 1.0) / 300.0));
-                std::printf("     %s tau=%.0fs open=%.1f now=%.1f fairP_up=%.3f\n",
-                            w.asset.c_str(), tau, w.open_px, px, norm_cdf(z));
+                std::printf("     %s tau=%.0fs open=%.2f now=%.2f move=%+.3f%% myP_up=%.3f mkt_up_ask=%.3f\n",
+                            w.asset.c_str(), tau, w.open_px, px, 100.0 * (px / w.open_px - 1.0),
+                            norm_cdf(z), best_ask(w.up_tok));
             }
         }
         // 1) if a position is open, check for resolution at window end -> realize
@@ -277,8 +280,8 @@ int main() {
                 double p_up = norm_cdf(z);                       // fair P(Up)
                 double up_ask = best_ask(w.up_tok);
                 double dn_ask = best_ask(w.down_tok);
-                bool buy_up = up_ask > 0 && up_ask < p_up - margin;
-                bool buy_dn = dn_ask > 0 && dn_ask < (1 - p_up) - margin;
+                bool buy_up = up_ask > pmin && up_ask < 1 - pmin && up_ask < p_up - margin;
+                bool buy_dn = dn_ask > pmin && dn_ask < 1 - pmin && dn_ask < (1 - p_up) - margin;
                 if (!buy_up && !buy_dn) continue;
                 const std::string tok = buy_up ? w.up_tok : w.down_tok;
                 double price = buy_up ? up_ask : dn_ask;
@@ -286,21 +289,21 @@ int main() {
                 std::printf("[SIGNAL] %s fairP_up=%.3f up_ask=%.3f dn_ask=%.3f -> BUY %s @%.3f x%.1f ($%.2f)\n",
                             w.asset.c_str(), p_up, up_ask, dn_ask, buy_up ? "UP" : "DOWN", price, shares,
                             sf.order_usd);
-                bool filled = false;
                 if (LIVE) {
-                    auto r = sub({{"action", "PLACE"}, {"token_id", tok}, {"side", "BUY"},
-                                  {"price", price}, {"size", shares}});
-                    filled = r.value("success", false) || r.contains("orderID") || r.contains("orderId");
+                    const auto r = sub({{"action", "PLACE"}, {"token_id", tok}, {"side", "BUY"},
+                                        {"price", price}, {"size", shares}});
                     std::printf("[PLACE-LIVE] %s\n", r.dump().c_str());
                 } else {
-                    filled = true;  // DRY: assume fill at the ask
                     std::printf("[PLACE-DRY] (no real order)\n");
                 }
-                if (filled) {
-                    sf.on_open();
-                    pos = {w.asset, tok, buy_up, shares, sf.order_usd, w.end_unix, w.open_px};
-                }
-                break;  // serial: one at a time
+                // CRITICAL: EVERY place opens a position immediately, regardless of response parsing.
+                // The prior bug checked filled="success"/"orderID" but the resp uses "order_id" with
+                // success nested in a string -> filled was always false -> on_open never ran ->
+                // serial + max_trades guards were bypassed -> 84-order runaway. on_open here makes
+                // the serial guard + trade-count cap ROBUST to any response shape.
+                sf.on_open();
+                pos = {w.asset, tok, buy_up, shares, sf.order_usd, w.end_unix, w.open_px};
+                break;  // serial: one position at a time, held to resolution
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
