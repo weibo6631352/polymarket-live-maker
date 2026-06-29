@@ -123,18 +123,27 @@ def parse_pool(m):
         return None
 
 
-def is_broad_based(p):
-    """Heuristic: outright/field markets (many-way, behavioral) vs single-name news (binary).
-    neg_risk multi-candidate fields are the canonical broad-based pools; also catch outright
-    question patterns. Single-name 'Will X happen by <date>' news binaries are NOT broad-based."""
+def category(p):
+    """Classify a pool by FLOW TYPE — the real driver of adverse selection. The coordinator's
+    'broad-based' target is sports_outright (cup/league/boot futures); politics_news is the
+    informed-flow class that killed the numeric strategy; macro_daily are noise up/down dailies."""
     q = p["question"].lower()
-    broad_kw = ("win the", "winner", "champion", "golden boot", "top scorer", "mvp", "to win",
-                "relegated", "promoted", "nominee", "nomination", "win group", "advance",
-                "finals", "final four", "playoff", "cup", "league", "open", "election",
-                "president", "be the next", "win most", "ballon")
-    if p["neg_risk"]:
-        return True
-    return any(k in q for k in broad_kw)
+    if any(k in q for k in ("up or down", "fed ", "fed decide", "fed pause", "highest temperature",
+                            "rate cut", "rate hike", "bps", "basis point", "close above", "close below")):
+        return "macro_daily"
+    if any(k in q for k in ("fdv", "after launch", "airdrop")):
+        return "crypto_fdv"
+    if any(k in q for k in ("election", "nominee", "nomination", "primary", "president", "prime minister",
+                            "chancellor", "governor", "senate", "house seat", "democratic", "republican",
+                            "convicted", "indict", "deal by", "nuclear", "ceasefire", "resign", "impeach")):
+        return "politics_news"
+    if any(k in q for k in ("win the", "winner", "champion", "golden boot", "top scorer", "to win",
+                            "relegated", "promoted", "win group", "advance", "ballon", "title", "cup",
+                            "league", "playoff", "finals", " mvp", "world cup", "premier")):
+        return "sports_outright"
+    if any(k in q for k in (" vs ", "vs.", "o/u", "over/under", " win on ", "to score", "clean sheet")):
+        return "sports_match"
+    return "other"
 
 
 def book_competition(token, mid, max_spread_c):
@@ -157,11 +166,16 @@ def book_competition(token, mid, max_spread_c):
 # --------------------------------------------------------------------------- trades
 def fetch_trades(cond, since_ts):
     """data-api /trades, paginated by offset, newest-first, until older than since_ts or capped.
-    Normalize every print into YES-space: (ts, yes_price, yes_side, size)."""
+    Normalize every print into YES-space: (ts, yes_price, yes_side, size).
+    NOTE: data-api hard-caps offset at ~3000 (400 beyond) -> we keep the most-recent <=3500 trades
+    and scale reward to the actual span covered; a 400/transient just stops pagination (no pool drop)."""
     rows, offset = [], 0
-    while len(rows) < MAX_TRADES:
+    while len(rows) < MAX_TRADES and offset <= 3000:
         url = f"{DATA}/trades?market={cond}&limit=500&offset={offset}"
-        d = http_get(url)
+        try:
+            d = http_get(url, tries=2)
+        except Exception:  # noqa: BLE001  -- offset cap or transient: keep partial, don't drop pool
+            break
         if not isinstance(d, list) or not d:
             break
         for t in d:
@@ -285,70 +299,81 @@ def main():
             print("  ", {k: pp[k] for k in ("question", "mid0", "min_size", "max_spread_c", "tick", "daily", "neg_risk")})
         return
 
-    # curate: makeable (mid 0.30-0.70) + has reward + min_size sane; split broad vs single-name
+    import statistics
+    # curate: makeable (mid 0.30-0.70) + has reward + sane min_size; group by FLOW category.
     cand = [pp for pp in pools if 0.30 <= pp["mid0"] <= 0.70 and pp["daily"] > 0 and pp["min_size"] > 0]
+    for pp in cand:
+        pp["cat"] = category(pp)
     cand.sort(key=lambda pp: pp["daily"], reverse=True)
-    broad = [pp for pp in cand if is_broad_based(pp)][:max_pools]
-    single = [pp for pp in cand if not is_broad_based(pp)][:max_pools // 2]
-    print(f"# curated: {len(broad)} broad-based + {len(single)} single-name (makeable, high-reward)", flush=True)
+    CAP = {"sports_outright": 14, "sports_match": 6, "politics_news": 8, "macro_daily": 6,
+           "crypto_fdv": 3, "other": 4}
+    picked, seen = [], {}
+    for pp in cand:
+        c = pp["cat"]
+        if seen.get(c, 0) < CAP.get(c, 4):
+            picked.append(pp); seen[c] = seen.get(c, 0) + 1
+    print("# curated " + str(len(picked)) + " pools by category: " +
+          ", ".join(f"{k}={v}" for k, v in sorted(seen.items())), flush=True)
 
     now = int(time.time())
     since = now - int(WINDOW_DAYS * 86400)
-    rows = []
-    for grp, plist in (("BROAD", broad), ("SINGLE", single)):
-        for pp in plist:
-            try:
-                comp = book_competition(pp["yes_token"], pp["mid0"], pp["max_spread_c"])
-                trades = fetch_trades(pp["cond"], since)
-            except Exception as e:  # noqa: BLE001
-                print(f"  ! skip {pp['question'][:40]}: {e}")
-                continue
-            # representative: middle half_spread, middle horizon
-            sh = my_share(pp, HALF_SPREAD_TICKS[1], comp)
-            base = simulate(pp, trades, HALF_SPREAD_TICKS[1], AS_HORIZONS_S[1], sh)
-            if not base:
-                print(f"  - {grp} {pp['question'][:46]:46s} no trades in window")
-                continue
-            be_share = (-base["adverse"] + base["unwind"]) / (KAPPA * pp["daily"] * max(base["span_days"], 1e-9)) \
-                if pp["daily"] > 0 else float("inf")
-            rows.append((grp, pp, base, comp, sh, be_share))
-            print(f"  {grp:6s} {pp['question'][:42]:42s} fills={base['fills']:4d} "
-                  f"reward={base['reward_real']:+8.2f} adverse={base['adverse']:+8.2f} "
-                  f"net={base['net']:+8.2f} share={sh:.3f} be_share={be_share:.2f}", flush=True)
-            time.sleep(0.2)
-
-    # ----- sensitivity grid + totals -----
-    print("\n# === sensitivity (sum of NET over each group, $ over window) ===")
-    print(f"# {'group':6s} {'S(ticks)':8s} " + " ".join(f"T={h}s".rjust(10) for h in AS_HORIZONS_S))
-    summary = {}
-    for grp in ("BROAD", "SINGLE"):
-        grows = [r for r in rows if r[0] == grp]
-        for st in HALF_SPREAD_TICKS:
-            cells = []
-            for h in AS_HORIZONS_S:
-                tot = 0.0
-                for (_, pp, _b, comp, _sh, _be) in grows:
-                    sh = my_share(pp, st, comp)
-                    tr = fetch_trades_cache.get(pp["cond"])
-                    s = simulate(pp, tr, st, h, sh) if tr else None
-                    if s:
-                        tot += s["net"]
-                cells.append(tot)
-                summary[(grp, st, h)] = tot
-            print(f"# {grp:6s} {st:<8d} " + " ".join(f"{c:+10.2f}" for c in cells))
-
-    print("\n# === VERDICT ===")
-    for grp in ("BROAD", "SINGLE"):
-        grows = [r for r in rows if r[0] == grp]
-        if not grows:
+    results, book_fail = [], 0
+    for pp in picked:
+        try:
+            comp = book_competition(pp["yes_token"], pp["mid0"], pp["max_spread_c"])
+            trades = fetch_trades(pp["cond"], since)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! skip {pp['question'][:38]}: {e}"); continue
+        book_ok = comp is not None
+        book_fail += 0 if book_ok else 1
+        sh = my_share(pp, HALF_SPREAD_TICKS[1], comp if book_ok else None)
+        base = simulate(pp, trades, HALF_SPREAD_TICKS[1], AS_HORIZONS_S[1], sh)
+        if not base:
             continue
-        rew = sum(r[2]["reward_real"] for r in grows)
-        adv = sum(r[2]["adverse"] for r in grows)
-        unw = sum(r[2]["unwind"] for r in grows)
-        net = sum(r[2]["net"] for r in grows)
-        npos = sum(1 for r in grows if r[2]["net"] > 0)
-        print(f"# {grp}: {len(grows)} pools | reward(real)={rew:+.2f} adverse={adv:+.2f} unwind={unw:+.2f} "
-              f"NET={net:+.2f} | net-positive pools={npos}/{len(grows)} (S=2tk,T=120s window~{WINDOW_DAYS}d)")
+        be = (-base["adverse"] + base["unwind"]) / (KAPPA * pp["daily"] * max(base["span_days"], 1e-9))
+        results.append((pp, base, comp, sh, be, book_ok))
+        print(f"  {pp['cat']:15s} {pp['question'][:36]:36s} fills={base['fills']:4d} "
+              f"rew={base['reward_real']:+7.1f} adv={base['adverse']:+8.1f} net={base['net']:+8.1f} "
+              f"be={be:5.2f} {'bk' if book_ok else 'NB'}", flush=True)
+        time.sleep(0.15)
+
+    # ---- per-category verdict: lean on breakeven_share (share-estimate-INDEPENDENT) ----
+    print(f"\n# book ok {len(results)-book_fail}/{len(results)} (NB=no book -> share defaulted to ceil)\n")
+    print(f"# {'category':16s} {'pools':5s} {'fills':6s} {'med_be':7s} {'%be<=.40':8s} {'netS2T120':10s}"
+          "  (be=AS/(k*daily*days); <=0.40 => net-pos at achievable share)")
+    cats = {}
+    for (pp, base, comp, sh, be, ok) in results:
+        cats.setdefault(pp["cat"], []).append((pp, base, be))
+    for c in sorted(cats):
+        rs = cats[c]
+        bes = sorted(b for (_, _, b) in rs)
+        med = statistics.median(bes) if bes else float("nan")
+        frac = sum(1 for b in bes if b <= SHARE_CEIL) / len(bes)
+        netsum = sum(b["net"] for (_, b, _) in rs)
+        fillsum = sum(b["fills"] for (_, b, _) in rs)
+        print(f"# {c:16s} {len(rs):<5d} {fillsum:<6d} {med:<7.2f} {frac*100:<8.0f} {netsum:+10.1f}")
+
+    # AS-horizon sensitivity on the curated TARGET (sports_outright), share fixed per pool
+    so_rows = [r for r in results if r[0]["cat"] == "sports_outright"]
+    print("\n# sports_outright NET vs adverse-horizon T (S=2 ticks):")
+    for h in AS_HORIZONS_S:
+        tot = sum((simulate(pp, fetch_trades_cache.get(pp["cond"]), HALF_SPREAD_TICKS[1], h, sh) or {"net": 0})["net"]
+                  for (pp, _b, _c, sh, _be, _ok) in so_rows if fetch_trades_cache.get(pp["cond"]))
+        print(f"#   T={h}s: NET={tot:+.1f}")
+
+    print("\n# === VERDICT (does curating sports_outright break the reward/adverse coupling?) ===")
+
+    def agg(rs):
+        rew = sum(b["reward_real"] for (_, b, _) in rs); adv = sum(b["adverse"] for (_, b, _) in rs)
+        net = sum(b["net"] for (_, b, _) in rs); npos = sum(1 for (_, b, _) in rs if b["net"] > 0)
+        return rew, adv, net, npos
+    for name in ("sports_outright", "politics_news", "macro_daily", "sports_match"):
+        rs = cats.get(name, [])
+        if not rs:
+            continue
+        rew, adv, net, npos = agg(rs)
+        print(f"# {name:16s}: {len(rs)} pools reward={rew:+.1f} adverse={adv:+.1f} NET={net:+.1f} "
+              f"net-pos={npos}/{len(rs)}")
 
 
 fetch_trades_cache = {}
