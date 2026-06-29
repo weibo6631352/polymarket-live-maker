@@ -31,16 +31,15 @@ def discover():
     cands.sort(reverse=True)
     return cands[0]
 
-RUN_MS = 1800000.0  # 30 min
+RUN_MS = 1200000.0  # 20 min
 start = now_ms()
 events = []   # btc: (t,'btc',px,0,0) ; pm: (t,'pm',seg,ask,bid)
 lock = threading.Lock()
 
-def kraken():
+def kraken():  # uses BINANCE (the PM resolution source) bookTicker mid, not Kraken
     while now_ms() - start < RUN_MS:
         try:
-            ws = websocket.create_connection("wss://ws.kraken.com/v2", sslopt={"cert_reqs": ssl.CERT_NONE})
-            ws.send(json.dumps({"method": "subscribe", "params": {"channel": "ticker", "symbol": ["BTC/USD"]}}))
+            ws = websocket.create_connection("wss://stream.binance.com:9443/ws/btcusdt@bookTicker", sslopt={"cert_reqs": ssl.CERT_NONE})
             ws.settimeout(5)
             while now_ms() - start < RUN_MS:
                 try:
@@ -49,9 +48,10 @@ def kraken():
                     continue
                 try:
                     j = json.loads(m)
-                    if j.get("channel") == "ticker":
+                    if "b" in j and "a" in j:
+                        mid = (float(j["b"]) + float(j["a"])) / 2.0
                         with lock:
-                            events.append((now_ms(), "btc", float(j["data"][0]["last"]), 0.0, 0.0))
+                            events.append((now_ms(), "btc", mid, 0.0, 0.0))
                 except Exception:
                     pass
             ws.close()
@@ -128,13 +128,14 @@ def seg_at(t):
             return s
     return None
 
-# BTC jumps (1s return > 0.02%)
+# BTC jumps (1s return > 0.02%) — O(n) two-pointer (btc is dense from Binance)
 jumps = []
+j = 0
 for i in range(len(btc)):
-    t, px = btc[i]; j = i
-    while j > 0 and t - btc[j][0] < 1000:
-        j -= 1
-    if j < i and btc[j][1] > 0 and abs(px / btc[j][1] - 1) > 0.0002:
+    t, px = btc[i]
+    while j < i and btc[j][0] < t - 1000:
+        j += 1
+    if btc[j][1] > 0 and t - btc[j][0] >= 800 and abs(px / btc[j][1] - 1) > 0.0002:
         jumps.append((t, 1 if px > btc[j][1] else -1, px / btc[j][1] - 1))
 dj = []
 for t, d, r in jumps:
