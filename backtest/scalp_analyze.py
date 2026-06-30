@@ -97,6 +97,25 @@ show("ask<0.55 (cheap)", [r for r in trigs if r["ask"] < 0.55])
 show("ask>=0.55 (expensive)", [r for r in trigs if r["ask"] >= 0.55])
 show("with-trend & ask>=0.55", [r for r in trigs if r["wt"] and r["ask"] >= 0.55])
 
+print("\n=== 1st-vs-REPEAT per window (does the C++ over-trading within a window lose?) ===")
+seen_wi = set(); first = []; rest = []
+percount = {}
+for r in trigs:
+    if r["ask"] < 0.55 and BEST in r:
+        percount[r["wi"]] = percount.get(r["wi"], 0) + 1
+        if r["wi"] not in seen_wi:
+            seen_wi.add(r["wi"]); first.append(r[BEST])
+        else:
+            rest.append(r[BEST])
+def st(name, v):
+    if v:
+        print("  %-26s n=%d  mean=%+.4f  win=%d%%" % (name, len(v), sum(v) / len(v), 100 * sum(1 for x in v if x > 0) // len(v)))
+st("1st cheap per window", first)
+st("2nd+ cheap per window", rest)
+import collections
+dist = collections.Counter(percount.values())
+print("  cheap-triggers-per-window distribution:", dict(sorted(dist.items())), "(backtest: mostly 1-2/window)")
+
 print("\n=== BOTH SIDES? (did we trade & profit on Up-token AND Dn-token, or one-sided?) ===")
 show("BUY up-token (BTC up)", [r for r in trigs if r["side"] == "up"])
 show("BUY dn-token (BTC dn)", [r for r in trigs if r["side"] == "dn"])
