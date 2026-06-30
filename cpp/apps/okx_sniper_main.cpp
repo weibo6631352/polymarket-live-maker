@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -25,6 +26,8 @@
 using json = nlohmann::json;
 
 static std::atomic<bool> g_run{true};
+static std::condition_variable g_cv;  // signalled by the feeds on a new tick -> wakes the hot loop (event-driven)
+static std::mutex g_cv_mx;
 static long now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch()).count();
@@ -77,8 +80,8 @@ static void okx_feed() {
     while (g_run.load()) {
         pmm::net::WsConnection ws("ws.okx.com", "/ws/v5/public", 3000);
         if (!ws.connect()) { std::this_thread::sleep_for(std::chrono::seconds(1)); continue; }
-        (void)ws.send_text("{\"op\":\"subscribe\",\"args\":[{\"channel\":\"tickers\",\"instId\":\"BTC-USDT\"}]}");
-        std::printf("[OKX] connected\n");
+        (void)ws.send_text("{\"op\":\"subscribe\",\"args\":[{\"channel\":\"bbo-tbt\",\"instId\":\"BTC-USDT\"}]}");
+        std::printf("[OKX] connected (bbo-tbt)\n");
         long lastping = now_ms();
         while (g_run.load()) {
             if (now_ms() - lastping > 20000) { (void)ws.send_text("ping"); lastping = now_ms(); }
@@ -89,11 +92,12 @@ static void okx_feed() {
                 auto j = json::parse(m.text);
                 if (j.contains("data") && j["data"].is_array() && !j["data"].empty()) {
                     auto& d = j["data"][0];
-                    const double mid = (std::stod(d["bidPx"].get<std::string>()) +
-                                        std::stod(d["askPx"].get<std::string>())) / 2.0;
-                    std::lock_guard<std::mutex> lk(okx_mx);
-                    g_okx.emplace_back(now_ms(), mid);
-                    if (g_okx.size() > 4000) g_okx.pop_front();
+                    if (d.contains("bids") && !d["bids"].empty() && d.contains("asks") && !d["asks"].empty()) {
+                        const double mid = (std::stod(d["bids"][0][0].get<std::string>()) +
+                                            std::stod(d["asks"][0][0].get<std::string>())) / 2.0;
+                        { std::lock_guard<std::mutex> lk(okx_mx); g_okx.emplace_back(now_ms(), mid); if (g_okx.size() > 4000) g_okx.pop_front(); }
+                        g_cv.notify_one();  // event-driven: wake the hot loop the instant a new tick arrives
+                    }
                 }
             } catch (...) {}
         }
@@ -127,9 +131,8 @@ static void binance_feed() {
                 if (j.contains("b") && j.contains("a")) {
                     const double mid = (std::stod(j["b"].get<std::string>()) +
                                         std::stod(j["a"].get<std::string>())) / 2.0;
-                    std::lock_guard<std::mutex> lk(btc_mx);
-                    g_btc.emplace_back(now_ms(), mid);
-                    if (g_btc.size() > 4000) g_btc.pop_front();
+                    { std::lock_guard<std::mutex> lk(btc_mx); g_btc.emplace_back(now_ms(), mid); if (g_btc.size() > 4000) g_btc.pop_front(); }
+                    g_cv.notify_one();
                 }
             } catch (...) {}
         }
@@ -321,7 +324,10 @@ int main() {
                         pn, (pa > 0 ? (pn / pa - 1) * 100 : 0.0), ua, da);
             last_hb = t;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));  // busy-poll ~1ms
+        {  // EVENT-DRIVEN: wake the instant a feed pushes a new tick; 50ms fallback for window/tau/HB checks
+            std::unique_lock<std::mutex> lk(g_cv_mx);
+            g_cv.wait_for(lk, std::chrono::milliseconds(50));
+        }
     }
     std::printf("DONE: %d snipes (cap %d)\n", trades, MAX_TRADES);
     g_run.store(false);
