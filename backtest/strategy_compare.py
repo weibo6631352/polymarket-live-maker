@@ -260,9 +260,16 @@ def analyze(tag):
             "OKX" if o > b else "BIN", "OKX" if o / len(oe) > b / len(be) else "BIN", "OKX" if len(oe) > len(be) else "BIN"))
 
 def snapshot():
+    last_full = now_ms()
     while now_ms() - start < RUN_MS:
-        time.sleep(1800)  # comprehensive snapshot every 30min -> see if the edge pattern holds across periods
-        analyze("%dmin" % int((now_ms() - start) / 60000))
+        time.sleep(90)
+        with res_lock:
+            no = sum(1 for e in entries if e["src"] == "okx")
+            nb = sum(1 for e in entries if e["src"] == "bin")
+        print("[hb %.0fmin] entries=%d  okx=%d bin=%d" % ((now_ms() - start) / 60000, no + nb, no, nb), flush=True)
+        if now_ms() - last_full > 600000:  # full comprehensive analysis every 10min (not just at the end)
+            analyze("%.0fmin" % ((now_ms() - start) / 60000))
+            last_full = now_ms()
 
 ts = [threading.Thread(target=feed, args=("wss://stream.binance.com:9443/ws/btcusdt@bookTicker", None, p_bin, bhist, blk)),
       threading.Thread(target=feed, args=("wss://ws.okx.com:8443/ws/v5/public",
