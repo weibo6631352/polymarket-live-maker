@@ -59,7 +59,7 @@ for wi, w in enumerate(wins):
             continue
         ntrig += 1
         drift = (mid_at(t) or 0) - w["open"]
-        rec = {"wt": (drift > 0) == (mv > 0), "ask": entry_ask, "traj": {}}
+        rec = {"wt": (drift > 0) == (mv > 0), "ask": entry_ask, "side": side, "traj": {}}
         for al in ALATS:
             _, a2 = bidask(side, t + al)
             if a2 and a2 > 0:
@@ -96,6 +96,12 @@ show("counter-trend", [r for r in trigs if not r["wt"]])
 show("ask<0.55 (cheap)", [r for r in trigs if r["ask"] < 0.55])
 show("ask>=0.55 (expensive)", [r for r in trigs if r["ask"] >= 0.55])
 show("with-trend & ask>=0.55", [r for r in trigs if r["wt"] and r["ask"] >= 0.55])
+
+print("\n=== BOTH SIDES? (did we trade & profit on Up-token AND Dn-token, or one-sided?) ===")
+show("BUY up-token (BTC up)", [r for r in trigs if r["side"] == "up"])
+show("BUY dn-token (BTC dn)", [r for r in trigs if r["side"] == "dn"])
+show("cheap & up-token", [r for r in trigs if r["side"] == "up" and r["ask"] < 0.55])
+show("cheap & dn-token", [r for r in trigs if r["side"] == "dn" and r["ask"] < 0.55])
 
 print("\n=== ASK PERSISTENCE after the move (cheap triggers) — does the cheap ask survive our latency? ===")
 cheap = [r for r in trigs if r["ask"] < 0.55 and r["traj"]]
