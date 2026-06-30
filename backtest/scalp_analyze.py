@@ -7,7 +7,7 @@ import sys, math, bisect
 CSV = sys.argv[1] if len(sys.argv) > 1 else "/tmp/raw_ticks.csv"
 THRESH = 0.0003          # BTC move trigger (0.03%/3s)
 LAT = 50                 # our latency ms before we fill
-HOLDS = [200, 400, 800, 1500, 3000]   # ms to hold before exiting (sell the bid)
+HOLDS = [200, 400, 800, 1500, 3000, 5000, 8000]   # ms; 5-8s = the REAL settlement-delayed live exit window
 ALATS = [0, 17, 50, 100, 200, 400]    # latencies to probe the favored-side ASK after the trigger (competition proxy)
 
 okx = []; pm = {"up": [], "dn": []}; wins = []   # pm rows keep (t, bid, ask)
