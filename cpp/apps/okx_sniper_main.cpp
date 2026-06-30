@@ -307,7 +307,7 @@ int main() {
             if (SRC == "bin") mv = btc_move();
             else if (SRC == "both" && std::fabs(mv) <= THRESH) mv = btc_move();
             if (std::fabs(mv) < THRESH * 0.5) armed = true;  // re-arm once the move subsides (hysteresis)
-            if (std::fabs(mv) > THRESH && armed && deployed < MAX_USD && t - last_exit > COOLDOWN_MS) {
+            if (std::fabs(mv) > THRESH && armed && deployed < MAX_USD && t - last_exit > COOLDOWN_MS && pnl > -MAX_LOSS) {
                 const bool up = mv > 0;
                 const std::string fav = up ? w.up_tok : w.dn_tok;
                 double ask; long ask_t;

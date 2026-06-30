@@ -131,6 +131,22 @@ Three independent expert reviews (C++ correctness, financial-risk, backtest-meth
   (meanP_fair 0.436 ≈ actual 0.433) and modestly skillful (Brier 0.206 < base 0.245).
 - Backtest fills assume displayed best ask/bid at full 5-share size (no depth/fees) — only a live order proves fill.
 
+## 5c. LIVE TEST (2 real trades) + FEES (2026-06-30)
+
+Two real 5-share scalps were run (user-authorized; key already on the box). Reconciled from on-chain activity:
+- **Competition: PASSED** — the BUY filled at the displayed cheap ask or better (0.46→0.46; 0.24→0.22). The cheap
+  ask is NOT a phantom at our latency; we get it.
+- **Settlement: the SELL takes ~3.5 s, not 1.5 s** (not the feared ~25 s). The bot's sell-at-1.5s rejects, retries,
+  and fills ~3.5 s. CRUCIAL: the cheap-scalp edge does NOT decay at the realizable hold — @3000 ms it's +6.95c/73%
+  (≈ the 1.5 s value), because the most-lagged cheap side keeps catching up past 1.5 s. So the settlement delay is
+  survivable.
+- **🔴 FEES ARE REAL.** Reverse-engineered + verified on real fills: **taker fee = 0.07·p·(1-p) per share, per
+  leg** (feeType crypto_fees_v2; takerOnly; rebateRate 0.2 for makers). Round-trip for a cheap entry (p≈0.25) ≈
+  2.6c/share. **NET edge after fees on both taker legs: +4.45c/share, t=3.37 (per-trigger), still +EV and
+  significant.** Net+clustered t ≈ 2.7. The MAKER-exit would avoid the sell-leg fee AND earn the rebate → higher net.
+- Two live trades netted ≈ −$0.54 (incl. fees) — noise (one reverted). Statistical confirmation needs ~30-50 live
+  trades. Position is FLAT after both (verified).
+
 ## 6. Reproduce
 
 Recorder + offline analysis (all in `backtest/`, run on the box against `/tmp/raw_ticks.csv`):
