@@ -143,3 +143,15 @@ if cs:
         wt = wm / wse if wse else 0.0
         print("  CLUSTERED by window (independent, HONEST): %d windows  mean=%+.4f  t=%.2f  -> %s" % (
             len(wmeans), wm, wt, "still SIGNIFICANT" if abs(wt) > 2 else "NOT significant"))
+    # OUT-OF-SAMPLE: the cheap<0.55 / hold=1500 choice was made in-sample. Test it on HELD-OUT 2nd-half windows.
+    nwins = max((r["wi"] for r in trigs), default=0) + 1
+    half = nwins // 2
+    def sub_cheap(a, b):
+        v = [r[BEST] for r in trigs if a <= r["wi"] < b and r["ask"] < 0.55 and BEST in r]
+        return (len(v), sum(v) / len(v), 100 * sum(1 for x in v if x > 0) // len(v)) if v else None
+    tr, te = sub_cheap(0, half), sub_cheap(half, nwins)
+    print("\n  OUT-OF-SAMPLE (cheap scalp generalizes if held-out still +):")
+    if tr:
+        print("    1st-half windows 0-%d (in-sample): n=%d mean=%+.4f win=%d%%" % (half, tr[0], tr[1], tr[2]))
+    if te:
+        print("    2nd-half windows %d-%d (HELD-OUT): n=%d mean=%+.4f win=%d%%" % (half, nwins, te[0], te[1], te[2]))
