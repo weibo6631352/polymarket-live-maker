@@ -194,6 +194,7 @@ int main() {
 
     int trades = 0;
     long last_trig = 0;
+    long last_hb = 0;
     Window w;
     while (g_run.load() && trades < MAX_TRADES) {
         if (!w.valid || static_cast<double>(std::time(nullptr)) > w.end_unix - 25) {
@@ -237,6 +238,14 @@ int main() {
                     }
                 }
             }
+        }
+        if (t - last_hb > 12000) {
+            const double pn = okx_now(), pa = okx_ago(3000);
+            double ua, da;
+            { std::lock_guard<std::mutex> lk(book_mx); ua = g_up_ask; da = g_dn_ask; }
+            std::printf("[HB] okx_now=%.1f mv3s=%+.4f%% up_ask=%.3f dn_ask=%.3f\n",
+                        pn, (pa > 0 ? (pn / pa - 1) * 100 : 0.0), ua, da);
+            last_hb = t;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));  // busy-poll ~1ms
     }
