@@ -34,7 +34,9 @@ def mid_at(t):
     return okx[i][1] if i >= 0 else None
 
 scalps = {h: [] for h in HOLDS}
+trigs = []   # per-trigger: {wt, ask, <hold>: scalp}
 ntrig = 0
+BEST = 1500  # the hold to break down by filter
 for wi, w in enumerate(wins):
     lo = w["t0"]; hi = wins[wi + 1]["t0"] if wi + 1 < len(wins) else w["end"] + 60000
     last = 0
@@ -55,10 +57,14 @@ for wi, w in enumerate(wins):
         if not entry_ask or not (0.03 < entry_ask < 0.97):
             continue
         ntrig += 1
+        drift = (mid_at(t) or 0) - w["open"]
+        rec = {"wt": (drift > 0) == (mv > 0), "ask": entry_ask}
         for h in HOLDS:
             exit_bid, _ = bidask(side, t + LAT + h)     # we exit by selling the bid
             if exit_bid and exit_bid > 0:
                 scalps[h].append(exit_bid - entry_ask)  # net scalp per share (spread already in)
+                rec[h] = exit_bid - entry_ask
+        trigs.append(rec)
 
 print("parsed okx=%d pm_up=%d windows=%d ; scalp triggers=%d" % (len(okx), len(pm["up"]), len(wins), ntrig))
 print("\nNET SCALP per share = exit_bid(after hold) - entry_ask  (must be >0 to beat the spread)")
@@ -73,3 +79,15 @@ for h in HOLDS:
     print("  %4d  %3d  %+.4f   %3d%%   %+.4f  %+.4f  %+.4f" % (
         h, n, mean, wr, s2[n // 2], s2[n // 4], s2[3 * n // 4]))
 print("\n-> if mean>0 at some hold, the lag-scalp beats the spread; if all <=0, the spread eats the lag edge")
+
+def show(name, sub):
+    s = [r[BEST] for r in sub if BEST in r]
+    if not s:
+        print("  %-22s (none)" % name); return
+    print("  %-22s n=%d  mean=%+.4f  win=%d%%" % (name, len(s), sum(s) / len(s), 100 * sum(1 for x in s if x > 0) // len(s)))
+print("\n=== scalp @ %dms hold, by FILTER (does filtering cut the losers?) ===" % BEST)
+show("with-trend", [r for r in trigs if r["wt"]])
+show("counter-trend", [r for r in trigs if not r["wt"]])
+show("ask<0.55 (cheap)", [r for r in trigs if r["ask"] < 0.55])
+show("ask>=0.55 (expensive)", [r for r in trigs if r["ask"] >= 0.55])
+show("with-trend & ask>=0.55", [r for r in trigs if r["wt"] and r["ask"] >= 0.55])
