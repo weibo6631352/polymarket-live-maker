@@ -444,6 +444,7 @@ json ClobSubmitter::place(const std::string& token_id, const std::string& side, 
 
     json out;
     std::string order_id, status;
+    double filled = 0.0;
     bool success = false, ok_resp = false;
     try {
         const json j = json::parse(r.body);
@@ -451,6 +452,7 @@ json ClobSubmitter::place(const std::string& token_id, const std::string& side, 
         else if (const json* v2 = ju::find(j, "order_id")) order_id = ju::to_str(*v2);
         if (const json* v = ju::find(j, "status")) status = ju::to_str(*v);
         if (const json* v = ju::find(j, "success")) success = ju::py_bool(*v);
+        filled = order_filled_shares(j, is_buy);  // ACTUAL filled shares (a marketable buy may partial-fill < size)
         ok_resp = true;
     } catch (...) {
     }
@@ -464,6 +466,7 @@ json ClobSubmitter::place(const std::string& token_id, const std::string& side, 
     out["side"] = side;
     out["price"] = price;
     out["size"] = size;
+    out["filled"] = filled;  // actual matched shares — sell THIS, not the intended size (partial-fill bug)
     out["http"] = r.status;
     out["resp"] = r.body;
     return out;

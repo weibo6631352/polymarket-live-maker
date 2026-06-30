@@ -319,16 +319,18 @@ int main() {
                     armed = false;                                    // edge-trigger: one fire per move-event
                     const double buy_px = std::min(ask + 0.03, 0.97); // marketable: cross the ask so it TAKES (C1)
                     ++trades; deployed += notional;                   // count + cumulative-risk cap BEFORE placing (S1)
-                    bool filled = true; std::string st = "DRY";
+                    bool ok_buy = true; std::string st = "DRY"; double got = SHARES;
                     if (LIVE) {
                         const auto r = sub({{"action", "PLACE"}, {"token_id", fav}, {"side", "BUY"},
                                             {"price", buy_px}, {"size", SHARES}});
                         st = r.value("status", std::string());
-                        filled = (st != "REJECTED" && st != "ERROR");
+                        got = r.value("filled", 0.0);   // ACTUAL matched shares — a marketable buy can partial-fill < SHARES
+                        ok_buy = (st != "REJECTED" && st != "ERROR") && got >= 1.0;
                     }
-                    // entry basis: conservative buy_px in LIVE (real fill <= buy_px, so PnL is never overstated;
-                    // TODO reconcile the actual fill price/size from the order response), displayed ask in DRY (backtest parity)
-                    if (filled) pos = {true, up, fav, LIVE ? buy_px : ask, SHARES, t, t + HOLD_MS};
+                    // sell EXACTLY what filled (floor 0.01 to dodge balance-rounding rejects) — selling the intended
+                    // SHARES when only got<SHARES filled = the infinite "balance not enough" retry that stranded a pos to 0.
+                    const double held = LIVE ? std::floor(got * 100.0) / 100.0 : SHARES;
+                    if (ok_buy) pos = {true, up, fav, LIVE ? buy_px : ask, held, t, t + HOLD_MS};
                     const std::string tail = LIVE ? (" status=" + st) : std::string("  (hold then sell bid)");
                     std::printf("[BUY-%s] mv=%+.3f%% %s ask=%.3f buy=%.3f $%.2f tau=%.0fs%s\n",
                                 LIVE ? "LIVE" : "DRY", mv * 100, up ? "Up" : "Down", ask, buy_px, notional, tau, tail.c_str());
@@ -367,6 +369,13 @@ int main() {
                 } else {
                     std::printf("[SELL-RETRY-LIVE] %s status=%s http=%d resp=%s\n",
                                 pos.up ? "Up" : "Down", st.c_str(), http, resp.substr(0, 140).c_str());
+                    // window RESOLVED -> token dead -> position settled to 0/1. STOP the infinite retry; mark flat.
+                    if (resp.find("invalid token") != std::string::npos) {
+                        pnl -= pos.entry_ask * pos.shares;  // conservative: the cheap (lagging) side likely resolved to 0
+                        std::printf("[RESOLVED-LIVE] %s token dead — settled by resolution, assume loss $%.3f cumPnL=$%+.3f\n",
+                                    pos.up ? "Up" : "Down", pos.entry_ask * pos.shares, pnl);
+                        pos = Position{}; last_exit = t; armed = false;
+                    }
                 }
             }
         }
