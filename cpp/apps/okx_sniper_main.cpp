@@ -218,12 +218,13 @@ int main() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     const double THRESH = env_d("SNIPE_THRESH", 0.0003);
     const int MAX_TRADES = static_cast<int>(env_d("SNIPE_MAX_TRADES", 30));
-    const double ORDER_USD = env_d("SNIPE_ORDER_USD", 2.0);
+    double SHARES = env_d("SNIPE_SHARES", 5.0);  // PM market minimum = 5 shares; never below
+    if (SHARES < 5.0) SHARES = 5.0;
     const bool LIVE = (std::getenv("PM_TRADER_LIVE") && std::string(std::getenv("PM_TRADER_LIVE")) == "1") &&
                       (std::getenv("LM_SNIPE_ARM") && std::string(std::getenv("LM_SNIPE_ARM")) == "1");
     pmm::app::LoadDotEnv(".env", LIVE);
-    std::printf("=== okx-sniper (extreme-low-latency) ===\nmode=%s thresh=%.4f max=%d order=$%.2f\n",
-                LIVE ? "LIVE-REAL-MONEY" : "DRY", THRESH, MAX_TRADES, ORDER_USD);
+    std::printf("=== okx-sniper (extreme-low-latency) ===\nmode=%s thresh=%.4f max=%d shares=%.0f(min5)\n",
+                LIVE ? "LIVE-REAL-MONEY" : "DRY", THRESH, MAX_TRADES, SHARES);
 
     pmm::clob::ClobSubmitter sub;
     if (LIVE && !sub.ready()) { std::printf("LIVE but ClobSubmitter not ready — abort\n"); return 1; }
@@ -267,15 +268,15 @@ int main() {
                     { std::lock_guard<std::mutex> lk(book_mx); ask = up ? g_up_ask : g_dn_ask; }
                     const double tau = w.end_unix - static_cast<double>(std::time(nullptr));
                     if (ask > 0.03 && ask < 0.97 && tau > 20) {
-                        const double size = ORDER_USD / ask;
+                        const double size = SHARES;  // fixed min share count; order value = size*ask
                         if (LIVE) {
                             const auto r = sub({{"action", "PLACE"}, {"token_id", fav}, {"side", "BUY"},
                                                 {"price", ask}, {"size", size}});
                             std::printf("[SNIPE-LIVE] mv=%+.3f%% fav=%s ask=%.3f -> %s\n",
                                         mv * 100, up ? "Up" : "Down", ask, r.dump().c_str());
                         } else {
-                            std::printf("[SNIPE-DRY] mv=%+.3f%% fav=%s ask=%.3f size=%.1f tau=%.0fs (no order)\n",
-                                        mv * 100, up ? "Up" : "Down", ask, size, tau);
+                            std::printf("[SNIPE-DRY] mv=%+.3f%% fav=%s ask=%.3f size=%.0f cost=$%.2f tau=%.0fs (no order)\n",
+                                        mv * 100, up ? "Up" : "Down", ask, size, size * ask, tau);
                         }
                         ++trades;
                         last_trig = t;
