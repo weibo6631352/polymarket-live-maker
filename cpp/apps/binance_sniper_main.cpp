@@ -211,6 +211,10 @@ int main() {
             }
             last_disc = t;
         }
+        if (!w.valid) {
+            std::this_thread::sleep_for(std::chrono::seconds(4));  // back off — no fresh window (avoid gamma spam)
+            continue;
+        }
         // signal: Binance seconds-move
         if (w.valid && t - last_trig > 2000) {
             const double pn = btc_now(), pa = btc_ago(3000);
