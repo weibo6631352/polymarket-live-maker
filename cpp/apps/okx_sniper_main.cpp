@@ -258,6 +258,7 @@ int main() {
     const double STOP = env_d("SNIPE_STOP", 0.03);  // stop-loss: bid <= entry_ask - STOP -> bail (fat-tail reversal)
     const long MAX_HOLD_MS = static_cast<long>(env_d("SNIPE_MAX_HOLD_MS", 8000));  // HARD force-exit even on a stale book
     const long COOLDOWN_MS = static_cast<long>(env_d("SNIPE_COOLDOWN_MS", 2000));  // min gap after an exit before re-entry
+    const double MAX_LOSS = env_d("SNIPE_MAX_LOSS", 3.0);  // realized-loss kill-switch: stop entering once pnl <= -MAX_LOSS
     const bool LIVE = (std::getenv("PM_TRADER_LIVE") && std::string(std::getenv("PM_TRADER_LIVE")) == "1") &&
                       (std::getenv("LM_SNIPE_ARM") && std::string(std::getenv("LM_SNIPE_ARM")) == "1");
     pmm::app::LoadDotEnv(".env", LIVE);

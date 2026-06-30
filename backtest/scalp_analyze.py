@@ -111,8 +111,19 @@ for al in ALATS:
         print("  fav ask @ +%3dms : avg=%.4f  n=%d" % (al, sum(vals) / len(vals), len(vals)))
 print("  -> flat across 0-200ms = cheap ask persists (we have time); rises fast = faster snipers take it (competition)")
 
+def fee(p):  # PM crypto taker fee per share, reverse-engineered + verified on real fills: 0.07*p*(1-p)
+    return 0.07 * p * (1 - p)
 print("\n=== STATISTICAL SIGNIFICANCE (cheap scalp @ %dms, the headline edge) ===" % BEST)
 cs = [r[BEST] for r in trigs if r["ask"] < 0.55 and BEST in r]
+# NET of the real taker fee on BOTH legs (entry ask + exit bid)
+csn = [r[BEST] - fee(r["ask"]) - fee(r["ask"] + r[BEST]) for r in trigs if r["ask"] < 0.55 and BEST in r]
+if csn:
+    n = len(csn); mn = sum(csn) / n
+    sd = (sum((x - mn) ** 2 for x in csn) / (n - 1)) ** 0.5 if n > 1 else 0.0
+    se = sd / math.sqrt(n) if n else 0.0
+    print("  NET OF FEES (taker both legs, 0.07*p*(1-p)): mean=%+.4f/share  t=%.2f  win=%d%%  -> %s" % (
+        mn, mn / se if se else 0, 100 * sum(1 for x in csn if x > 0) // n,
+        "STILL +EV after fees" if mn > 0 else "fees kill it"))
 if cs:
     n = len(cs); mean = sum(cs) / n
     sd = (sum((x - mean) ** 2 for x in cs) / (n - 1)) ** 0.5 if n > 1 else 0.0
