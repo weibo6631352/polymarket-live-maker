@@ -104,3 +104,21 @@ for al in ALATS:
     if vals:
         print("  fav ask @ +%3dms : avg=%.4f  n=%d" % (al, sum(vals) / len(vals), len(vals)))
 print("  -> flat across 0-200ms = cheap ask persists (we have time); rises fast = faster snipers take it (competition)")
+
+print("\n=== STATISTICAL SIGNIFICANCE (cheap scalp @ %dms, the headline edge) ===" % BEST)
+cs = [r[BEST] for r in trigs if r["ask"] < 0.55 and BEST in r]
+if cs:
+    n = len(cs); mean = sum(cs) / n
+    sd = (sum((x - mean) ** 2 for x in cs) / (n - 1)) ** 0.5 if n > 1 else 0.0
+    se = sd / math.sqrt(n) if n else 0.0
+    t = mean / se if se else 0.0
+    wins = sum(1 for x in cs if x > 0); wr = wins / n
+    z = 1.96; den = 1 + z * z / n
+    cen = (wr + z * z / (2 * n)) / den
+    half = z * math.sqrt(wr * (1 - wr) / n + z * z / (4 * n * n)) / den
+    avgstake = sum(r["ask"] for r in trigs if r["ask"] < 0.55 and BEST in r) / n
+    print("  n=%d trigs  mean=%+.4f/share  sd=%.4f  SE=%.4f" % (n, mean, sd, se))
+    print("  t=%.2f  -> %s" % (t, "SIGNIFICANT (|t|>2, p<~0.05)" if abs(t) > 2 else "not yet significant"))
+    print("  win=%.0f%%  Wilson95%%CI=[%.0f%%, %.0f%%]  %s" % (
+        100 * wr, 100 * (cen - half), 100 * (cen + half), "excludes 50%" if (cen - half) > 0.5 else "includes 50%"))
+    print("  per 5-share trade: $%+.3f gross   (mean = %.0f%% of the ~%.2f stake)" % (mean * 5, 100 * mean / avgstake, avgstake))
