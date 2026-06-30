@@ -27,8 +27,9 @@ for line in open(CSV):
         continue
 okx.sort(); pm["up"].sort(); pm["dn"].sort(); wins.sort(key=lambda w: w["t0"])
 ot = [x[0] for x in okx]
+pmt = {s: [r[0] for r in pm[s]] for s in pm}   # precompute time arrays ONCE (perf: was O(n) rebuild per call)
 def bidask(side, t):  # latest (bid,ask) for side at/before t
-    rows = pm[side]; i = bisect.bisect_right([r[0] for r in rows], t) - 1
+    rows = pm[side]; i = bisect.bisect_right(pmt[side], t) - 1
     return (rows[i][1], rows[i][2]) if i >= 0 else (None, None)
 def mid_at(t):
     i = bisect.bisect_right(ot, t) - 1
@@ -41,9 +42,8 @@ BEST = 1500  # the hold to break down by filter
 for wi, w in enumerate(wins):
     lo = w["t0"]; hi = wins[wi + 1]["t0"] if wi + 1 < len(wins) else w["end"] + 60000
     last = 0
-    for t, m in okx:
-        if not (lo <= t <= w["end"] - 20000):
-            continue
+    for idx in range(bisect.bisect_left(ot, lo), bisect.bisect_right(ot, w["end"] - 20000)):
+        t, m = okx[idx]
         if t - last < 2000:
             continue
         a = mid_at(t - 3000)
