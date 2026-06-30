@@ -40,14 +40,15 @@ def price_side(rows, side, t):
             best = (r[2] + r[3]) / 2 if r[3] else r[2]
     return best
 
-def sigma_persec(lo, end, dsec):  # realized vol per sqrt-second from dsec-spaced Binance log-returns
+def sigma_persec(lo, end, dsec):  # realized vol per sqrt-second from dsec-spaced Binance log-returns in [lo,end]
+    i0 = bisect.bisect_left(bt, lo); i1 = bisect.bisect_right(bt, end)  # slice once (perf: was O(all binb)/call)
     lr = []; lt = None; lp = None
-    for t, m in binb:
-        if lo <= t <= end:
-            if lt is None or t - lt >= dsec * 1000:
-                if lp:
-                    lr.append(math.log(m / lp))
-                lt = t; lp = m
+    for j in range(i0, i1):
+        tt, m = binb[j]
+        if lt is None or tt - lt >= dsec * 1000:
+            if lp:
+                lr.append(math.log(m / lp))
+            lt = tt; lp = m
     if len(lr) < 4:
         return None
     mu = sum(lr) / len(lr); sd = (sum((x - mu) ** 2 for x in lr) / len(lr)) ** 0.5
