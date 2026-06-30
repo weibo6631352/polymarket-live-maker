@@ -104,6 +104,31 @@ losers / −$X = regime change or competition arrival).
   (≥100 window) offline confirmation. Decisive shadow/live measurement: log the ask actually available at our 17 ms
   vs the backtest +50 ms ask and the gap remaining; if the gap survives at 17 ms → real; if gone → mirage (co-lo).
 
+## 5b. Multi-expert review + fixes (2026-06-30)
+
+Three independent expert reviews (C++ correctness, financial-risk, backtest-methodology) audited the code + data.
+
+**Critical crisis/exit holes found in the C++ → FIXED:**
+- A frozen/one-sided book defeated BOTH the stop-loss and the time-stop (both gated on a fresh bid) → silent
+  hold-to-resolution. Fixed: a hard `MAX_HOLD_MS` force-exit that ignores book freshness (floor price if no bid).
+- LIVE sell-reject was treated as flat → silent hold. Fixed: check the SELL status; on reject KEEP the position
+  and retry (never strand). NOTE the settlement-lag risk: a sell 1.5 s after the buy may reject if shares aren't
+  settled — must verify the buy→sell round-trip in the tiny-live test.
+- Window-swap-while-holding read the wrong/stale token bid → fixed (no swap while holding; reset bids on swap).
+- Shutdown orphaned an open position → fixed (flatten on exit). Entry fill basis made conservative in LIVE
+  (buy_px, never overstates). Post-exit cooldown (anti-churn). MAX_USD cumulative-deployed is the real hard cap.
+- DEFERRED (noted, add before live): Binance sign-confirm, persistent daily kill-switch, actual-fill reconciliation,
+  the model gates (|z|>2.5 veto, maker-exit).
+
+**Statistics corrected for honesty:**
+- The per-trigger t=5.10 OVERSTATED significance (triggers within a window are autocorrelated). **Window-CLUSTERED
+  (22 independent windows): t=4.06 — still strongly significant (p<0.001).**
+- The cheap filter + 1.5 s hold were selected in-sample → +6.84c is optimistic. **Honest edge band: +3.9c
+  (unfiltered) … +6.8c (cheap).** Both tokens (Up & Down) profit (not one-sided).
+- fair_value σ had lookahead (whole-window vol) → fixed to CAUSAL σ([lo,t]); on 50 windows the model is UNBIASED
+  (meanP_fair 0.436 ≈ actual 0.433) and modestly skillful (Brier 0.206 < base 0.245).
+- Backtest fills assume displayed best ask/bid at full 5-share size (no depth/fees) — only a live order proves fill.
+
 ## 6. Reproduce
 
 Recorder + offline analysis (all in `backtest/`, run on the box against `/tmp/raw_ticks.csv`):
