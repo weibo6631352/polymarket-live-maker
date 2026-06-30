@@ -8,7 +8,7 @@
 #   win     : a=up_tok b=dn_tok c=open d=end_unix
 import json, ssl, time, threading, websocket, calendar, urllib.request
 
-OUT = "/tmp/raw_ticks.csv"
+OUT = __import__("os").environ.get("REC_OUT", "/tmp/raw_ticks.csv")
 RUN = float(__import__("os").environ.get("REC_SECS", "3600"))  # default 1hr
 start = time.time()
 # APPEND so a restart keeps accumulating into one growing CSV (we need 100+ windows for calibration)
