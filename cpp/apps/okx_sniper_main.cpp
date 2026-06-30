@@ -90,6 +90,44 @@ static void okx_feed() {
     }
 }
 
+// ---- Binance feed (alternative / confirmation signal — the resolution venue) ----
+static std::mutex btc_mx;
+static std::deque<std::pair<long, double>> g_btc;
+static double btc_now() {
+    std::lock_guard<std::mutex> lk(btc_mx);
+    return g_btc.empty() ? 0.0 : g_btc.back().second;
+}
+static double btc_ago(long ms) {
+    const long tgt = now_ms() - ms;
+    std::lock_guard<std::mutex> lk(btc_mx);
+    double v = 0.0;
+    for (const auto& p : g_btc) { if (p.first <= tgt) v = p.second; else break; }
+    return v;
+}
+static void binance_feed() {
+    while (g_run.load()) {
+        pmm::net::WsConnection ws("stream.binance.com", "/ws/btcusdt@bookTicker", 3000);
+        if (!ws.connect()) { std::this_thread::sleep_for(std::chrono::seconds(1)); continue; }
+        std::printf("[BIN] connected\n");
+        while (g_run.load()) {
+            auto m = ws.recv();
+            if (m.kind == pmm::net::WsMessage::Closed) break;
+            if (m.kind != pmm::net::WsMessage::Text) continue;
+            try {
+                auto j = json::parse(m.text);
+                if (j.contains("b") && j.contains("a")) {
+                    const double mid = (std::stod(j["b"].get<std::string>()) +
+                                        std::stod(j["a"].get<std::string>())) / 2.0;
+                    std::lock_guard<std::mutex> lk(btc_mx);
+                    g_btc.emplace_back(now_ms(), mid);
+                    if (g_btc.size() > 4000) g_btc.pop_front();
+                }
+            } catch (...) {}
+        }
+        ws.close();
+    }
+}
+
 // ---- PM CLOB book (real-time best_ask for the current window's tokens) ----
 static std::mutex book_mx;
 static std::string g_up_tok, g_dn_tok;
@@ -190,7 +228,11 @@ int main() {
     pmm::clob::ClobSubmitter sub;
     if (LIVE && !sub.ready()) { std::printf("LIVE but ClobSubmitter not ready — abort\n"); return 1; }
 
+    const std::string SRC = std::getenv("SNIPE_SRC") ? std::getenv("SNIPE_SRC") : "okx";  // okx | bin | both
+    std::printf("signal=%s\n", SRC.c_str());
     std::thread to(okx_feed), tb(pm_book);
+    std::thread tbin;
+    if (SRC != "okx") tbin = std::thread(binance_feed);
 
     int trades = 0;
     long last_trig = 0;
@@ -213,9 +255,11 @@ int main() {
         // hot signal: OKX seconds-move
         const long t = now_ms();
         if (t - last_trig > 2000) {
-            const double pn = okx_now(), pa = okx_ago(3000);
-            if (pn > 0 && pa > 0) {
-                const double mv = pn / pa - 1.0;
+            auto mvf = [](double n, double a) { return (n > 0 && a > 0) ? (n / a - 1.0) : 0.0; };
+            double mv = mvf(okx_now(), okx_ago(3000));
+            if (SRC == "bin") mv = mvf(btc_now(), btc_ago(3000));
+            else if (SRC == "both" && std::fabs(mv) <= THRESH) mv = mvf(btc_now(), btc_ago(3000));
+            {
                 if (std::fabs(mv) > THRESH) {
                     const bool up = mv > 0;
                     const std::string fav = up ? w.up_tok : w.dn_tok;
@@ -253,5 +297,6 @@ int main() {
     g_run.store(false);
     to.join();
     tb.join();
+    if (tbin.joinable()) tbin.join();
     return 0;
 }
