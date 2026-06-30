@@ -107,7 +107,8 @@ def pm():
             ws.send(json.dumps({"assets_ids": [up, dn], "type": "market"}))
             ws.settimeout(2)
             lp = now_ms()
-            while time.time() < end - 12 and time.time() - start < RUN:
+            # record PAST the end so we capture the actual resolution (winner PM price -> ~1, loser -> ~0)
+            while time.time() < end + 75 and time.time() - start < RUN:
                 if now_ms() - lp > 9000:
                     try:
                         ws.send("PING")
