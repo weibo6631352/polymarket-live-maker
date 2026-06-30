@@ -125,6 +125,8 @@ Three independent expert reviews (C++ correctness, financial-risk, backtest-meth
   (22 independent windows): t=4.06 — still strongly significant (p<0.001).**
 - The cheap filter + 1.5 s hold were selected in-sample → +6.84c is optimistic. **Honest edge band: +3.9c
   (unfiltered) … +6.8c (cheap).** Both tokens (Up & Down) profit (not one-sided).
+- **OUT-OF-SAMPLE: it GENERALIZES.** Held-out 2nd-half windows (never used to pick cheap/hold) = +7.28c/78%,
+  matching in-sample +6.41c/79% → the cheap-scalp is NOT a cherry-picked artifact.
 - fair_value σ had lookahead (whole-window vol) → fixed to CAUSAL σ([lo,t]); on 50 windows the model is UNBIASED
   (meanP_fair 0.436 ≈ actual 0.433) and modestly skillful (Brier 0.206 < base 0.245).
 - Backtest fills assume displayed best ask/bid at full 5-share size (no depth/fees) — only a live order proves fill.
