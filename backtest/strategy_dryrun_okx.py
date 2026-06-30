@@ -5,7 +5,7 @@
 import json, ssl, time, threading, calendar, urllib.request, websocket
 
 THRESH = 0.0003
-LATS = [50, 100, 150, 250]
+LATS = [0, 10, 25, 50, 100, 200]   # probe the EXTREME-low-latency regime our speed build targets
 HOLDBACK = 20
 
 def hg(u):
@@ -40,7 +40,7 @@ def binance_open(end_unix):
     except Exception:
         return None
 
-RUN_MS = 1800000.0  # 30 min
+RUN_MS = 3600000.0  # 60 min (bigger OKX sample + sub-50ms latency curve)
 start = now_ms()
 bhist = []; ohist = []
 blk = threading.Lock(); olk = threading.Lock()
