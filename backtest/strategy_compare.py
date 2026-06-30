@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # strategy_compare.py — COMPREHENSIVE OKX vs Binance signal comparison on the SAME windows.
 # Streams OKX + Binance + PM book; on each >THRESH/3s move (either feed) fires a tagged trigger; fills at
-# the PM ask at our latency; resolves via Binance end>open. Captures FULL granularity per entry (src, tau,
-# direction, entry ask, won, fill-at-each-latency) and analyses MANY ways: by latency, by tau, by direction,
-# by entry-price; OKX/BIN trigger OVERLAP + union ("both" signal); risk (edge dispersion, max drawdown, max
-# losing streak); capital efficiency (ROI = total edge / deployed). Hourly snapshots. Read-only, zero money.
+# the PM ask at our latency; resolves via Binance end>open. Captures FULL granularity per entry and prints a
+# multi-dimensional breakdown EVERY HOUR (and at the end): by latency / tau / direction / entry-price;
+# OKX/BIN trigger OVERLAP + union ("both"); risk (edge dispersion, max drawdown, max losing streak); capital
+# efficiency (ROI). Hourly so you see the comprehensive picture early and it refines. Read-only, zero money.
 import json, ssl, time, threading, calendar, urllib.request, websocket, bisect, statistics
 
 THRESH = 0.0003
 LATS = [0, 25, 50, 100, 200, 400]
-HL = 0          # headline latency for the slice tables (latency is ~flat, so L=0 is representative)
+HL = 0          # headline latency for slice tables (latency is ~flat, so L=0 is representative)
 HOLDBACK = 20
-RUN_MS = 21600000.0  # 6 hr — span multiple vol regimes to characterize edge STABILITY
+RUN_MS = 21600000.0  # 6 hr — span vol regimes
 
 def hg(u):
     return urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"}), timeout=10).read().decode()
@@ -49,7 +49,7 @@ start = now_ms()
 bhist = []; ohist = []
 blk = threading.Lock(); olk = threading.Lock()
 entries = []                       # granular: dict(src, t, tau, up, won, fills{LAT:price})
-all_trig = {"okx": [], "bin": []}  # trigger times for overlap
+all_trig = {"okx": [], "bin": []}
 res_lock = threading.Lock()
 
 def feed(url, sub, parse, hist, lk):
@@ -118,7 +118,7 @@ def pm():
         if not opn:
             time.sleep(2); continue
         ah = {up_tok: [], dn_tok: []}
-        triggers = []  # (t, fav, src, up, tau)
+        triggers = []
         lt = {"okx": 0, "bin": 0}
         try:
             ws = websocket.create_connection("wss://ws-subscriptions-clob.polymarket.com/ws/market", sslopt={"cert_reqs": ssl.CERT_NONE})
@@ -181,18 +181,74 @@ def pm():
                     entries.append({"src": src, "t": trig_t, "tau": tau, "up": up, "won": won, "fills": fills})
                     all_trig[src].append(trig_t)
 
+def pct(x, n):
+    return 100 * x // max(n, 1)
+def edge_of(e, L=HL):
+    return e["won"] - e["fills"].get(L, e["fills"][HL])
+
+def analyze(tag):
+    with res_lock:
+        es_all = list(entries); ot = sorted(all_trig["okx"]); bt = sorted(all_trig["bin"])
+    print("\n" + "=" * 66)
+    print("COMPREHENSIVE OKX-vs-Binance  @ %s   (total entries=%d)" % (tag, len(es_all)))
+    print("=" * 66)
+    for src in ("okx", "bin"):
+        es = [e for e in es_all if e["src"] == src]
+        print("\n######## %s ########" % src.upper())
+        if not es:
+            print("  (no entries yet)"); continue
+        n = len(es); wins = sum(e["won"] for e in es)
+        eg = [edge_of(e) for e in es]; tot = sum(eg); dep = sum(e["fills"][HL] for e in es)
+        print("  OVERALL n=%d  win=%d%%  edge/order=%+.4f  total=$%.2f  deployed=$%.2f  ROI=%+.1f%%" % (
+            n, pct(wins, n), tot / n, tot, dep, 100 * tot / max(dep, 1)))
+        print("  LATENCY:  " + "  ".join("L%d:%d%%/%+.3f" % (
+            Lv, pct(sum(e["won"] for e in es if Lv in e["fills"]), max(sum(1 for e in es if Lv in e["fills"]), 1)),
+            (sum(edge_of(e, Lv) for e in es if Lv in e["fills"]) / max(sum(1 for e in es if Lv in e["fills"]), 1)))
+            for Lv in LATS))
+        print("  TAU:      " + "  ".join("%s:n%d/%d%%/%+.3f" % (
+            lab, len([e for e in es if lo <= e["tau"] < hi]),
+            pct(sum(e["won"] for e in es if lo <= e["tau"] < hi), max(len([e for e in es if lo <= e["tau"] < hi]), 1)),
+            (sum(edge_of(e) for e in es if lo <= e["tau"] < hi) / max(len([e for e in es if lo <= e["tau"] < hi]), 1)))
+            for lo, hi, lab in [(0, 90, "<90s"), (90, 180, "90-180"), (180, 320, ">180s")]))
+        print("  DIR:      " + "  ".join("%s:n%d/%d%%/%+.3f" % (
+            lab, len([e for e in es if e["up"] == u]),
+            pct(sum(e["won"] for e in es if e["up"] == u), max(len([e for e in es if e["up"] == u]), 1)),
+            (sum(edge_of(e) for e in es if e["up"] == u) / max(len([e for e in es if e["up"] == u]), 1)))
+            for u, lab in [(True, "Up"), (False, "Dn")]))
+        print("  ASK:      " + "  ".join("%.2f-%.2f:n%d/%d%%/%+.3f" % (
+            lo, hi, len([e for e in es if lo <= e["fills"][HL] < hi]),
+            pct(sum(e["won"] for e in es if lo <= e["fills"][HL] < hi), max(len([e for e in es if lo <= e["fills"][HL] < hi]), 1)),
+            (sum(edge_of(e) for e in es if lo <= e["fills"][HL] < hi) / max(len([e for e in es if lo <= e["fills"][HL] < hi]), 1)))
+            for lo, hi in [(0.03, 0.35), (0.35, 0.55), (0.55, 0.75), (0.75, 0.97)]))
+        cum = 0.0; peak = 0.0; dd = 0.0; st = 0; mxst = 0
+        for x in eg:
+            cum += x; peak = max(peak, cum); dd = min(dd, cum - peak)
+            st = st + 1 if x < 0 else 0; mxst = max(mxst, st)
+        print("  RISK: edge_std=%.3f worst=%.3f maxDrawdown=$%.2f maxLosingStreak=%d" % (
+            statistics.pstdev(eg) if n > 1 else 0.0, min(eg), dd, mxst))
+
+    def near(times, t, w=2500):
+        i = bisect.bisect_left(times, t - w)
+        return i < len(times) and times[i] <= t + w
+    okx_only = sum(1 for t in ot if not near(bt, t))
+    bin_only = sum(1 for t in bt if not near(ot, t))
+    both = len(ot) - okx_only
+    print("\n######## OVERLAP / UNION ########")
+    print("  OKX=%d BIN=%d | OKX-only=%d BIN-only=%d overlap=%d UNION(both)=%d" % (
+        len(ot), len(bt), okx_only, bin_only, both, okx_only + bin_only + both))
+    print("  -> 'both' would add %d Binance-only orders over OKX (+%d%%)" % (bin_only, pct(bin_only, len(ot))))
+
+    oe = [e for e in es_all if e["src"] == "okx"]; be = [e for e in es_all if e["src"] == "bin"]
+    if oe and be:
+        o = sum(edge_of(e) for e in oe); b = sum(edge_of(e) for e in be)
+        print("\n######## VERDICT ########")
+        print("  higher TOTAL: %s | higher per-order: %s | more orders: %s" % (
+            "OKX" if o > b else "BIN", "OKX" if o / len(oe) > b / len(be) else "BIN", "OKX" if len(oe) > len(be) else "BIN"))
+
 def snapshot():
     while now_ms() - start < RUN_MS:
         time.sleep(3600)
-        with res_lock:
-            mins = int((now_ms() - start) / 60000)
-            line = "[snap %dmin] " % mins
-            for src in ("okx", "bin"):
-                es = [e for e in entries if e["src"] == src]
-                if es:
-                    w = sum(e["won"] for e in es); tot = sum(e["won"] - e["fills"][HL] for e in es)
-                    line += "%s: n=%d win=%d%% edge=%+.3f $%.2f | " % (src, len(es), 100 * w // len(es), tot / len(es), tot)
-            print(line)
+        analyze("%dmin" % int((now_ms() - start) / 60000))
 
 ts = [threading.Thread(target=feed, args=("wss://stream.binance.com:9443/ws/btcusdt@bookTicker", None, p_bin, bhist, blk)),
       threading.Thread(target=feed, args=("wss://ws.okx.com:8443/ws/v5/public",
@@ -202,75 +258,4 @@ ts = [threading.Thread(target=feed, args=("wss://stream.binance.com:9443/ws/btcu
 for t in ts:
     t.start()
 ts[0].join(); ts[1].join(); ts[3].join()
-
-# ================= COMPREHENSIVE ANALYSIS =================
-def pct(x, n):
-    return 100 * x // max(n, 1)
-def edge_of(e, L=HL):
-    return e["won"] - e["fills"].get(L, e["fills"][HL])
-
-print("\n" + "=" * 64)
-print("COMPREHENSIVE OKX-vs-Binance ANALYSIS  (entries=%d, %.1fh)" % (len(entries), RUN_MS / 3600000))
-print("=" * 64)
-for src in ("okx", "bin"):
-    es = [e for e in entries if e["src"] == src]
-    print("\n############ %s ############" % src.upper())
-    if not es:
-        print("  (no entries)"); continue
-    n = len(es); wins = sum(e["won"] for e in es)
-    eg = [edge_of(e) for e in es]; tot = sum(eg); dep = sum(e["fills"][HL] for e in es)
-    print("  OVERALL: n=%d  win=%d%%  edge/entry=%+.4f  total=$%.2f  deployed=$%.2f  ROI=%+.1f%%" % (
-        n, pct(wins, n), tot / n, tot, dep, 100 * tot / max(dep, 1)))
-    print("  by LATENCY:")
-    for Lv in LATS:
-        ev = [edge_of(e, Lv) for e in es if Lv in e["fills"]]
-        wv = [e["won"] for e in es if Lv in e["fills"]]
-        if ev:
-            print("    L=%3dms  n=%d  win=%d%%  edge=%+.4f  total=$%.2f" % (
-                Lv, len(ev), pct(sum(wv), len(wv)), sum(ev) / len(ev), sum(ev)))
-    print("  by TAU (time-to-resolution at entry):")
-    for lo, hi, lab in [(0, 90, "<90s"), (90, 180, "90-180s"), (180, 320, ">180s")]:
-        b = [e for e in es if lo <= e["tau"] < hi]
-        if b:
-            print("    %-9s n=%d  win=%d%%  edge=%+.4f" % (lab, len(b), pct(sum(e["won"] for e in b), len(b)), sum(edge_of(e) for e in b) / len(b)))
-    print("  by DIRECTION:")
-    for u, lab in [(True, "Up  "), (False, "Down")]:
-        b = [e for e in es if e["up"] == u]
-        if b:
-            print("    %s  n=%d  win=%d%%  edge=%+.4f" % (lab, len(b), pct(sum(e["won"] for e in b), len(b)), sum(edge_of(e) for e in b) / len(b)))
-    print("  by ENTRY-ASK:")
-    for lo, hi in [(0.03, 0.35), (0.35, 0.55), (0.55, 0.75), (0.75, 0.97)]:
-        b = [e for e in es if lo <= e["fills"][HL] < hi]
-        if b:
-            print("    %.2f-%.2f  n=%d  win=%d%%  edge=%+.4f" % (lo, hi, len(b), pct(sum(e["won"] for e in b), len(b)), sum(edge_of(e) for e in b) / len(b)))
-    # risk: dispersion, drawdown, losing streak
-    cum = 0.0; peak = 0.0; dd = 0.0; st = 0; mxst = 0
-    for x in eg:
-        cum += x; peak = max(peak, cum); dd = min(dd, cum - peak)
-        st = st + 1 if x < 0 else 0; mxst = max(mxst, st)
-    print("  RISK: edge_std=%.3f  worst_entry=%.3f  maxDrawdown=$%.2f  maxLosingStreak=%d" % (
-        statistics.pstdev(eg) if n > 1 else 0.0, min(eg), dd, mxst))
-
-# overlap / union
-print("\n############ OVERLAP & UNION ('both' signal) ############")
-ot = sorted(all_trig["okx"]); bt = sorted(all_trig["bin"])
-def near(times, t, w=2500):
-    i = bisect.bisect_left(times, t - w)
-    return i < len(times) and times[i] <= t + w
-okx_only = sum(1 for t in ot if not near(bt, t))
-bin_only = sum(1 for t in bt if not near(ot, t))
-both = len(ot) - okx_only
-union = okx_only + bin_only + both
-print("  OKX fires=%d  BIN fires=%d  | OKX-only=%d  BIN-only=%d  overlap=%d  UNION=%d" % (
-    len(ot), len(bt), okx_only, bin_only, both, union))
-print("  -> 'both' captures ~%d orders = OKX %d + %d Binance-only (gain over OKX = %d, %d%%)" % (
-    union, len(ot), bin_only, bin_only, pct(bin_only, len(ot))))
-
-print("\n############ VERDICT ############")
-oe = [e for e in entries if e["src"] == "okx"]; be = [e for e in entries if e["src"] == "bin"]
-if oe and be:
-    ot_ = sum(edge_of(e) for e in oe); bt_ = sum(edge_of(e) for e in be)
-    print("  OKX: %d orders, $%.2f total, %+.4f/order, %d%% win" % (len(oe), ot_, ot_ / len(oe), pct(sum(e["won"] for e in oe), len(oe))))
-    print("  BIN: %d orders, $%.2f total, %+.4f/order, %d%% win" % (len(be), bt_, bt_ / len(be), pct(sum(e["won"] for e in be), len(be))))
-    print("  Higher TOTAL: %s | Higher per-order: %s | More orders: %s" % (
-        "OKX" if ot_ > bt_ else "BIN", "OKX" if (ot_ / len(oe)) > (bt_ / len(be)) else "BIN", "OKX" if len(oe) > len(be) else "BIN"))
+analyze("FINAL %.1fh" % (RUN_MS / 3600000))
