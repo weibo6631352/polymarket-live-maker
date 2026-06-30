@@ -14,7 +14,8 @@ THRESH = 0.0003
 LAT = 50
 HOLD_MS = 3000
 COOLDOWN_MS = 2000
-CHEAP_MAX = 0.55
+CHEAP_MAX = float(__import__("os").environ.get("PMAX", "0.55"))   # price-band upper (quant: skip near-0.5 = max fee/min gap)
+PMIN = float(__import__("os").environ.get("PMIN", "0.03"))        # price-band lower
 SETTLES = [0, 1500, 3500, 5000]   # 0 = the optimistic backtest; 3500 = the observed live settlement floor
 def fee(p):
     return 0.07 * p * (1 - p)
@@ -70,7 +71,7 @@ def replay(settle, resolve_aware, split=False):
                 if abs(mv) > THRESH and armed and t - last_exit > COOLDOWN_MS:
                     up = mv > 0; side = "up" if up else "dn"
                     _, ask = quote(side, t + LAT)
-                    if 0.03 < ask < CHEAP_MAX:
+                    if PMIN < ask < CHEAP_MAX:  # PRICE-BAND: skip near-0.5 (max fee, min gap) — quant iteration #1
                         armed = False
                         pos = {"side": side, "ask": ask, "t": t, "sell": t + max(HOLD_MS, settle), "mv": mv}
             else:
