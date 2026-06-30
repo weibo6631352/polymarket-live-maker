@@ -346,12 +346,14 @@ int main() {
             const bool force = (t - pos.entry_t >= MAX_HOLD_MS) || tau < 12;  // HARD — ignores book freshness
             if (stop || (timeup && fresh) || force) {
                 const double exit_px = fresh ? bid : std::max(pos.entry_ask - 0.05, 0.01);  // floor if no fresh bid
-                std::string st = "DRY"; bool sold = true;
+                std::string st = "DRY", resp; int http = 0;
+                bool sold = true;
                 if (LIVE) {
-                    const double sell_px = std::max(exit_px - 0.01, 0.01);  // undercut so the SELL takes
+                    const double sell_px = std::max(exit_px - 0.03, 0.01);  // cross 3 ticks below bid -> DEFINITELY takes (rule out a price miss)
                     const auto r = sub({{"action", "PLACE"}, {"token_id", pos.tok}, {"side", "SELL"},
                                         {"price", sell_px}, {"size", pos.shares}});
                     st = r.value("status", std::string());
+                    resp = r.value("resp", std::string()); http = r.value("http", 0);  // raw CLOB error -> price vs no-shares
                     sold = (st != "REJECTED" && st != "ERROR");  // CRIT-2: on reject KEEP the position + retry next loop
                 }
                 if (sold) {
@@ -363,8 +365,8 @@ int main() {
                                 t - pos.entry_t, stop ? "STOP" : (force ? (tau < 12 ? "win-end" : "max-hold") : "hold"), pnl, tail.c_str());
                     pos = Position{}; last_exit = t; armed = false;  // cooldown + require the move to subside (anti-churn)
                 } else {
-                    std::printf("[SELL-RETRY-LIVE] %s status=%s — STILL HOLDING, will retry (never strand to resolution)\n",
-                                pos.up ? "Up" : "Down", st.c_str());
+                    std::printf("[SELL-RETRY-LIVE] %s status=%s http=%d resp=%s\n",
+                                pos.up ? "Up" : "Down", st.c_str(), http, resp.substr(0, 140).c_str());
                 }
             }
         }
