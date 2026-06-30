@@ -269,9 +269,10 @@ int main() {
 
     const std::string SRC = std::getenv("SNIPE_SRC") ? std::getenv("SNIPE_SRC") : "okx";  // okx | bin | both
     std::printf("signal=%s\n", SRC.c_str());
+    const bool CONFIRM = !(std::getenv("SNIPE_CONFIRM") && std::string(std::getenv("SNIPE_CONFIRM")) == "0");
     std::thread to(okx_feed), tb(pm_book), td(discover_thread);
     std::thread tbin;
-    if (SRC != "okx") tbin = std::thread(binance_feed);
+    if (SRC != "okx" || CONFIRM) tbin = std::thread(binance_feed);  // Binance also runs as a sign-confirm feed
 
     int trades = 0;
     double deployed = 0.0;  // cumulative $ deployed — the hard risk cap
@@ -309,12 +310,16 @@ int main() {
             if (std::fabs(mv) > THRESH && armed && deployed < MAX_USD && t - last_exit > COOLDOWN_MS) {
                 const bool up = mv > 0;
                 const std::string fav = up ? w.up_tok : w.dn_tok;
+                // Binance sign-confirm: if Binance has a FRESH read it must agree with OKX's direction (kills an
+                // OKX single-print glitch firing a REAL order). Stale Binance (bm==0) does not block.
+                const double bm = (CONFIRM && SRC == "okx") ? btc_move() : 0.0;
+                const bool confirmed = (std::fabs(bm) < 1e-9) || (up == (bm > 0));
                 double ask; long ask_t;
                 { std::lock_guard<std::mutex> lk(book_mx); ask = up ? g_up_ask : g_dn_ask; ask_t = g_ask_t; }
                 const double tau = w.end_unix - static_cast<double>(std::time(nullptr));
                 const double notional = SHARES * ask;
-                // gates: CHEAP favored side (max lag = the edge), time left, >= $1 notional (I1), ask fresh (I2)
-                if (ask > 0.03 && ask < CHEAP_MAX && tau > 30 && notional >= 1.05 && t - ask_t < 2000) {
+                // gates: confirmed dir, CHEAP favored side (max lag = the edge), time left, >= $1 notional (I1), ask fresh (I2)
+                if (confirmed && ask > 0.03 && ask < CHEAP_MAX && tau > 30 && notional >= 1.05 && t - ask_t < 2000) {
                     armed = false;                                    // edge-trigger: one fire per move-event
                     const double buy_px = std::min(ask + 0.03, 0.97); // marketable: cross the ask so it TAKES (C1)
                     ++trades; deployed += notional;                   // count + cumulative-risk cap BEFORE placing (S1)
