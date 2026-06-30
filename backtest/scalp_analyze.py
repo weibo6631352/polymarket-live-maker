@@ -8,6 +8,7 @@ CSV = sys.argv[1] if len(sys.argv) > 1 else "/tmp/raw_ticks.csv"
 THRESH = 0.0003          # BTC move trigger (0.03%/3s)
 LAT = 50                 # our latency ms before we fill
 HOLDS = [200, 400, 800, 1500, 3000]   # ms to hold before exiting (sell the bid)
+ALATS = [0, 17, 50, 100, 200, 400]    # latencies to probe the favored-side ASK after the trigger (competition proxy)
 
 okx = []; pm = {"up": [], "dn": []}; wins = []   # pm rows keep (t, bid, ask)
 for line in open(CSV):
@@ -58,7 +59,11 @@ for wi, w in enumerate(wins):
             continue
         ntrig += 1
         drift = (mid_at(t) or 0) - w["open"]
-        rec = {"wt": (drift > 0) == (mv > 0), "ask": entry_ask}
+        rec = {"wt": (drift > 0) == (mv > 0), "ask": entry_ask, "traj": {}}
+        for al in ALATS:
+            _, a2 = bidask(side, t + al)
+            if a2 and a2 > 0:
+                rec["traj"][al] = a2
         for h in HOLDS:
             exit_bid, _ = bidask(side, t + LAT + h)     # we exit by selling the bid
             if exit_bid and exit_bid > 0:
@@ -91,3 +96,11 @@ show("counter-trend", [r for r in trigs if not r["wt"]])
 show("ask<0.55 (cheap)", [r for r in trigs if r["ask"] < 0.55])
 show("ask>=0.55 (expensive)", [r for r in trigs if r["ask"] >= 0.55])
 show("with-trend & ask>=0.55", [r for r in trigs if r["wt"] and r["ask"] >= 0.55])
+
+print("\n=== ASK PERSISTENCE after the move (cheap triggers) — does the cheap ask survive our latency? ===")
+cheap = [r for r in trigs if r["ask"] < 0.55 and r["traj"]]
+for al in ALATS:
+    vals = [r["traj"][al] for r in cheap if al in r["traj"]]
+    if vals:
+        print("  fav ask @ +%3dms : avg=%.4f  n=%d" % (al, sum(vals) / len(vals), len(vals)))
+print("  -> flat across 0-200ms = cheap ask persists (we have time); rises fast = faster snipers take it (competition)")
