@@ -137,7 +137,9 @@ def pm():
                     if pn > 0 and pa and now_ms() - lt[src] > 2000:
                         mv = pn / pa - 1
                         if abs(mv) > THRESH:
-                            triggers.append((now_ms(), up_tok if mv > 0 else dn_tok, src, mv > 0, end - time.time()))
+                            drift = latest(bhist, blk) - opn          # window drift since open (Binance)
+                            wt = (drift > 0) == (mv > 0)              # with-trend if the move agrees with the drift
+                            triggers.append((now_ms(), up_tok if mv > 0 else dn_tok, src, mv > 0, end - time.time(), wt))
                             lt[src] = now_ms()
                 try:
                     m = ws.recv()
@@ -169,7 +171,7 @@ def pm():
         if end_btc <= 0:
             continue
         up_won = end_btc > opn
-        for trig_t, fav, src, up, tau in triggers:
+        for trig_t, fav, src, up, tau, wt in triggers:
             won = 1 if ((fav == up_tok and up_won) or (fav == dn_tok and not up_won)) else 0
             fills = {}
             for Lv in LATS:
@@ -178,7 +180,7 @@ def pm():
                     fills[Lv] = fill
             if HL in fills:
                 with res_lock:
-                    entries.append({"src": src, "t": trig_t, "tau": tau, "up": up, "won": won, "fills": fills})
+                    entries.append({"src": src, "t": trig_t, "tau": tau, "up": up, "won": won, "fills": fills, "wt": wt})
                     all_trig[src].append(trig_t)
 
 def pct(x, n):
@@ -215,6 +217,18 @@ def analyze(tag):
             pct(sum(e["won"] for e in es if e["up"] == u), max(len([e for e in es if e["up"] == u]), 1)),
             (sum(edge_of(e) for e in es if e["up"] == u) / max(len([e for e in es if e["up"] == u]), 1)))
             for u, lab in [(True, "Up"), (False, "Dn")]))
+        print("  TREND:    " + "  ".join("%s:n%d/%d%%/%+.3f" % (
+            lab, len([e for e in es if e.get("wt") == w]),
+            pct(sum(e["won"] for e in es if e.get("wt") == w), max(len([e for e in es if e.get("wt") == w]), 1)),
+            (sum(edge_of(e) for e in es if e.get("wt") == w) / max(len([e for e in es if e.get("wt") == w]), 1)))
+            for w, lab in [(True, "with-trend"), (False, "counter")]))
+        cheap = [e for e in es if e["fills"][HL] < 0.55]
+        print("  CHEAP(ask<0.55) x TREND:  " + "  ".join("%s:n%d/%d%%/%+.3f" % (
+            lab, len([e for e in cheap if e.get("wt") == w]),
+            pct(sum(e["won"] for e in cheap if e.get("wt") == w), max(len([e for e in cheap if e.get("wt") == w]), 1)),
+            (sum(edge_of(e) for e in cheap if e.get("wt") == w) / max(len([e for e in cheap if e.get("wt") == w]), 1)))
+            for w, lab in [(True, "with"), (False, "counter")]) +
+            "   <-- if cheap wins are mostly 'counter', it's the bounce TRAP (drop ask<0.55)")
         print("  ASK:      " + "  ".join("%.2f-%.2f:n%d/%d%%/%+.3f" % (
             lo, hi, len([e for e in es if lo <= e["fills"][HL] < hi]),
             pct(sum(e["won"] for e in es if lo <= e["fills"][HL] < hi), max(len([e for e in es if lo <= e["fills"][HL] < hi]), 1)),
