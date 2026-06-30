@@ -11,7 +11,8 @@ import json, ssl, time, threading, websocket, calendar, urllib.request
 OUT = "/tmp/raw_ticks.csv"
 RUN = float(__import__("os").environ.get("REC_SECS", "3600"))  # default 1hr
 start = time.time()
-f = open(OUT, "w", buffering=1 << 20)
+# APPEND so a restart keeps accumulating into one growing CSV (we need 100+ windows for calibration)
+f = open(OUT, "a", buffering=1 << 20)
 flock = threading.Lock()
 rows = [0]
 def w(row):
