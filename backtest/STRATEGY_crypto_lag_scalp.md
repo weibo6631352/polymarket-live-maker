@@ -156,3 +156,43 @@ Recorder + offline analysis (all in `backtest/`, run on the box against `/tmp/ra
 - `fair_value.py` — fair value + σ-horizon calibration (Brier + reliability) on real PM-resolved outcomes.
 - `temporal_v2.py` — same-unit (BTC-implied P vs PM P) lag measurement (~200 ms).
 - `analyze_raw.py` — hold-to-resolution control (NEGATIVE — confirms scalp, not bet).
+- `replay_cpp.py` — **the faithful 1:1 replay of the live C++ execution** (one-pos-at-a-time, edge-trigger+cooldown,
+  cheap entry, settlement-delayed exit ~3500ms, RESOLUTION-aware, net of taker fee, depth HAIRCUT, adverse-selection
+  split). This is THE tool — use it for any honest net-EV check. Run on `/tmp/overnight.csv`.
+
+## 7. FINAL VERDICT (2026-07-01) — real but marginal/fragile → PARK IT
+
+After: a real LIVE test (~13 trades, lost ~$5-7), a CRITICAL bug found+fixed, an overnight data collection
+(81 windows / 135 trades), a strictly-execution-aligned replay, two independent quant/financial-math expert
+reviews, and every iteration tried — the honest, data-backed verdict:
+
+**The edge is REAL and statistically significant, but too thin / fragile / capacity-capped to be worth real money.**
+
+Evidence (replay_cpp on 81 overnight windows, real-money-aligned, net of fees):
+- Overall @SETTLE=3500: **+2.8c/share net, t=3.51 (significant), 54% win, maxDD ~$1.8/5sh.** Stable across the
+  growing sample (9→45→81 windows): +3.4→+2.8→+2.8c, t 1.45→3.29→3.51.
+- 🔴 **Decisive adverse-selection split**: the edge is driven ENTIRELY by the CONTINUED bucket (BTC keeps moving
+  during the forced ~3.5s hold: +6.0c/72% win); the **REVERTED bucket LOSES (-1.6c/30% win)**. So it is PARTLY a
+  "BTC-will-continue" bet — un-filterable at a momentum trigger. +EV only because ~59% of triggers continue; a
+  high-reversion regime flips it negative.
+- 🔴 **Depth**: the recorder has only best bid/ask; the cheap book is thin, 5 shares walks the exit down. At a
+  realistic 2-3 tick haircut the edge shrinks to +1-2c and the reverted bucket goes MORE negative.
+- **Tail**: cheap = the lagging/losing side; if the ~3.5s settlement-lag stops you selling near the window end the
+  position RESOLVES to 0 (one wipeout ≈ 10 good trades). nResolved>0 in the data — it happens.
+
+Live-vs-backtest gap, explained: the live loss was MOSTLY (a) a now-FIXED bug — the marketable BUY partial-fills
+(<5 shares), the bot sold the intended 5 → infinite "balance not enough" retry → window resolved → token dead →
+position stranded to 0 (the user spotted "stuck/not trading"); plus (b) concentrated 2-window variance; plus (c) a
+stop-loss that cut trades the no-stop replay keeps. NOT proof the edge is dead. Bug fix: place() returns actual
+filled shares; sell exactly that; give up the retry on "invalid token id".
+
+Iterations tried — none rescue it: PRICE-BAND (0.15-0.40) made it WORSE (-, t 3.3→1.6); MAKER-exit is dead
+(unsettled shares reject any sell, maker or taker — verified "balance:0"); σ/fat-tail gating not worth the
+fragile calibration. Frictions confirmed real: fee 0.07·p·(1-p)/share/leg; settlement ~3.5s; depth walk-down.
+
+Both experts independently concluded "PARK IT": net ~+1-2.8c/share = ~$0.10-0.25/trade, hard-capped at 5 shares
+(can't scale — walks the thin book), ~$10-25/day gross BEFORE the resolution tail, plus constant attention. The
+risk-adjusted return is poor. Only revisit if a maker-exit both (a) fills reliably AND (b) survives the settlement
+reject — which the data says it won't. **CONCLUSION: a genuine but un-economic edge. No real money. Locked off.**
+The full evidence chain (recorder → faithful replay → adverse-selection split → expert panel → iterations) is the
+reusable method; the answer for THIS strategy is park it.
