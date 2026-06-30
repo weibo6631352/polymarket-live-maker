@@ -256,6 +256,8 @@ int main() {
     const double CHEAP_MAX = env_d("SNIPE_CHEAP_MAX", 0.55);  // only enter the CHEAP favored side (max lag = max edge)
     const long HOLD_MS = static_cast<long>(env_d("SNIPE_HOLD_MS", 1500));  // scalp hold before selling the bid
     const double STOP = env_d("SNIPE_STOP", 0.03);  // stop-loss: bid <= entry_ask - STOP -> bail (fat-tail reversal)
+    const long MAX_HOLD_MS = static_cast<long>(env_d("SNIPE_MAX_HOLD_MS", 8000));  // HARD force-exit even on a stale book
+    const long COOLDOWN_MS = static_cast<long>(env_d("SNIPE_COOLDOWN_MS", 2000));  // min gap after an exit before re-entry
     const bool LIVE = (std::getenv("PM_TRADER_LIVE") && std::string(std::getenv("PM_TRADER_LIVE")) == "1") &&
                       (std::getenv("LM_SNIPE_ARM") && std::string(std::getenv("LM_SNIPE_ARM")) == "1");
     pmm::app::LoadDotEnv(".env", LIVE);
@@ -276,15 +278,17 @@ int main() {
     double pnl = 0.0;       // cumulative realized scalp P&L (DRY: simulated from bid-ask)
     bool armed = true;      // edge-trigger: fire once per move, re-arm when it subsides
     long last_hb = 0;
+    long last_exit = 0;     // last scalp-exit time — enforces a re-entry cooldown (anti-churn)
     Window w;
     Position pos;           // one open scalp at a time (enter flat, exit by selling the bid)
     while (g_run.load() && (pos.open || (trades < MAX_TRADES && deployed < MAX_USD))) {
-        if (!w.valid || static_cast<double>(std::time(nullptr)) > w.end_unix - 25) {
+        // NEVER swap the window while holding — that would strand the position on the wrong token's book
+        if (!pos.open && (!w.valid || static_cast<double>(std::time(nullptr)) > w.end_unix - 25)) {
             Window cand;
             { std::lock_guard<std::mutex> lk(next_mx); cand = g_next; }  // non-blocking — discovery runs off-thread (R1)
             if (cand.valid && cand.up_tok != w.up_tok) {
                 w = cand;
-                { std::lock_guard<std::mutex> lk(book_mx); g_up_tok = w.up_tok; g_dn_tok = w.dn_tok; g_up_ask = 0; g_dn_ask = 0; }
+                { std::lock_guard<std::mutex> lk(book_mx); g_up_tok = w.up_tok; g_dn_tok = w.dn_tok; g_up_ask = 0; g_dn_ask = 0; g_up_bid = 0; g_dn_bid = 0; }
                 g_epoch.fetch_add(1);
                 armed = true;  // fresh window = fresh opportunity
                 std::printf("[WINDOW] up=%s.. end_in=%.0fs\n", w.up_tok.substr(0, 12).c_str(),
@@ -302,7 +306,7 @@ int main() {
             if (SRC == "bin") mv = btc_move();
             else if (SRC == "both" && std::fabs(mv) <= THRESH) mv = btc_move();
             if (std::fabs(mv) < THRESH * 0.5) armed = true;  // re-arm once the move subsides (hysteresis)
-            if (std::fabs(mv) > THRESH && armed && deployed < MAX_USD) {
+            if (std::fabs(mv) > THRESH && armed && deployed < MAX_USD && t - last_exit > COOLDOWN_MS) {
                 const bool up = mv > 0;
                 const std::string fav = up ? w.up_tok : w.dn_tok;
                 double ask; long ask_t;
@@ -321,35 +325,46 @@ int main() {
                         st = r.value("status", std::string());
                         filled = (st != "REJECTED" && st != "ERROR");
                     }
-                    if (filled) pos = {true, up, fav, ask, SHARES, t, t + HOLD_MS};
+                    // entry basis: conservative buy_px in LIVE (real fill <= buy_px, so PnL is never overstated;
+                    // TODO reconcile the actual fill price/size from the order response), displayed ask in DRY (backtest parity)
+                    if (filled) pos = {true, up, fav, LIVE ? buy_px : ask, SHARES, t, t + HOLD_MS};
                     const std::string tail = LIVE ? (" status=" + st) : std::string("  (hold then sell bid)");
                     std::printf("[BUY-%s] mv=%+.3f%% %s ask=%.3f buy=%.3f $%.2f tau=%.0fs%s\n",
                                 LIVE ? "LIVE" : "DRY", mv * 100, up ? "Up" : "Down", ask, buy_px, notional, tau, tail.c_str());
                 }
             }
         } else {
-            // SCALP EXIT: sell the bid on hold-elapsed / stop-loss / window-end. NEVER hold to resolution.
-            double bid; long ask_t;
-            { std::lock_guard<std::mutex> lk(book_mx); bid = pos.up ? g_up_bid : g_dn_bid; ask_t = g_ask_t; }
+            // SCALP EXIT: sell on stop / hold / window-end. A HARD force-exit (max-hold OR window-end) fires even if
+            // the book is stale/empty — a frozen book must NEVER strand us into the falsified resolution bet (CRIT-1).
+            double bid; long bid_t;
+            { std::lock_guard<std::mutex> lk(book_mx); bid = pos.up ? g_up_bid : g_dn_bid; bid_t = g_ask_t; }
             const double tau = w.end_unix - static_cast<double>(std::time(nullptr));
-            const bool stop = (bid > 0 && bid <= pos.entry_ask - STOP);
-            const bool timeup = (t >= pos.sell_t) || tau < 15;
-            if ((timeup || stop) && bid > 0 && t - ask_t < 3000) {
-                const double scalp = bid - pos.entry_ask;  // per share (bought ask, sell bid -> spread already in)
-                std::string st = "DRY";
+            const bool fresh = (bid > 0 && t - bid_t < 3000);
+            const bool stop = fresh && bid <= pos.entry_ask - STOP;
+            const bool timeup = (t >= pos.sell_t);
+            const bool force = (t - pos.entry_t >= MAX_HOLD_MS) || tau < 12;  // HARD — ignores book freshness
+            if (stop || (timeup && fresh) || force) {
+                const double exit_px = fresh ? bid : std::max(pos.entry_ask - 0.05, 0.01);  // floor if no fresh bid
+                std::string st = "DRY"; bool sold = true;
                 if (LIVE) {
-                    const double sell_px = std::max(bid - 0.01, 0.01);  // taker: hit the bid to exit now
+                    const double sell_px = std::max(exit_px - 0.01, 0.01);  // undercut so the SELL takes
                     const auto r = sub({{"action", "PLACE"}, {"token_id", pos.tok}, {"side", "SELL"},
                                         {"price", sell_px}, {"size", pos.shares}});
                     st = r.value("status", std::string());
+                    sold = (st != "REJECTED" && st != "ERROR");  // CRIT-2: on reject KEEP the position + retry next loop
                 }
-                pnl += scalp * pos.shares;
-                const std::string tail = LIVE ? (" status=" + st) : std::string();
-                std::printf("[SELL-%s] %s entry=%.3f bid=%.3f scalp=%+.4f/sh ($%+.3f) held=%ldms reason=%s cumPnL=$%+.3f%s\n",
-                            LIVE ? "LIVE" : "DRY", pos.up ? "Up" : "Down", pos.entry_ask, bid, scalp, scalp * pos.shares,
-                            t - pos.entry_t, stop ? "STOP" : (tau < 15 ? "win-end" : "hold"), pnl, tail.c_str());
-                pos = Position{};  // flat
-                armed = true;
+                if (sold) {
+                    const double scalp = exit_px - pos.entry_ask;
+                    pnl += scalp * pos.shares;
+                    const std::string tail = LIVE ? (" status=" + st) : std::string();
+                    std::printf("[SELL-%s] %s entry=%.3f exit=%.3f scalp=%+.4f/sh ($%+.3f) held=%ldms reason=%s cumPnL=$%+.3f%s\n",
+                                LIVE ? "LIVE" : "DRY", pos.up ? "Up" : "Down", pos.entry_ask, exit_px, scalp, scalp * pos.shares,
+                                t - pos.entry_t, stop ? "STOP" : (force ? (tau < 12 ? "win-end" : "max-hold") : "hold"), pnl, tail.c_str());
+                    pos = Position{}; last_exit = t; armed = false;  // cooldown + require the move to subside (anti-churn)
+                } else {
+                    std::printf("[SELL-RETRY-LIVE] %s status=%s — STILL HOLDING, will retry (never strand to resolution)\n",
+                                pos.up ? "Up" : "Down", st.c_str());
+                }
             }
         }
         if (t - last_hb > 12000) {
@@ -366,8 +381,16 @@ int main() {
             g_cv.wait_for(lk, std::chrono::milliseconds(50));
         }
     }
-    std::printf("DONE: %d scalps (cap %d) cumPnL=$%+.3f%s\n", trades, MAX_TRADES, pnl,
-                pos.open ? "  [WARN: exited with an OPEN position]" : "");
+    if (pos.open) {  // HIGH-3: never orphan a position into a resolution bet on shutdown (SIGTERM / cap-exit)
+        double bid; { std::lock_guard<std::mutex> lk(book_mx); bid = pos.up ? g_up_bid : g_dn_bid; }
+        const double exit_px = (bid > 0) ? bid : std::max(pos.entry_ask - 0.05, 0.01);
+        if (LIVE) (void)sub({{"action", "PLACE"}, {"token_id", pos.tok}, {"side", "SELL"},
+                             {"price", std::max(exit_px - 0.01, 0.01)}, {"size", pos.shares}});
+        pnl += (exit_px - pos.entry_ask) * pos.shares;
+        std::printf("[FLATTEN-%s] %s exit=%.3f on shutdown\n", LIVE ? "LIVE" : "DRY", pos.up ? "Up" : "Down", exit_px);
+        pos = Position{};
+    }
+    std::printf("DONE: %d scalps (cap %d) cumPnL=$%+.3f\n", trades, MAX_TRADES, pnl);
     g_run.store(false);
     to.join();
     tb.join();
