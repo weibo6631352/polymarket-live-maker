@@ -47,10 +47,17 @@ def quote(side, t):  # (bid, ask) at/before t
     rows = pm[side]; i = bisect.bisect_right(pmt[side], t) - 1
     return (rows[i][1], rows[i][2]) if i >= 0 else (0.0, 0.0)
 
-def replay(settle):
-    trades = []
+def mid_side(side, t):
+    b, a = quote(side, t)
+    return (b + a) / 2 if a else b
+def outcome_up(w):  # True if Up resolved to ~1 (read the PM price well after the window end)
+    return mid_side("up", w["end"] + 45000) >= mid_side("dn", w["end"] + 45000)
+
+def replay(settle, resolve_aware):
+    trades = []; n_resolved = 0
     for wi, w in enumerate(wins):
         lo = w["t0"]; hi = wins[wi + 1]["t0"] if wi + 1 < len(wins) else w["end"]
+        up_won = outcome_up(w)
         armed = True; last_exit = -1e9; pos = None
         for idx in range(bisect.bisect_left(ot, lo), bisect.bisect_right(ot, w["end"] - 12000)):
             t, m = okx[idx]
@@ -67,27 +74,34 @@ def replay(settle):
             else:
                 if t >= pos["sell"]:
                     bid, _ = quote(pos["side"], t)
-                    if bid > 0:
-                        net = (bid - pos["ask"]) - fee(pos["ask"]) - fee(bid)
-                        trades.append(net)
+                    if bid > 0.02:  # a real liquid bid -> sell (taker, fee both legs)
+                        trades.append((bid - pos["ask"]) - fee(pos["ask"]) - fee(bid))
                         last_exit = t; armed = False; pos = None
-    return trades
+                    elif not resolve_aware:
+                        trades.append((bid - pos["ask"]) - fee(pos["ask"]) - fee(bid))  # old: sell at ~0 bid anyway
+                        last_exit = t; armed = False; pos = None
+                    # resolve_aware + no liquid bid -> keep holding; resolves at window end below
+        if pos is not None:  # couldn't sell before the window ended -> RESOLVES (winner=1, loser=0) — the user's point
+            won = (pos["side"] == "up") == up_won
+            trades.append((1.0 if won else 0.0) - pos["ask"] - fee(pos["ask"]))  # redemption: no exit taker fee
+            n_resolved += 1
+    return trades, n_resolved
 
 print("replay on %d windows (faithful C++ exec: 1-pos-at-a-time, edge-trig, cheap, settle-delayed exit, net fees)\n" % len(wins))
-print("SETTLE_MS  n   net/sh   win%   t    total$   maxDD$   maxLoseStreak   (5 shares)")
+print("SETTLE  resolve-aware  n   net/sh   win%   t      total$   maxDD$   nResolved(->0/1)")
 for s in SETTLES:
-    tr = replay(s)
-    if not tr:
-        print("  %4d   0  (no trades)" % s); continue
-    n = len(tr); mean = sum(tr) / n
-    sd = (sum((x - mean) ** 2 for x in tr) / (n - 1)) ** 0.5 if n > 1 else 0.0
-    se = sd / math.sqrt(n) if n else 0.0
-    cum = peak = maxdd = 0.0; streak = maxstreak = 0
-    for x in tr:
-        cum += x * 5  # $ on 5 shares
-        peak = max(peak, cum); maxdd = max(maxdd, peak - cum)
-        streak = streak + 1 if x < 0 else 0; maxstreak = max(maxstreak, streak)
-    print("  %4d  %3d  %+.4f  %3d%%  %4.2f  %+6.2f   %5.2f       %d" % (
-        s, n, mean, 100 * sum(1 for x in tr if x > 0) // n, mean / se if se else 0, sum(tr) * 5, maxdd, maxstreak))
+    for ra in (False, True):
+        tr, nres = replay(s, ra)
+        if not tr:
+            continue
+        n = len(tr); mean = sum(tr) / n
+        sd = (sum((x - mean) ** 2 for x in tr) / (n - 1)) ** 0.5 if n > 1 else 0.0
+        se = sd / math.sqrt(n) if n else 0.0
+        cum = peak = maxdd = 0.0
+        for x in tr:
+            cum += x * 5; peak = max(peak, cum); maxdd = max(maxdd, peak - cum)
+        print("  %4d     %-4s     %3d  %+.4f  %3d%%  %5.2f  %+7.2f  %6.2f    %d" % (
+            s, "YES" if ra else "no", n, mean, 100 * sum(1 for x in tr if x > 0) // n,
+            mean / se if se else 0, sum(tr) * 5, maxdd, nres))
 print("\n-> SETTLE=0 is the optimistic headline backtest; SETTLE=3500 is the REAL live execution.")
 print("   If +EV collapses from SETTLE=0 to 3500, the settlement delay is the edge-killer (live-confirmed).")
