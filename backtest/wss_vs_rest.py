@@ -98,11 +98,9 @@ def rest_thread():
                 rest_429[0] += 1
         except Exception:
             pass
-        dt = now_ms() - t0
-        if dt < 7:
-            time.sleep((7 - dt) / 1000.0)  # ~140/s cap
+        _ = t0  # no throttle: N parallel workers give ~N*24/s -> ~140/s combined
 
-ts = [threading.Thread(target=wss_thread), threading.Thread(target=rest_thread)]
+ts = [threading.Thread(target=wss_thread)] + [threading.Thread(target=rest_thread) for _ in range(6)]  # 6 parallel REST -> ~140/s
 for t in ts:
     t.start()
 for t in ts:

@@ -306,6 +306,10 @@ target_link_libraries(wss-probe PRIVATE pmm_core)
 add_executable(binance-sniper apps/binance_sniper_main.cpp)
 target_link_libraries(binance-sniper PRIVATE pmm_core)
 
+# ---- okx-sniper: EXTREME-low-latency sniper (OKX signal + PM WSS book + busy-poll); orders double-gated ----
+add_executable(okx-sniper apps/okx_sniper_main.cpp)
+target_link_libraries(okx-sniper PRIVATE pmm_core)
+
 # ---- 人工平仓: flatten (市价平掉未跟踪库存换回 USDC; REAL ORDER) ----
 add_executable(flatten apps/flatten_main.cpp)
 target_link_libraries(flatten PRIVATE pmm_core)
