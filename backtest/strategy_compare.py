@@ -11,7 +11,7 @@ THRESH = 0.0003
 LATS = [0, 25, 50, 100, 200, 400]
 HL = 0          # headline latency for slice tables (latency is ~flat, so L=0 is representative)
 HOLDBACK = 20
-RUN_MS = 1800000.0  # 30 min (user)
+RUN_MS = 7200000.0  # 2 hr — validate the (mid-late tau + cheap ask) edge pattern across multiple periods
 
 def hg(u):
     return urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"}), timeout=10).read().decode()
@@ -247,7 +247,7 @@ def analyze(tag):
 
 def snapshot():
     while now_ms() - start < RUN_MS:
-        time.sleep(900)  # one mid-run peek at ~15min
+        time.sleep(1800)  # comprehensive snapshot every 30min -> see if the edge pattern holds across periods
         analyze("%dmin" % int((now_ms() - start) / 60000))
 
 ts = [threading.Thread(target=feed, args=("wss://stream.binance.com:9443/ws/btcusdt@bookTicker", None, p_bin, bhist, blk)),
