@@ -51,6 +51,7 @@ blk = threading.Lock(); olk = threading.Lock()
 entries = []                       # granular: dict(src, t, tau, up, won, fills{LAT:price})
 all_trig = {"okx": [], "bin": []}
 res_lock = threading.Lock()
+g_win = [0]                        # windows subscribed (diagnostic)
 
 def feed(url, sub, parse, hist, lk):
     while now_ms() - start < RUN_MS:
@@ -123,6 +124,7 @@ def pm():
         try:
             ws = websocket.create_connection("wss://ws-subscriptions-clob.polymarket.com/ws/market", sslopt={"cert_reqs": ssl.CERT_NONE})
             ws.send(json.dumps({"assets_ids": [up_tok, dn_tok], "type": "market"}))
+            g_win[0] += 1
             ws.settimeout(2)
             lastping = now_ms()
             while time.time() < end - HOLDBACK and now_ms() - start < RUN_MS:
@@ -266,7 +268,12 @@ def snapshot():
         with res_lock:
             no = sum(1 for e in entries if e["src"] == "okx")
             nb = sum(1 for e in entries if e["src"] == "bin")
-        print("[hb %.0fmin] entries=%d  okx=%d bin=%d" % ((now_ms() - start) / 60000, no + nb, no, nb), flush=True)
+        with olk:
+            lo = len(ohist)
+        with blk:
+            lb = len(bhist)
+        print("[hb %.0fmin] entries=%d (okx=%d bin=%d) | feeds okx=%d bin=%d windows=%d" % (
+            (now_ms() - start) / 60000, no + nb, no, nb, lo, lb, g_win[0]), flush=True)
         if now_ms() - last_full > 600000:  # full comprehensive analysis every 10min (not just at the end)
             analyze("%.0fmin" % ((now_ms() - start) / 60000))
             last_full = now_ms()
