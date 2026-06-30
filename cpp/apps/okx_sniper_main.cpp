@@ -224,6 +224,17 @@ static Window discover() {
     return w;
 }
 
+// ---- background discovery: keep the hot thread off the blocking popen/curl (review R1) ----
+static std::mutex next_mx;
+static Window g_next;
+static void discover_thread() {
+    while (g_run.load()) {
+        Window nw = discover();
+        if (nw.valid) { std::lock_guard<std::mutex> lk(next_mx); g_next = nw; }
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     const double THRESH = env_d("SNIPE_THRESH", 0.0003);
@@ -242,7 +253,7 @@ int main() {
 
     const std::string SRC = std::getenv("SNIPE_SRC") ? std::getenv("SNIPE_SRC") : "okx";  // okx | bin | both
     std::printf("signal=%s\n", SRC.c_str());
-    std::thread to(okx_feed), tb(pm_book);
+    std::thread to(okx_feed), tb(pm_book), td(discover_thread);
     std::thread tbin;
     if (SRC != "okx") tbin = std::thread(binance_feed);
 
@@ -253,18 +264,20 @@ int main() {
     Window w;
     while (g_run.load() && trades < MAX_TRADES && deployed < MAX_USD) {
         if (!w.valid || static_cast<double>(std::time(nullptr)) > w.end_unix - 25) {
-            Window nw = discover();
-            if (nw.valid) {
-                w = nw;
+            Window cand;
+            { std::lock_guard<std::mutex> lk(next_mx); cand = g_next; }  // non-blocking — discovery runs off-thread (R1)
+            if (cand.valid && cand.up_tok != w.up_tok) {
+                w = cand;
                 { std::lock_guard<std::mutex> lk(book_mx); g_up_tok = w.up_tok; g_dn_tok = w.dn_tok; g_up_ask = 0; g_dn_ask = 0; }
                 g_epoch.fetch_add(1);
                 armed = true;  // fresh window = fresh opportunity
                 std::printf("[WINDOW] up=%s.. end_in=%.0fs\n", w.up_tok.substr(0, 12).c_str(),
                             w.end_unix - static_cast<double>(std::time(nullptr)));
-            } else {
-                std::this_thread::sleep_for(std::chrono::seconds(3));
+            } else if (!w.valid) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 continue;
             }
+            // else: current window near-end but no fresh one yet — keep w (the tau>20 gate blocks late trades)
         }
         // hot signal: freshness-gated seconds-move, EDGE-TRIGGERED (fire once per move, no 2s cooldown)
         const long t = now_ms();
@@ -314,6 +327,7 @@ int main() {
     g_run.store(false);
     to.join();
     tb.join();
+    td.join();
     if (tbin.joinable()) tbin.join();
     return 0;
 }
