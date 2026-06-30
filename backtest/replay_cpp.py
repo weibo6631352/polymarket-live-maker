@@ -53,8 +53,10 @@ def mid_side(side, t):
 def outcome_up(w):  # True if Up resolved to ~1 (read the PM price well after the window end)
     return mid_side("up", w["end"] + 45000) >= mid_side("dn", w["end"] + 45000)
 
-def replay(settle, resolve_aware):
+HAIRCUT = float(__import__("os").environ.get("EXIT_HAIRCUT", "0.01"))  # exit 1 tick below bid = depth walk-down proxy
+def replay(settle, resolve_aware, split=False):
     trades = []; n_resolved = 0
+    cont = []; rev = []  # net-EV split: BTC CONTINUED vs REVERTED over the forced hold (adverse-selection test)
     for wi, w in enumerate(wins):
         lo = w["t0"]; hi = wins[wi + 1]["t0"] if wi + 1 < len(wins) else w["end"]
         up_won = outcome_up(w)
@@ -70,28 +72,35 @@ def replay(settle, resolve_aware):
                     _, ask = quote(side, t + LAT)
                     if 0.03 < ask < CHEAP_MAX:
                         armed = False
-                        pos = {"side": side, "ask": ask, "t": t, "sell": t + max(HOLD_MS, settle)}
+                        pos = {"side": side, "ask": ask, "t": t, "sell": t + max(HOLD_MS, settle), "mv": mv}
             else:
                 if t >= pos["sell"]:
                     bid, _ = quote(pos["side"], t)
-                    if bid > 0.02:  # a real liquid bid -> sell (taker, fee both legs)
-                        trades.append((bid - pos["ask"]) - fee(pos["ask"]) - fee(bid))
+                    if bid > 0.02:  # a real liquid bid -> sell; HAIRCUT models the depth walk-down (thin cheap book)
+                        exitp = max(bid - HAIRCUT, 0.01)
+                        net = (exitp - pos["ask"]) - fee(pos["ask"]) - fee(exitp)
+                        trades.append(net)
+                        # adverse-selection split: did BTC CONTINUE (same sign as entry move) over the hold, or REVERT?
+                        br = (mid_at(t) or 1) / (mid_at(pos["t"]) or 1) - 1
+                        (cont if (br > 0) == (pos["mv"] > 0) else rev).append(net)
                         last_exit = t; armed = False; pos = None
                     elif not resolve_aware:
-                        trades.append((bid - pos["ask"]) - fee(pos["ask"]) - fee(bid))  # old: sell at ~0 bid anyway
+                        trades.append((bid - pos["ask"]) - fee(pos["ask"]) - fee(bid))
                         last_exit = t; armed = False; pos = None
-                    # resolve_aware + no liquid bid -> keep holding; resolves at window end below
         if pos is not None:  # couldn't sell before the window ended -> RESOLVES (winner=1, loser=0) — the user's point
             won = (pos["side"] == "up") == up_won
-            trades.append((1.0 if won else 0.0) - pos["ask"] - fee(pos["ask"]))  # redemption: no exit taker fee
-            n_resolved += 1
-    return trades, n_resolved
+            net = (1.0 if won else 0.0) - pos["ask"] - fee(pos["ask"])  # redemption: no exit taker fee
+            trades.append(net); (cont if won else rev).append(net); n_resolved += 1
+    return trades, n_resolved, cont, rev
 
 print("replay on %d windows (faithful C++ exec: 1-pos-at-a-time, edge-trig, cheap, settle-delayed exit, net fees)\n" % len(wins))
 print("SETTLE  resolve-aware  n   net/sh   win%   t      total$   maxDD$   nResolved(->0/1)")
+SPLIT = None
 for s in SETTLES:
     for ra in (False, True):
-        tr, nres = replay(s, ra)
+        tr, nres, cont, rev = replay(s, ra)
+        if s == 3500 and ra:
+            SPLIT = (cont, rev)
         if not tr:
             continue
         n = len(tr); mean = sum(tr) / n
@@ -105,3 +114,18 @@ for s in SETTLES:
             mean / se if se else 0, sum(tr) * 5, maxdd, nres))
 print("\n-> SETTLE=0 is the optimistic headline backtest; SETTLE=3500 is the REAL live execution.")
 print("   If +EV collapses from SETTLE=0 to 3500, the settlement delay is the edge-killer (live-confirmed).")
+
+if SPLIT:
+    cont, rev = SPLIT
+    def stat(name, v):
+        if v:
+            m = sum(v) / len(v)
+            print("  %-24s n=%3d  net/sh=%+.4f  win=%d%%  total$=%+.2f" % (
+                name, len(v), m, 100 * sum(1 for x in v if x > 0) // len(v), sum(v) * 5))
+        else:
+            print("  %-24s (none)" % name)
+    print("\n=== DECISIVE: adverse-selection split @SETTLE=3500, haircut=%.2f (expert make-or-break) ===" % HAIRCUT)
+    stat("BTC CONTINUED over hold", cont)
+    stat("BTC REVERTED over hold", rev)
+    print("  -> edge only in CONTINUED + REVERTED negative = a continuation-bet in disguise (unpredictable at a")
+    print("     momentum trigger -> coin-flip+fees). BOTH positive = PM lag-closure dominates = a real edge.")
