@@ -52,6 +52,7 @@ entries = []                       # granular: dict(src, t, tau, up, won, fills{
 all_trig = {"okx": [], "bin": []}
 res_lock = threading.Lock()
 g_win = [0]                        # windows subscribed (diagnostic)
+g_trig = [0]                       # raw triggers generated (diagnostic)
 
 def feed(url, sub, parse, hist, lk):
     while now_ms() - start < RUN_MS:
@@ -142,6 +143,7 @@ def pm():
                             drift = latest(bhist, blk) - opn          # window drift since open (Binance)
                             wt = (drift > 0) == (mv > 0)              # with-trend if the move agrees with the drift
                             triggers.append((now_ms(), up_tok if mv > 0 else dn_tok, src, mv > 0, end - time.time(), wt))
+                            g_trig[0] += 1
                             lt[src] = now_ms()
                 try:
                     m = ws.recv()
@@ -272,8 +274,8 @@ def snapshot():
             lo = len(ohist)
         with blk:
             lb = len(bhist)
-        print("[hb %.0fmin] entries=%d (okx=%d bin=%d) | feeds okx=%d bin=%d windows=%d" % (
-            (now_ms() - start) / 60000, no + nb, no, nb, lo, lb, g_win[0]), flush=True)
+        print("[hb %.0fmin] entries=%d (okx=%d bin=%d) | feeds okx=%d bin=%d windows=%d triggers=%d" % (
+            (now_ms() - start) / 60000, no + nb, no, nb, lo, lb, g_win[0], g_trig[0]), flush=True)
         if now_ms() - last_full > 600000:  # full comprehensive analysis every 10min (not just at the end)
             analyze("%.0fmin" % ((now_ms() - start) / 60000))
             last_full = now_ms()
