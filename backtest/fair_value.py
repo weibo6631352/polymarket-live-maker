@@ -66,22 +66,20 @@ for wi, w in enumerate(wins):
     if not (max(up_last, dn_last) > 0.9 or min(up_last, dn_last) < 0.1):   # resolved only
         continue
     up_won = 1 if up_last >= dn_last else 0
-    sigs = {d: sigma_persec(lo, w["end"], d) for d in DSCAN}
-    if not any(sigs.values()):
-        continue
-    nwin += 1
+    added = False
     t = lo + 5000
     while t < w["end"] - 15000:
         S = bat(t); tau = (w["end"] - t) / 1000.0
         if S and tau > 10:
             for d in DSCAN:
-                sps = sigs[d]
+                sps = sigma_persec(lo, t, d)  # CAUSAL: vol from [lo, t] only — no future leakage (was [lo, end])
                 if sps:
                     var = sps * sps * tau + SIGB * SIGB
-                    z = (math.log(S / w["open"]) - 0.5 * sps * sps * tau) / math.sqrt(var)
-                    z = max(-6.0, min(6.0, z))
-                    samples[d].append((Phi(z), up_won))
+                    z = max(-6.0, min(6.0, (math.log(S / w["open"]) - 0.5 * sps * sps * tau) / math.sqrt(var)))
+                    samples[d].append((Phi(z), up_won)); added = True
         t += SAMPLE
+    if added:
+        nwin += 1
 
 print("calibrated on %d resolved windows, %d samples/horizon" % (nwin, len(samples[DSCAN[0]])))
 if not samples[DSCAN[0]]:

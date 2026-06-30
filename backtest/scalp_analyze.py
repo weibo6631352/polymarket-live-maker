@@ -59,7 +59,7 @@ for wi, w in enumerate(wins):
             continue
         ntrig += 1
         drift = (mid_at(t) or 0) - w["open"]
-        rec = {"wt": (drift > 0) == (mv > 0), "ask": entry_ask, "side": side, "traj": {}}
+        rec = {"wt": (drift > 0) == (mv > 0), "ask": entry_ask, "side": side, "wi": wi, "traj": {}}
         for al in ALATS:
             _, a2 = bidask(side, t + al)
             if a2 and a2 > 0:
@@ -129,3 +129,17 @@ if cs:
         100 * wr, 100 * (cen - half), 100 * (cen + half), "excludes 50%" if (cen - half) > 0.5 else "includes 50%"))
     print("  per 5-share trade: $%+.3f gross   (mean = %.0f%% of the ~%.2f stake)" % (mean * 5, 100 * mean / avgstake, avgstake))
     print("  PRICE USED: entry=ASK (buy), exit=BID (sell) — real tradeable prices, full spread paid both ways.")
+    # CLUSTERED by window — the per-trigger t OVERSTATES significance (triggers within a window are autocorrelated,
+    # not iid). One observation per window = independent. This is the HONEST significance.
+    bywin = {}
+    for r in trigs:
+        if r["ask"] < 0.55 and BEST in r:
+            bywin.setdefault(r["wi"], []).append(r[BEST])
+    wmeans = [sum(v) / len(v) for v in bywin.values()]
+    if len(wmeans) > 1:
+        wm = sum(wmeans) / len(wmeans)
+        wsd = (sum((x - wm) ** 2 for x in wmeans) / (len(wmeans) - 1)) ** 0.5
+        wse = wsd / math.sqrt(len(wmeans))
+        wt = wm / wse if wse else 0.0
+        print("  CLUSTERED by window (independent, HONEST): %d windows  mean=%+.4f  t=%.2f  -> %s" % (
+            len(wmeans), wm, wt, "still SIGNIFICANT" if abs(wt) > 2 else "NOT significant"))
