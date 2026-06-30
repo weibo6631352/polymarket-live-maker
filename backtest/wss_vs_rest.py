@@ -23,12 +23,17 @@ def discover():
                 continue
             tau = end - nowu
             tks = json.loads(m.get("clobTokenIds") or "[]")
-            if tks and 150 <= tau <= 280:  # active, not about-to-resolve
-                if not best or abs(tau - 210) < abs(best[0] - 210):
+            if tks and 60 <= tau <= 295:  # any active window
+                if not best or abs(tau - 200) < abs(best[0] - 200):
                     best = (tau, tks[0])
     return best[1] if best else None
 
-TOKEN = discover()
+TOKEN = None
+for _ in range(24):
+    TOKEN = discover()
+    if TOKEN:
+        break
+    time.sleep(5)
 print("token:", (TOKEN[:18] if TOKEN else None))
 if not TOKEN:
     raise SystemExit("no active window")
