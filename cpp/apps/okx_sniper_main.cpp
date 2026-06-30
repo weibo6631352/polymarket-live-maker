@@ -62,6 +62,17 @@ static double okx_ago(long ms) {
     for (const auto& p : g_okx) { if (p.first <= tgt) v = p.second; else break; }
     return v;
 }
+// 3s return, but 0.0 if the feed is STALE (>1.5s since last tick) — guards the latched-signal
+// misfire (a feed that freezes mid-move would otherwise keep mv>THRESH forever). (review I2)
+static double okx_move() {
+    std::lock_guard<std::mutex> lk(okx_mx);
+    if (g_okx.empty() || now_ms() - g_okx.back().first > 1500) return 0.0;
+    const double n = g_okx.back().second;
+    const long tgt = now_ms() - 3000;
+    double a = 0.0;
+    for (const auto& p : g_okx) { if (p.first <= tgt) a = p.second; else break; }
+    return (n > 0 && a > 0) ? (n / a - 1.0) : 0.0;
+}
 static void okx_feed() {
     while (g_run.load()) {
         pmm::net::WsConnection ws("ws.okx.com", "/ws/v5/public", 3000);
@@ -93,16 +104,14 @@ static void okx_feed() {
 // ---- Binance feed (alternative / confirmation signal — the resolution venue) ----
 static std::mutex btc_mx;
 static std::deque<std::pair<long, double>> g_btc;
-static double btc_now() {
+static double btc_move() {  // freshness-gated 3s return (review I2)
     std::lock_guard<std::mutex> lk(btc_mx);
-    return g_btc.empty() ? 0.0 : g_btc.back().second;
-}
-static double btc_ago(long ms) {
-    const long tgt = now_ms() - ms;
-    std::lock_guard<std::mutex> lk(btc_mx);
-    double v = 0.0;
-    for (const auto& p : g_btc) { if (p.first <= tgt) v = p.second; else break; }
-    return v;
+    if (g_btc.empty() || now_ms() - g_btc.back().first > 1500) return 0.0;
+    const double n = g_btc.back().second;
+    const long tgt = now_ms() - 3000;
+    double a = 0.0;
+    for (const auto& p : g_btc) { if (p.first <= tgt) a = p.second; else break; }
+    return (n > 0 && a > 0) ? (n / a - 1.0) : 0.0;
 }
 static void binance_feed() {
     while (g_run.load()) {
@@ -132,6 +141,7 @@ static void binance_feed() {
 static std::mutex book_mx;
 static std::string g_up_tok, g_dn_tok;
 static double g_up_ask = 0.0, g_dn_ask = 0.0;
+static long g_ask_t = 0;  // last time a current-window ask was updated (review I2 ask freshness)
 static std::atomic<long> g_epoch{0};  // bump on window change -> pm_book resubscribes
 
 static void pm_book() {
@@ -158,8 +168,8 @@ static void pm_book() {
                 const std::string et = ev.value("event_type", std::string());
                 auto setask = [&](const std::string& aid, double a) {
                     std::lock_guard<std::mutex> lk(book_mx);
-                    if (aid == g_up_tok) g_up_ask = a;
-                    else if (aid == g_dn_tok) g_dn_ask = a;
+                    if (aid == g_up_tok) { g_up_ask = a; g_ask_t = now_ms(); }
+                    else if (aid == g_dn_tok) { g_dn_ask = a; g_ask_t = now_ms(); }
                 };
                 if (et == "book") {
                     const std::string aid = ev.value("asset_id", std::string());
@@ -217,7 +227,8 @@ static Window discover() {
 int main() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     const double THRESH = env_d("SNIPE_THRESH", 0.0003);
-    const int MAX_TRADES = static_cast<int>(env_d("SNIPE_MAX_TRADES", 30));
+    const int MAX_TRADES = static_cast<int>(env_d("SNIPE_MAX_TRADES", 30));  // count backstop
+    const double MAX_USD = env_d("SNIPE_MAX_USD", 10.0);  // POSITION limit — the real risk bound (deployed $)
     double SHARES = env_d("SNIPE_SHARES", 5.0);  // PM market minimum = 5 shares; never below
     if (SHARES < 5.0) SHARES = 5.0;
     const bool LIVE = (std::getenv("PM_TRADER_LIVE") && std::string(std::getenv("PM_TRADER_LIVE")) == "1") &&
@@ -236,16 +247,18 @@ int main() {
     if (SRC != "okx") tbin = std::thread(binance_feed);
 
     int trades = 0;
-    long last_trig = 0;
+    double deployed = 0.0;  // total $ deployed — the POSITION limit (replaces the crude 2s cooldown)
+    bool armed = true;      // edge-trigger: fire once per move, re-arm when it subsides
     long last_hb = 0;
     Window w;
-    while (g_run.load() && trades < MAX_TRADES) {
+    while (g_run.load() && trades < MAX_TRADES && deployed < MAX_USD) {
         if (!w.valid || static_cast<double>(std::time(nullptr)) > w.end_unix - 25) {
             Window nw = discover();
             if (nw.valid) {
                 w = nw;
                 { std::lock_guard<std::mutex> lk(book_mx); g_up_tok = w.up_tok; g_dn_tok = w.dn_tok; g_up_ask = 0; g_dn_ask = 0; }
                 g_epoch.fetch_add(1);
+                armed = true;  // fresh window = fresh opportunity
                 std::printf("[WINDOW] up=%s.. end_in=%.0fs\n", w.up_tok.substr(0, 12).c_str(),
                             w.end_unix - static_cast<double>(std::time(nullptr)));
             } else {
@@ -253,33 +266,36 @@ int main() {
                 continue;
             }
         }
-        // hot signal: OKX seconds-move
+        // hot signal: freshness-gated seconds-move, EDGE-TRIGGERED (fire once per move, no 2s cooldown)
         const long t = now_ms();
-        if (t - last_trig > 2000) {
-            auto mvf = [](double n, double a) { return (n > 0 && a > 0) ? (n / a - 1.0) : 0.0; };
-            double mv = mvf(okx_now(), okx_ago(3000));
-            if (SRC == "bin") mv = mvf(btc_now(), btc_ago(3000));
-            else if (SRC == "both" && std::fabs(mv) <= THRESH) mv = mvf(btc_now(), btc_ago(3000));
-            {
-                if (std::fabs(mv) > THRESH) {
-                    const bool up = mv > 0;
-                    const std::string fav = up ? w.up_tok : w.dn_tok;
-                    double ask;
-                    { std::lock_guard<std::mutex> lk(book_mx); ask = up ? g_up_ask : g_dn_ask; }
-                    const double tau = w.end_unix - static_cast<double>(std::time(nullptr));
-                    if (ask > 0.03 && ask < 0.97 && tau > 20) {
-                        const double size = SHARES;  // fixed min share count; order value = size*ask
-                        if (LIVE) {
-                            const auto r = sub({{"action", "PLACE"}, {"token_id", fav}, {"side", "BUY"},
-                                                {"price", ask}, {"size", size}});
-                            std::printf("[SNIPE-LIVE] mv=%+.3f%% fav=%s ask=%.3f -> %s\n",
-                                        mv * 100, up ? "Up" : "Down", ask, r.dump().c_str());
-                        } else {
-                            std::printf("[SNIPE-DRY] mv=%+.3f%% fav=%s ask=%.3f size=%.0f cost=$%.2f tau=%.0fs (no order)\n",
-                                        mv * 100, up ? "Up" : "Down", ask, size, size * ask, tau);
-                        }
-                        ++trades;
-                        last_trig = t;
+        {
+            double mv = okx_move();
+            if (SRC == "bin") mv = btc_move();
+            else if (SRC == "both" && std::fabs(mv) <= THRESH) mv = btc_move();
+            if (std::fabs(mv) < THRESH * 0.5) armed = true;  // re-arm once the move subsides (hysteresis)
+            if (std::fabs(mv) > THRESH && armed) {
+                const bool up = mv > 0;
+                const std::string fav = up ? w.up_tok : w.dn_tok;
+                double ask; long ask_t;
+                { std::lock_guard<std::mutex> lk(book_mx); ask = up ? g_up_ask : g_dn_ask; ask_t = g_ask_t; }
+                const double tau = w.end_unix - static_cast<double>(std::time(nullptr));
+                const double notional = SHARES * ask;
+                // gates: sane ask, time left, >= $1 notional (I1), ask fresh < 2s (I2)
+                if (ask > 0.03 && ask < 0.97 && tau > 20 && notional >= 1.05 && t - ask_t < 2000) {
+                    armed = false;                                    // edge-trigger: one fire per move-event
+                    const double buy_px = std::min(ask + 0.03, 0.97); // marketable: cross the ask so it TAKES (C1)
+                    ++trades;                                         // count intent-to-place BEFORE placing (S1)
+                    deployed += notional;                             // position-limit accounting
+                    if (LIVE) {
+                        const auto r = sub({{"action", "PLACE"}, {"token_id", fav}, {"side", "BUY"},
+                                            {"price", buy_px}, {"size", SHARES}});
+                        const std::string st = r.value("status", std::string());
+                        std::printf("[SNIPE-LIVE] mv=%+.3f%% fav=%s ask=%.3f buy=%.3f cost=$%.2f status=%s %s\n",
+                                    mv * 100, up ? "Up" : "Down", ask, buy_px, notional, st.c_str(),
+                                    (st == "REJECTED" || st == "ERROR") ? "!! NOT FILLED — NOT A POSITION" : "");
+                    } else {
+                        std::printf("[SNIPE-DRY] mv=%+.3f%% fav=%s ask=%.3f buy=%.3f size=%.0f cost=$%.2f tau=%.0fs deployed=$%.2f\n",
+                                    mv * 100, up ? "Up" : "Down", ask, buy_px, SHARES, notional, tau, deployed);
                     }
                 }
             }
