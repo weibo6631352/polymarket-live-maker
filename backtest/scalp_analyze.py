@@ -65,12 +65,10 @@ for wi, w in enumerate(wins):
             if a2 and a2 > 0:
                 rec["traj"][al] = a2
         for h in HOLDS:
-            exit_bid, exit_ask = bidask(side, t + LAT + h)   # exit by SELLING the bid (conservative taker)
+            exit_bid, _ = bidask(side, t + LAT + h)     # exit by SELLING the bid (conservative taker)
             if exit_bid and exit_bid > 0:
-                scalps[h].append(exit_bid - entry_ask)       # net scalp per share (full round-trip spread in)
+                scalps[h].append(exit_bid - entry_ask)  # net scalp per share (full round-trip spread in)
                 rec[h] = exit_bid - entry_ask
-                if h == BEST and exit_ask and exit_ask > 0:
-                    rec["midexit"] = (exit_bid + exit_ask) / 2.0 - entry_ask  # if we could exit at MID instead
         trigs.append(rec)
 
 print("parsed okx=%d pm_up=%d windows=%d ; scalp triggers=%d" % (len(okx), len(pm["up"]), len(wins), ntrig))
@@ -130,8 +128,4 @@ if cs:
     print("  win=%.0f%%  Wilson95%%CI=[%.0f%%, %.0f%%]  %s" % (
         100 * wr, 100 * (cen - half), 100 * (cen + half), "excludes 50%" if (cen - half) > 0.5 else "includes 50%"))
     print("  per 5-share trade: $%+.3f gross   (mean = %.0f%% of the ~%.2f stake)" % (mean * 5, 100 * mean / avgstake, avgstake))
-    me = [r["midexit"] for r in trigs if r["ask"] < 0.55 and "midexit" in r]
-    if me:
-        print("  PRICE USED: entry=ASK, exit=BID (what we computed: %+.4f). If exit=MID instead: %+.4f (+%.4f better)" % (
-            mean, sum(me) / len(me), sum(me) / len(me) - mean))
-        print("  -> we used the CONSERVATIVE bid exit; the spread is fully paid, edge is NOT mid-inflated.")
+    print("  PRICE USED: entry=ASK (buy), exit=BID (sell) — real tradeable prices, full spread paid both ways.")
