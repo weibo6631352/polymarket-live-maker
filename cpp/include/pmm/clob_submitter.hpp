@@ -102,6 +102,11 @@ public:
     void cancel_order(const std::string& order_id) override;
     [[nodiscard]] bool invert_side() const override { return invert_side_; }
 
+    // Pre-warm the per-token caches (tick size + neg-risk) OFF the order hot path. The FIRST buy in a new
+    // window otherwise pays 2 network GETs (~5-10ms) — and that latency is exactly what decides fill-vs-
+    // FAK-kill when racing for a stale ask. Call at window discovery for both tokens. Safe/idempotent.
+    void warm_token(const std::string& token_id) { (void)fetch_tick_size(token_id); (void)fetch_neg_risk(token_id); }
+
     void close() override;
 
 private:

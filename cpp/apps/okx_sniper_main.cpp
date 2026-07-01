@@ -306,6 +306,8 @@ int main() {
                 armed = true;  // fresh window = fresh opportunity
                 std::printf("[WINDOW] up=%s.. end_in=%.0fs\n", w.up_tok.substr(0, 12).c_str(),
                             w.end_unix - static_cast<double>(std::time(nullptr)));
+                if (LIVE) { sub.warm_token(w.up_tok); sub.warm_token(w.dn_tok); }  // pre-fetch tick/neg-risk OFF the
+                // order hot path -> the first buy this window skips ~5-10ms of GETs (the fill-vs-kill race margin)
             } else if (!w.valid) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 continue;
