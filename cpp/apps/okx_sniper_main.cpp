@@ -259,7 +259,8 @@ int main() {
     std::signal(SIGINT, on_signal);   // graceful shutdown: set g_run=false -> loop exits -> flatten runs (no orphan)
     std::signal(SIGTERM, on_signal);
     const double THRESH = env_d("SNIPE_THRESH", 0.0003);
-    const int MAX_TRADES = static_cast<int>(env_d("SNIPE_MAX_TRADES", 30));  // count backstop
+    const int MAX_TRADES = static_cast<int>(env_d("SNIPE_MAX_TRADES", 60));  // ATTEMPT backstop (incl FAK-killed)
+    const int MAX_FILLS = static_cast<int>(env_d("SNIPE_MAX_FILLS", 20));    // ACTUAL-fill target — the real "N 单" goal
     const double MAX_USD = env_d("SNIPE_MAX_USD", 10.0);  // cumulative-deployed risk cap
     double SHARES = env_d("SNIPE_SHARES", 5.0);  // PM market minimum = 5 shares; never below
     if (SHARES < 5.0) SHARES = 5.0;
@@ -272,8 +273,8 @@ int main() {
     const bool LIVE = (std::getenv("PM_TRADER_LIVE") && std::string(std::getenv("PM_TRADER_LIVE")) == "1") &&
                       (std::getenv("LM_SNIPE_ARM") && std::string(std::getenv("LM_SNIPE_ARM")) == "1");
     pmm::app::LoadDotEnv(".env", LIVE);
-    std::printf("=== okx-sniper LAG-SCALP ===\nmode=%s thresh=%.4f cheap<%.2f hold=%ldms tau>60 max=%d shares=%.0f\n",
-                LIVE ? "LIVE-REAL-MONEY" : "DRY", THRESH, CHEAP_MAX, HOLD_MS, MAX_TRADES, SHARES);
+    std::printf("=== okx-sniper LAG-SCALP ===\nmode=%s thresh=%.4f cheap<%.2f hold=%ldms tau>60 fills=%d attempts=%d shares=%.0f\n",
+                LIVE ? "LIVE-REAL-MONEY" : "DRY", THRESH, CHEAP_MAX, HOLD_MS, MAX_FILLS, MAX_TRADES, SHARES);
 
     pmm::clob::ClobSubmitter sub;
     if (LIVE && !sub.ready()) { std::printf("LIVE but ClobSubmitter not ready — abort\n"); return 1; }
@@ -284,15 +285,16 @@ int main() {
     std::thread tbin;
     if (SRC != "okx") tbin = std::thread(binance_feed);
 
-    int trades = 0;
-    double deployed = 0.0;  // cumulative $ deployed — the hard risk cap
+    int trades = 0;         // buy ATTEMPTS (counted before place — hard backstop; FAK-killed ones count here)
+    int fills = 0;          // ACTUAL fills (FAK-killed don't count) — the real "满 N 单" target
+    double deployed = 0.0;  // cumulative REAL $ deployed (only on an actual fill) — the hard risk cap
     double pnl = 0.0;       // cumulative realized scalp P&L (DRY: simulated from bid-ask)
     bool armed = true;      // edge-trigger: fire once per move, re-arm when it subsides
     long last_hb = 0;
     long last_exit = 0;     // last scalp-exit time — enforces a re-entry cooldown (anti-churn)
     Window w;
     Position pos;           // one open scalp at a time (enter flat, exit by selling the bid)
-    while (g_run.load() && (pos.open || (trades < MAX_TRADES && deployed < MAX_USD))) {
+    while (g_run.load() && (pos.open || (fills < MAX_FILLS && trades < MAX_TRADES && deployed < MAX_USD))) {
         // NEVER swap the window while holding — that would strand the position on the wrong token's book
         if (!pos.open && (!w.valid || static_cast<double>(std::time(nullptr)) > w.end_unix - 25)) {
             Window cand;
@@ -329,7 +331,7 @@ int main() {
                 if (ask > 0.03 && ask < CHEAP_MAX && tau > 60 && notional >= 1.05 && t - ask_t < 2000) {
                     armed = false;                                    // edge-trigger: one fire per move-event
                     const double buy_px = std::min(ask + 0.03, 0.97); // marketable: cross the ask so it TAKES (C1)
-                    ++trades; deployed += notional;                   // count + cumulative-risk cap BEFORE placing (S1)
+                    ++trades;                                         // count the ATTEMPT before placing (S1 backstop)
                     bool ok_buy = true; std::string st = "DRY"; double got = SHARES;
                     if (LIVE) {
                         // FAK (fill-and-kill): takes what's immediately available, cancels the rest — it can NEVER
@@ -347,7 +349,10 @@ int main() {
                     // sell EXACTLY what filled (floor 0.01 to dodge balance-rounding rejects) — selling the intended
                     // SHARES when only got<SHARES filled = the infinite "balance not enough" retry that stranded a pos to 0.
                     const double held = LIVE ? std::floor(got * 100.0) / 100.0 : SHARES;
-                    if (ok_buy) pos = {true, up, fav, LIVE ? buy_px : ask, held, t, t + HOLD_MS};
+                    if (ok_buy) {  // a REAL fill (FAK-killed buys skip this) — only now count the fill + real $ deployed
+                        pos = {true, up, fav, LIVE ? buy_px : ask, held, t, t + HOLD_MS};
+                        ++fills; deployed += held * (LIVE ? buy_px : ask);
+                    }
                     const std::string tail = LIVE ? (" status=" + st) : std::string("  (hold then sell bid)");
                     std::printf("[BUY-%s] mv=%+.3f%% %s ask=%.3f buy=%.3f $%.2f tau=%.0fs%s\n",
                                 LIVE ? "LIVE" : "DRY", mv * 100, up ? "Up" : "Down", ask, buy_px, notional, tau, tail.c_str());
@@ -433,7 +438,7 @@ int main() {
                                pos.up ? "Up" : "Down", pos.tok.substr(0, 14).c_str());
         pos = Position{};
     }
-    std::printf("DONE: %d scalps (cap %d) cumPnL=$%+.3f\n", trades, MAX_TRADES, pnl);
+    std::printf("DONE: %d fills / %d attempts (targets %d/%d) cumPnL=$%+.3f\n", fills, trades, MAX_FILLS, MAX_TRADES, pnl);
     g_run.store(false);
     to.join();
     tb.join();
