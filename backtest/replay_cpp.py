@@ -58,6 +58,7 @@ HAIRCUT = float(__import__("os").environ.get("EXIT_HAIRCUT", "0.01"))  # exit 1 
 def replay(settle, resolve_aware, split=False):
     trades = []; n_resolved = 0
     cont = []; rev = []  # net-EV split: BTC CONTINUED vs REVERTED over the forced hold (adverse-selection test)
+    feats = []  # per-trade (net, |mv|, tau, entry_ask, with_trend, continued) — for a continuation predictor
     for wi, w in enumerate(wins):
         lo = w["t0"]; hi = wins[wi + 1]["t0"] if wi + 1 < len(wins) else w["end"]
         up_won = outcome_up(w)
@@ -73,7 +74,9 @@ def replay(settle, resolve_aware, split=False):
                     _, ask = quote(side, t + LAT)
                     if PMIN < ask < CHEAP_MAX:  # PRICE-BAND: skip near-0.5 (max fee, min gap) — quant iteration #1
                         armed = False
-                        pos = {"side": side, "ask": ask, "t": t, "sell": t + max(HOLD_MS, settle), "mv": mv}
+                        trend = m / (mid_at(t - 30000) or m) - 1  # BTC 30s trend before entry
+                        pos = {"side": side, "ask": ask, "t": t, "sell": t + max(HOLD_MS, settle), "mv": mv,
+                               "tau": (w["end"] - t) / 1000.0, "with": (trend > 0) == up}
             else:
                 if t >= pos["sell"]:
                     bid, _ = quote(pos["side"], t)
@@ -83,7 +86,9 @@ def replay(settle, resolve_aware, split=False):
                         trades.append(net)
                         # adverse-selection split: did BTC CONTINUE (same sign as entry move) over the hold, or REVERT?
                         br = (mid_at(t) or 1) / (mid_at(pos["t"]) or 1) - 1
-                        (cont if (br > 0) == (pos["mv"] > 0) else rev).append(net)
+                        c = (br > 0) == (pos["mv"] > 0)
+                        (cont if c else rev).append(net)
+                        feats.append((net, abs(pos["mv"]), pos["tau"], pos["ask"], pos["with"], c))
                         last_exit = t; armed = False; pos = None
                     elif not resolve_aware:
                         trades.append((bid - pos["ask"]) - fee(pos["ask"]) - fee(bid))
@@ -91,17 +96,18 @@ def replay(settle, resolve_aware, split=False):
         if pos is not None:  # couldn't sell before the window ended -> RESOLVES (winner=1, loser=0) — the user's point
             won = (pos["side"] == "up") == up_won
             net = (1.0 if won else 0.0) - pos["ask"] - fee(pos["ask"])  # redemption: no exit taker fee
-            trades.append(net); (cont if won else rev).append(net); n_resolved += 1
-    return trades, n_resolved, cont, rev
+            trades.append(net); (cont if won else rev).append(net)
+            feats.append((net, abs(pos["mv"]), pos["tau"], pos["ask"], pos["with"], won)); n_resolved += 1
+    return trades, n_resolved, cont, rev, feats
 
 print("replay on %d windows (faithful C++ exec: 1-pos-at-a-time, edge-trig, cheap, settle-delayed exit, net fees)\n" % len(wins))
 print("SETTLE  resolve-aware  n   net/sh   win%   t      total$   maxDD$   nResolved(->0/1)")
-SPLIT = None
+SPLIT = None; FEATS = None
 for s in SETTLES:
     for ra in (False, True):
-        tr, nres, cont, rev = replay(s, ra)
+        tr, nres, cont, rev, feats = replay(s, ra)
         if s == 3500 and ra:
-            SPLIT = (cont, rev)
+            SPLIT = (cont, rev); FEATS = feats
         if not tr:
             continue
         n = len(tr); mean = sum(tr) / n
@@ -130,3 +136,22 @@ if SPLIT:
     stat("BTC REVERTED over hold", rev)
     print("  -> edge only in CONTINUED + REVERTED negative = a continuation-bet in disguise (unpredictable at a")
     print("     momentum trigger -> coin-flip+fees). BOTH positive = PM lag-closure dominates = a real edge.")
+
+if FEATS:
+    print("\n=== MONEY LEVER: is there an ENTRY filter that predicts continuation (-> the +6c bucket)? ===")
+    def bkt(name, sub):
+        if sub:
+            nets = [f[0] for f in sub]; cr = 100 * sum(1 for f in sub if f[5]) // len(sub)
+            print("  %-28s n=%3d  cont-rate=%2d%%  net/sh=%+.4f  win=%2d%%" % (
+                name, len(sub), cr, sum(nets) / len(nets), 100 * sum(1 for x in nets if x > 0) // len(sub)))
+    mvs = sorted(f[1] for f in FEATS); medmv = mvs[len(mvs) // 2] if mvs else 0
+    bkt("|move| SMALL (<median)", [f for f in FEATS if f[1] < medmv])
+    bkt("|move| LARGE (>=median)", [f for f in FEATS if f[1] >= medmv])
+    bkt("with-trend (mv w/ 30s drift)", [f for f in FEATS if f[4]])
+    bkt("counter-trend (a bounce)", [f for f in FEATS if not f[4]])
+    bkt("tau > 150s (early in window)", [f for f in FEATS if f[2] > 150])
+    bkt("tau <= 150s (late)", [f for f in FEATS if f[2] <= 150])
+    print("  -> a bucket with HIGH cont-rate AND high net/sh = a REAL entry filter to the +6c bucket = the money lever.")
+    print("\n=== EFFICIENCY: %d cheap trades over %d windows = %.2f/window; net $%+.2f (5sh); at 5sh -> $%+.3f/trade ===" % (
+        len(FEATS), len(wins), len(FEATS) / max(len(wins), 1), sum(f[0] for f in FEATS) * 5,
+        sum(f[0] for f in FEATS) * 5 / max(len(FEATS), 1)))
