@@ -62,15 +62,17 @@ for wi, w in enumerate(wins):
         if abs(c) > abs(best[1]):
             best = (lag * GRID, c)
     peaks.append(best)
-    print("  win%2d: peak corr %+.3f at lag %+dms  (%s)" % (
-        wi, best[1], best[0], "BTC LEADS PM by %dms" % best[0] if best[0] > 0 else "no lead / PM leads"))
+    # NOTE sign: my x=BTC[i], y=PM[i-lag]; peak at NEGATIVE lag => PM responds LATER => PM LAGS BTC by |lag|.
+    pmlag = -best[0]
+    print("  win%2d: peak corr %+.3f -> PM lags BTC by %+dms %s" % (
+        wi, best[1], pmlag, "(exploitable)" if pmlag > 0 and abs(best[1]) > 0.05 else ""))
 
 if peaks:
-    pos = [p[0] for p in peaks if p[1] > 0.05]
-    print("\nwindows with real positive corr (>0.05): %d/%d" % (len(pos), len(peaks)))
-    if pos:
-        pos.sort()
-        print("PM phase-lag behind BTC: median=%dms  min=%dms max=%dms" % (pos[len(pos) // 2], pos[0], pos[-1]))
-        print("-> if median lag > our latency, there's a window to snipe the stale PM price (scalp the catch-up)")
+    lags = [-p[0] for p in peaks if abs(p[1]) > 0.05 and -p[0] > 0]   # PM-lags-BTC, positive only
+    print("\nwindows where PM clearly LAGS BTC (corr>0.05): %d/%d" % (len(lags), len(peaks)))
+    if lags:
+        lags.sort()
+        print("PM phase-lag behind BTC: median=%dms  min=%dms max=%dms" % (lags[len(lags) // 2], lags[0], lags[-1]))
+        print("-> our latency ~17ms << this lag => a real window to buy the stale PM ask before it catches up")
     else:
-        print("-> NO consistent positive lag: PM is not lagging BTC in a capturable way (efficient)")
+        print("-> PM does NOT consistently lag BTC: efficient at our resolution")
