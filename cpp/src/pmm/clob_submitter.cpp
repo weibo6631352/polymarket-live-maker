@@ -389,7 +389,7 @@ std::optional<double> ClobSubmitter::fetch_marketable_price(const std::string& t
 }
 
 json ClobSubmitter::place(const std::string& token_id, const std::string& side, double price,
-                          double size) {
+                          double size, const std::string& order_type) {
     const std::string tick = fetch_tick_size(token_id);
     const bool neg_risk = fetch_neg_risk(token_id);
     const bool is_buy = upper(side) == "BUY";
@@ -436,7 +436,8 @@ json ClobSubmitter::place(const std::string& token_id, const std::string& side, 
     w.timestamp_ms = ord.timestamp_ms;
     w.signature = to_hex(sig.data(), 65);
     w.owner = creds_.api_key;
-    w.order_type = "GTC";  // 静息报价 (GTD 在 V2 wire 不可表达, 见构造告警)
+    // GTC = resting quote (default); FAK = fill-and-kill (marketable entry that can't rest -> no async orphan).
+    w.order_type = (order_type == "FAK" || order_type == "FOK") ? order_type : "GTC";  // GTD 在 V2 wire 不可表达
     const std::string body = wire::BuildOrderV2Body(w);
 
     const std::string ts = std::to_string(now_s);
@@ -602,8 +603,9 @@ nlohmann::json ClobSubmitter::operator()(const nlohmann::json& action) noexcept 
         const std::string kind = ju::find(action, "action") ? ju::to_str(*ju::find(action, "action")) : "";
         const std::string token = ju::find(action, "token_id") ? ju::to_str(*ju::find(action, "token_id")) : "";
         if (kind == "PLACE") {
+            const std::string ot = ju::find(action, "order_type") ? ju::to_str(*ju::find(action, "order_type")) : "GTC";
             return place(token, ju::to_str(*ju::find(action, "side")), ju::to_double(*ju::find(action, "price")),
-                         ju::to_double(*ju::find(action, "size")));
+                         ju::to_double(*ju::find(action, "size")), ot);
         }
         if (kind == "CANCEL_ALL") return cancel_all(token);
         if (kind == "FLATTEN") {

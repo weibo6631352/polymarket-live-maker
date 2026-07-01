@@ -116,8 +116,10 @@ private:
                                                       const std::string& body,
                                                       const std::string& ts) const;
 
+    // order_type: "GTC" (resting, default) or "FAK" (fill-and-kill: takes what's immediately available,
+    // cancels the remainder — NEVER rests, so a marketable entry can't leave an async-filling orphan).
     nlohmann::json place(const std::string& token_id, const std::string& side, double price,
-                         double size);
+                         double size, const std::string& order_type = "GTC");
     nlohmann::json cancel_all(const std::string& token_id);
     nlohmann::json flatten(const std::string& token_id, const std::string& side, double size);
 

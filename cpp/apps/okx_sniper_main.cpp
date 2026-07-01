@@ -332,10 +332,13 @@ int main() {
                     ++trades; deployed += notional;                   // count + cumulative-risk cap BEFORE placing (S1)
                     bool ok_buy = true; std::string st = "DRY"; double got = SHARES;
                     if (LIVE) {
+                        // FAK (fill-and-kill): takes what's immediately available, cancels the rest — it can NEVER
+                        // rest as a live order, so a buy that returns filled=0 truly bought nothing (no async orphan).
+                        // A GTC marketable buy that didn't cross rests, later fills async, and orphans (live-caught bug).
                         const auto r = sub({{"action", "PLACE"}, {"token_id", fav}, {"side", "BUY"},
-                                            {"price", buy_px}, {"size", SHARES}});
+                                            {"price", buy_px}, {"size", SHARES}, {"order_type", "FAK"}});
                         st = r.value("status", std::string());
-                        got = r.value("filled", 0.0);   // ACTUAL matched shares — a marketable buy can partial-fill < SHARES
+                        got = r.value("filled", 0.0);   // with FAK this is the DEFINITIVE fill (0..SHARES), not a snapshot
                         ok_buy = (st != "REJECTED" && st != "ERROR") && got >= 1.0;
                     }
                     // sell EXACTLY what filled (floor 0.01 to dodge balance-rounding rejects) — selling the intended
