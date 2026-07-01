@@ -255,15 +255,14 @@ int main() {
     if (SHARES < 5.0) SHARES = 5.0;
     const double CHEAP_MAX = env_d("SNIPE_CHEAP_MAX", 0.55);  // only enter the CHEAP favored side (max lag = max edge)
     const long HOLD_MS = static_cast<long>(env_d("SNIPE_HOLD_MS", 1500));  // scalp hold before selling the bid
-    const double STOP = env_d("SNIPE_STOP", 0.03);  // stop-loss: bid <= entry_ask - STOP -> bail (fat-tail reversal)
     const long MAX_HOLD_MS = static_cast<long>(env_d("SNIPE_MAX_HOLD_MS", 8000));  // HARD force-exit even on a stale book
     const long COOLDOWN_MS = static_cast<long>(env_d("SNIPE_COOLDOWN_MS", 2000));  // min gap after an exit before re-entry
     const double MAX_LOSS = env_d("SNIPE_MAX_LOSS", 3.0);  // realized-loss kill-switch: stop entering once pnl <= -MAX_LOSS
     const bool LIVE = (std::getenv("PM_TRADER_LIVE") && std::string(std::getenv("PM_TRADER_LIVE")) == "1") &&
                       (std::getenv("LM_SNIPE_ARM") && std::string(std::getenv("LM_SNIPE_ARM")) == "1");
     pmm::app::LoadDotEnv(".env", LIVE);
-    std::printf("=== okx-sniper LAG-SCALP ===\nmode=%s thresh=%.4f cheap<%.2f hold=%ldms stop=%.2f max=%d shares=%.0f\n",
-                LIVE ? "LIVE-REAL-MONEY" : "DRY", THRESH, CHEAP_MAX, HOLD_MS, STOP, MAX_TRADES, SHARES);
+    std::printf("=== okx-sniper LAG-SCALP ===\nmode=%s thresh=%.4f cheap<%.2f hold=%ldms tau>60 max=%d shares=%.0f\n",
+                LIVE ? "LIVE-REAL-MONEY" : "DRY", THRESH, CHEAP_MAX, HOLD_MS, MAX_TRADES, SHARES);
 
     pmm::clob::ClobSubmitter sub;
     if (LIVE && !sub.ready()) { std::printf("LIVE but ClobSubmitter not ready — abort\n"); return 1; }
@@ -314,8 +313,9 @@ int main() {
                 { std::lock_guard<std::mutex> lk(book_mx); ask = up ? g_up_ask : g_dn_ask; ask_t = g_ask_t; }
                 const double tau = w.end_unix - static_cast<double>(std::time(nullptr));
                 const double notional = SHARES * ask;
-                // gates: CHEAP favored side (max lag = the edge), time left, >= $1 notional (I1), ask fresh (I2)
-                if (ask > 0.03 && ask < CHEAP_MAX && tau > 30 && notional >= 1.05 && t - ask_t < 2000) {
+                // gates: CHEAP favored side (max lag = the edge), TAU>60s so the forced ~3.5s settlement-hold can
+                // NEVER reach window-end -> kills the resolution-to-0 tail (cheap = the losing side), >= $1 notional, ask fresh
+                if (ask > 0.03 && ask < CHEAP_MAX && tau > 60 && notional >= 1.05 && t - ask_t < 2000) {
                     armed = false;                                    // edge-trigger: one fire per move-event
                     const double buy_px = std::min(ask + 0.03, 0.97); // marketable: cross the ask so it TAKES (C1)
                     ++trades; deployed += notional;                   // count + cumulative-risk cap BEFORE placing (S1)
@@ -343,10 +343,11 @@ int main() {
             { std::lock_guard<std::mutex> lk(book_mx); bid = pos.up ? g_up_bid : g_dn_bid; bid_t = g_ask_t; }
             const double tau = w.end_unix - static_cast<double>(std::time(nullptr));
             const bool fresh = (bid > 0 && t - bid_t < 3000);
-            const bool stop = fresh && bid <= pos.entry_ask - STOP;
             const bool timeup = (t >= pos.sell_t);
             const bool force = (t - pos.entry_t >= MAX_HOLD_MS) || tau < 12;  // HARD — ignores book freshness
-            if (stop || (timeup && fresh) || force) {
+            // NO stop-loss: under the ~3.5s settlement lag it can't fire before the timeup exit (both exit at the
+            // settled bid); live it only relabelled trades the no-stop replay keeps. tau>60 handles the tail instead.
+            if ((timeup && fresh) || force) {
                 const double exit_px = fresh ? bid : std::max(pos.entry_ask - 0.05, 0.01);  // floor if no fresh bid
                 std::string st = "DRY", resp; int http = 0;
                 bool sold = true;
@@ -364,7 +365,7 @@ int main() {
                     const std::string tail = LIVE ? (" status=" + st) : std::string();
                     std::printf("[SELL-%s] %s entry=%.3f exit=%.3f scalp=%+.4f/sh ($%+.3f) held=%ldms reason=%s cumPnL=$%+.3f%s\n",
                                 LIVE ? "LIVE" : "DRY", pos.up ? "Up" : "Down", pos.entry_ask, exit_px, scalp, scalp * pos.shares,
-                                t - pos.entry_t, stop ? "STOP" : (force ? (tau < 12 ? "win-end" : "max-hold") : "hold"), pnl, tail.c_str());
+                                t - pos.entry_t, force ? (tau < 12 ? "win-end" : "max-hold") : "hold", pnl, tail.c_str());
                     pos = Position{}; last_exit = t; armed = false;  // cooldown + require the move to subside (anti-churn)
                 } else {
                     std::printf("[SELL-RETRY-LIVE] %s status=%s http=%d resp=%s\n",
