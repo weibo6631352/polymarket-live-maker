@@ -196,3 +196,54 @@ risk-adjusted return is poor. Only revisit if a maker-exit both (a) fills reliab
 reject — which the data says it won't. **CONCLUSION: a genuine but un-economic edge. No real money. Locked off.**
 The full evidence chain (recorder → faithful replay → adverse-selection split → expert panel → iterations) is the
 reusable method; the answer for THIS strategy is park it.
+
+## 8. LIVE RE-TEST + expert post-mortem (2026-07-01) — the backtest-vs-live gap, precisely attributed
+
+After a user-authorized controlled live re-test (safe caps: fill-count + deployed-$ + net-loss), with a
+correctness bug fixed (see below) and two independent financial-math expert reviews.
+
+**Execution bug found + fixed live (orphan class, now closed):** a marketable GTC buy that does not immediately
+cross RESTS as a live order, returns `filled=0` in the immediate response → the bot recorded no position → the
+resting order filled async on-chain → an untracked ORPHAN rode to resolution (1 occurred in the first 3 orders;
+recovered manually, it happened to win — luck). Root: fill detection trusted the immediate response. FIX: the
+entry buy now uses **FAK (fill-and-kill)** — it takes whatever is immediately available and cancels the rest, so
+it can NEVER rest; `filled` is then the definitive fill (0..N). Verified live: FAK either fills cleanly
+(`status=matched`, takingAmount) or is killed cleanly (`"no orders found to match with FAK order"`) → **0 orphans
+confirmed on-chain across the whole re-test.** Also added: `SNIPE_MAX_FILLS` (count ACTUAL fills, not FAK-killed
+attempts, toward the N-order target), taker-fee baked into pnl, per-side book-freshness, pre-warm of tick/neg-risk
+at window discovery. Commits: FAK d127ae2, fills-accounting bb922cc, pre-warm 053089d, hardening 9060d98.
+
+**Live result (18 attempts, real money):** only **3 filled (17% fill rate)**, 8 FAK-killed ("ask gone in our
+~20ms"), rest other rejects. The 3 fills: Up 0.56→0.55 (flat), Down 0.41→0.42 (+1¢), Down ~0.22→0.19 (reverted)
+— **all 3 lost, ~−$0.70** (real, after correcting a bookkeeping pessimism where the bot logged entry=buy_px not
+the actual FAK fill). Killed asks spanned the WHOLE range 0.24–0.52 (NOT price-selective).
+
+**Why backtest(+2.8¢/sh) → live(negative), attributed by the expert panel:**
+- 🥇 **Fill rate ≈ 17%, not the backtest's implicit 100%** (Wilson 95% CI [5.8%, 39%]). This is the robust,
+  statistically-solid divergence — the backtest overstated opportunity 3–17×. Needs no P&L significance to stand.
+- 🥇 **Winner's-curse / information adverse selection (the connecting mechanism):** we only fill when the ask
+  SURVIVED ~20ms = when no faster informed sniper wanted it. The +6¢ CONTINUED bucket (BTC keeps moving, PM
+  catches up) is exactly what the fast (likely London-co-located) players race for → they take it, we're left with
+  the no-continuation / REVERTED bucket (−1.6¢). So our fills are NOT an unbiased sample of the backtest's signals
+  — they're systematically biased to the losing bucket. This PREDICTS the failure. (Caveat, per the quant expert:
+  the mechanism is theoretically necessary + directionally consistent, but NOT statistically PROVEN at n=3 fills —
+  it doesn't need to be; the two facts above suffice.)
+- 🥉 **Fee floor > catch-up:** round-trip taker at p≈0.4–0.5 = 3.4–3.5¢/sh; observed catch-ups ±1¢. Profit needs
+  a >3.4¢ catch-up; the winner's-curse subset delivers ≈0.
+
+**Honest statistical caveat (quant expert corrected an over-read):** the "3 fills all lost / −$0.70" is NOT
+statistically distinguishable from the backtest +2.8¢/sh (z≈−1.4, p≈0.08–0.11; 3 losses ≈ 0.46³ ≈ 10% under the
+backtest's own 46% loss rate). Do NOT claim "the per-fill edge collapsed" or extrapolate "−$2.8/10 fills" as a
+forecast. The gap is explained by fill-rate + fee arithmetic, NOT by a demonstrated edge collapse. Distinguishing
+live per-fill edge from the backtest would need ~25–40 fills (~5h, ~150 attempts) — not practically reachable.
+
+**Solutions evaluated — all hit hard walls:** London co-lo (the only real fix) = geo-blocked, needs KYC/KYB
+exemption (infra+compliance, parked); maker orders = rest→orphan/miss on entry + settlement "balance:0" reject on
+exit (dead); cheap-only = revert risk + thinner book → more kills; bigger size = walks the thin book; software
+latency = pre-warm/warm-connection/event-driven already done, the ~10ms Ireland→London leg is physical.
+
+**FINAL (reconfirmed): structurally uncapturable at our latency/location → PARK.** The backtest edge is
+paper-real but assumes a fill quality we cannot achieve from eu-west-1 against London-co-located competition.
+**Reusable lesson:** any taker-sniping strategy whose backtest assumes ~100% fill MUST be re-evaluated assuming
+you only fill the *winner's-curse subset* (the signals faster informed players declined) — otherwise the backtest
+systematically lies. Real money locked off again (PM_TRADER_LIVE=0).
