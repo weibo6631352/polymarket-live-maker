@@ -256,6 +256,7 @@ int main() {
     const double CHEAP_MAX = env_d("SNIPE_CHEAP_MAX", 0.55);  // only enter the CHEAP favored side (max lag = max edge)
     const long HOLD_MS = static_cast<long>(env_d("SNIPE_HOLD_MS", 1500));  // scalp hold before selling the bid
     const long MAX_HOLD_MS = static_cast<long>(env_d("SNIPE_MAX_HOLD_MS", 8000));  // HARD force-exit even on a stale book
+    const long GIVEUP_MS = static_cast<long>(env_d("SNIPE_GIVEUP_MS", 20000));  // catch-all: abandon a sell stuck > this (any reason)
     const long COOLDOWN_MS = static_cast<long>(env_d("SNIPE_COOLDOWN_MS", 2000));  // min gap after an exit before re-entry
     const double MAX_LOSS = env_d("SNIPE_MAX_LOSS", 3.0);  // realized-loss kill-switch: stop entering once pnl <= -MAX_LOSS
     const bool LIVE = (std::getenv("PM_TRADER_LIVE") && std::string(std::getenv("PM_TRADER_LIVE")) == "1") &&
@@ -370,11 +371,12 @@ int main() {
                 } else {
                     std::printf("[SELL-RETRY-LIVE] %s status=%s http=%d resp=%s\n",
                                 pos.up ? "Up" : "Down", st.c_str(), http, resp.substr(0, 140).c_str());
-                    // window RESOLVED -> token dead -> position settled to 0/1. STOP the infinite retry; mark flat.
-                    if (resp.find("invalid token") != std::string::npos) {
-                        pnl -= pos.entry_ask * pos.shares;  // conservative: the cheap (lagging) side likely resolved to 0
-                        std::printf("[RESOLVED-LIVE] %s token dead — settled by resolution, assume loss $%.3f cumPnL=$%+.3f\n",
-                                    pos.up ? "Up" : "Down", pos.entry_ask * pos.shares, pnl);
+                    // GIVE UP the retry if: window resolved (token dead) OR stuck > GIVEUP_MS (catch-all, ANY reason).
+                    // Guarantees the bot can never freeze on a position > GIVEUP_MS regardless of the failure cause.
+                    if (resp.find("invalid token") != std::string::npos || t - pos.entry_t > GIVEUP_MS) {
+                        pnl -= pos.entry_ask * pos.shares;  // conservative: assume the position was lost (resolved/stranded)
+                        std::printf("[GIVEUP-LIVE] %s abandoned after %ldms (resp=%.40s) assume loss $%.3f cumPnL=$%+.3f\n",
+                                    pos.up ? "Up" : "Down", t - pos.entry_t, resp.c_str(), pos.entry_ask * pos.shares, pnl);
                         pos = Position{}; last_exit = t; armed = false;
                     }
                 }
