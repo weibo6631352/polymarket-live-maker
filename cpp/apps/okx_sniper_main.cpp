@@ -335,10 +335,13 @@ int main() {
                         // FAK (fill-and-kill): takes what's immediately available, cancels the rest — it can NEVER
                         // rest as a live order, so a buy that returns filled=0 truly bought nothing (no async orphan).
                         // A GTC marketable buy that didn't cross rests, later fills async, and orphans (live-caught bug).
+                        static const std::string OT = std::getenv("SNIPE_ORDER_TYPE") ? std::getenv("SNIPE_ORDER_TYPE") : "FAK";
                         const auto r = sub({{"action", "PLACE"}, {"token_id", fav}, {"side", "BUY"},
-                                            {"price", buy_px}, {"size", SHARES}, {"order_type", "FAK"}});
+                                            {"price", buy_px}, {"size", SHARES}, {"order_type", OT}});
                         st = r.value("status", std::string());
                         got = r.value("filled", 0.0);   // with FAK this is the DEFINITIVE fill (0..SHARES), not a snapshot
+                        std::printf("[BUY-RESP] ot=%s filled=%.4f status=%s http=%d resp=%.220s\n", OT.c_str(), got,
+                                    st.c_str(), r.value("http", 0), r.value("resp", std::string()).c_str());
                         ok_buy = (st != "REJECTED" && st != "ERROR") && got >= 1.0;
                     }
                     // sell EXACTLY what filled (floor 0.01 to dodge balance-rounding rejects) — selling the intended
