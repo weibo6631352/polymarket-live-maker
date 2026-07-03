@@ -28,6 +28,7 @@ GTC 假死单成为孤儿仓;结算可见性滞后打崩平仓与风控;scalp �
 | 12 | 奖励结算 | 日结;κ = 真实结算/毛估 ≈ 0.237,但测量窗仅 47min 且落在 bug 期,健康 κ 可能 0.3-0.5 | `/rewards/user/total` 为准 | reward-model-calibration + 2026-07-03 审计 |
 | 12b | **成交带时间戳(致命陷阱,实证 2026-07-03)** | **data-api `/trades` 的 `timestamp` = Polygon 区块(结算)时间,不是撮合时间:滞后撮合 +2~6s(众数 +3s;拥堵更糟)** | RPC 逐笔核对 12/12 完全等于区块时间戳;此假象曾制造出 +$4.36/窗的假 maker 边(校正后 −$1.59,t=−9.3) | 任何用 tape 时间戳的回测必须先加 2-6s 延迟建模,否则必然说谎 |
 | 12c | data-api `/trades` 分页 | — | 新→旧排序 + 静默截断 limit=1000 + offset 硬顶 10000;分页不彻底会制造"安静窗口前视边"(曾造出假 t=5.8) | 必须 offset 分页到穷尽 + 校验每窗完整性 |
+| 12d | **CLOB `/data/trades` 顶层字段 = TAKER 视角(幻影库存根源,实证 2026-07-03)** | — | 顶层 `asset_id/size/price` 是 taker 的(对侧 token + taker 总量 + 跨 maker 混合均价);**maker 的真实成交在 `maker_orders[]` 里**(按 `maker_address` 过滤,取 `matched_amount/price/asset_id/side`)。首笔 tail-vendor 实成交实锤:我挂 BUY NO 15@0.953,taker 买 YES 20@0.05,顶层直接记账 = 错 token + 多 5 股(余额差 15×0.953 证伪)。极可能是 2026-06 两次 phantom-inventory/孤立事故的根 | `extract_new_fills(maker_lc)` 已修 + 实录行锁测试;凡按 maker 记账必须走 maker_orders 腿 |
 | 13 | 撤单周期(多池串行) | 旧 Python N=45 池 ~104-150s/轮(致命);C++ 重写后见 pmm 基准 | — | PERFORMANCE-AND-OPS.md:41-47 |
 
 ## 二、未知项 + 测量方案(按当前活线索排序)

@@ -1,7 +1,8 @@
 # 预编译 Fast-DDS 动态库(入 git,消除部署机的 DDS 源码编译)
 
-`fastdds-<版本>-<os>-<arch>.tar.gz` = 完整安装前缀(`include/ lib/ lib64/ share/`,`.so` 已
-strip)。`WITH_TELEMETRY=ON` 时 CMake 自动匹配 `<CMAKE_SYSTEM_NAME>-<CMAKE_SYSTEM_PROCESSOR>`
+`fastdds-<版本>-<os>-<arch>.tar.gz` = 完整安装前缀(`include/ lib/ lib64/ share/ bin/ tools/`,
+`.so` 已 strip;bin 必须带 —— foonathan 的 cmake config 引用 `bin/nodesize_dbg`,缺了 configure
+直接失败)。`WITH_TELEMETRY=ON` 时 CMake 自动匹配 `<CMAKE_SYSTEM_NAME>-<CMAKE_SYSTEM_PROCESSOR>`
 (小写)解包到 `build/fastdds-prebuilt/` 并接入 `CMAKE_PREFIX_PATH` —— 盒子上那套 292M、数十分钟
 的 `~/dds-build` 源码构建只在**升级 Fast-DDS 版本**时才需要。
 
