@@ -25,3 +25,7 @@ tar -C /tmp/ddspkg/prefix -czf fastdds-<ver>-linux-x86_64.tar.gz .
 
 Mac 本地默认 `WITH_TELEMETRY=OFF`(no-op publisher,零依赖),故只提供 linux-x86_64;需要 Mac
 遥测时按上法产 `fastdds-<ver>-darwin-arm64.tar.gz` 放进本目录即可,CMake 自动匹配。
+
+盒子(Amazon Linux)**全新** configure 必须指定 gcc14(系统默认 gcc 缺 `<format>`):
+`CC=/usr/bin/gcc14-gcc CXX=/usr/bin/gcc14-g++ cmake -S cpp -B cpp/build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_TELEMETRY=ON`
+(现存 `cpp/build/` 已缓存编译器,增量构建不受影响。)
