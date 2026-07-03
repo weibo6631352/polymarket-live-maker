@@ -290,6 +290,11 @@ target_link_libraries(review-report PRIVATE pmm_core)
 add_executable(order-smoke apps/order_smoke_main.cpp)
 target_link_libraries(order-smoke PRIVATE pmm_core)
 
+# ---- tail-seller: up-tail premium seller (GTC BUY NO, hold to resolution; dry by default,
+# double-gated PM_TRADER_LIVE+TS_ARM; hard caps on order count + notional) ----
+add_executable(tail-seller apps/tail_seller_main.cpp)
+target_link_libraries(tail-seller PRIVATE pmm_core)
+
 # ---- 只读校验: balance-check (打印签名地址 + 查 CLOB 抵押余额; 零下单) ----
 add_executable(balance-check apps/balance_check_main.cpp)
 target_link_libraries(balance-check PRIVATE pmm_core)
