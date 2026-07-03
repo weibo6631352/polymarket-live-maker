@@ -55,8 +55,6 @@ public:
     std::tuple<Market, OrderBook, int> get_trade_context(const std::string& slug_or_id,
                                                          const std::string& outcome);
 
-    // 原始 gamma /markets 查询 (tail_vendor 的窗口扫描用); 返回 JSON 数组, 失败返回空数组。
-    nlohmann::json gamma_markets_raw(const std::vector<std::pair<std::string, std::string>>& params);
     // 原始 gamma /events 查询 (tail_vendor 按 series_id 精确扫描用); 返回 JSON 数组, 失败空数组。
     nlohmann::json gamma_events_raw(const std::vector<std::pair<std::string, std::string>>& params);
 

@@ -52,11 +52,8 @@ std::optional<Candidate> parse_candidate(const nlohmann::json& m, double now_uni
 
     const std::string coin = coin_of(sq);
     if (coin.empty()) return std::nullopt;
-    if (contains_any(sq, {"up-or-down", "up or down"})) return std::nullopt;  // 微市场 (双向已判死)
-    // touch 家族历史定价公允 -> 跳过 ("above/greater ... on <date>" 是 terminal, 保留)。
-    if (contains_any(sq, {"hit ", "-hit-", "reach", "dip", "all-time-high", "all time high"}))
-        return std::nullopt;
-    // 只做上行尾: 需要向上方向词, 且不含向下方向词。
+    // 只做上行尾: 需要向上方向词, 且不含向下方向词。这同时天然排除 touch 家族
+    // ("reach/hit/dip" 无上行词) 与微市场 ("up or down" 无上行词) — 无需单列检查。
     if (contains_any(sq, {"below", "less than", "or-lower", "or lower", "dip"})) return std::nullopt;
     if (!contains_any(sq, {"above", "greater than", "-greater-", "or-higher", "or higher"}))
         return std::nullopt;
