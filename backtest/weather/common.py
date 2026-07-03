@@ -164,7 +164,8 @@ def parse_resolution_source(description: str) -> dict:
     unit = "F" if "degrees Fahrenheit" in d else "C"
     semantics = "floor" if "one decimal place" in d else "round"
 
-    m = re.search(r"wunderground\.com/history/daily/(?:[a-z0-9\-]+/)+([A-Z][A-Za-z0-9]{3})", d)
+    # path segments may be percent-encoded (Ankara: /tr/%C3%A7ubuk/LTAC) — allow anything
+    m = re.search(r"wunderground\.com/history/daily/(?:[^\s/]+/)+([A-Z][A-Za-z0-9]{3})(?![A-Za-z0-9])", d)
     if m:
         return {"kind": "wunderground", "icao": m.group(1).upper(), "unit": unit,
                 "semantics": semantics}
