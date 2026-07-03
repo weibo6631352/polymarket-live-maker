@@ -93,6 +93,8 @@ public:
                                                          bool invert_side);
     // 诊断: 用不同 query 打 /data/trades, 返回每种的 http 状态 + 原始 body 片段 (查 fill 检测用)。
     nlohmann::json debug_trades();
+    // 诊断: 最近 n 条完整原始 trade 行 (含 maker_orders[]) — fill 记账问题的第一现场。
+    nlohmann::json recent_trades_raw(std::size_t n);
     // 真实奖励感知: /rewards/user/markets (按 date 查真实 earnings + earning_percentage + 配置) +
     // /rewards/user/percentages (实时占比 {cond:%})。date 空 = 当天。L2 鉴权, 只读。
     nlohmann::json query_rewards(const std::string& date = "") override;

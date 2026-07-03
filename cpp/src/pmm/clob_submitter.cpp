@@ -706,6 +706,17 @@ std::vector<json> ClobSubmitter::extract_new_fills(const json& data, std::option
     return out;
 }
 
+json ClobSubmitter::recent_trades_raw(std::size_t n) {
+    const json data = fetch_trades_raw();
+    if (!data.is_array()) return json::array();
+    json out = json::array();
+    for (const auto& t : data) {
+        if (out.size() >= n) break;
+        out.push_back(t);
+    }
+    return out;
+}
+
 json ClobSubmitter::debug_trades() {
     const std::string path = "/data/trades";
     std::string maker_lc = creds_.maker;

@@ -39,6 +39,10 @@ int main(int argc, char** argv) {
         std::printf("poll_fills() returned %zu trade(s):\n", fills.size());
         for (const auto& f : fills) std::printf("  %s\n", f.dump().c_str());
     }
+    if (argc > 1 && std::string(argv[1]) == "raw") {
+        // 诊断: 最近 3 条完整原始 trade 行 (含 maker_orders[]) — 核对 maker 腿的真实成交口径。
+        std::printf("recent_trades_raw:\n%s\n", sub.recent_trades_raw(3).dump(2).c_str());
+    }
     if (argc > 1 && std::string(argv[1]) == "debug") {
         // 诊断: /data/trades 各 query 变体的 http+count+body (定位 fill 检测查不到的原因)。
         std::printf("debug_trades:\n%s\n", sub.debug_trades().dump(2).c_str());
