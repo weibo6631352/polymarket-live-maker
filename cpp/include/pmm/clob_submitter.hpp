@@ -87,10 +87,13 @@ public:
     std::vector<nlohmann::json> fills_since(const std::string& from_id);
     // 纯函数 (可测): 从 newest-first 的 trades 数组取比 last_id 更新的成交, 排除 own taker。
     // 副作用: 把 last_id 推进到本轮最新一笔。break 必须对"进入时的旧游标"比, 不能对循环里刚更新的。
+    // maker_lc 非空 → 按 maker_orders[] 过滤出我们的腿 (matched_amount/price/asset 的 MAKER 口径;
+    // 顶层字段是 taker 视角, 直接用会产生幻影库存)。空 → 旧顶层口径 (兜底/纯 taker 场景)。
     static std::vector<nlohmann::json> extract_new_fills(const nlohmann::json& data,
                                                          std::optional<std::string>& last_id,
                                                          const std::set<std::string>& own_taker,
-                                                         bool invert_side);
+                                                         bool invert_side,
+                                                         const std::string& maker_lc = "");
     // 诊断: 用不同 query 打 /data/trades, 返回每种的 http 状态 + 原始 body 片段 (查 fill 检测用)。
     nlohmann::json debug_trades();
     // 诊断: 最近 n 条完整原始 trade 行 (含 maker_orders[]) — fill 记账问题的第一现场。

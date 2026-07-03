@@ -57,7 +57,7 @@ def main():
             token_note[e["resp"].get("token_id", "")] = e.get("note", "")
         elif ev == "cancel":
             n_cancel += 1
-        elif ev in ("fill", "fill_recovered"):
+        elif ev in ("fill", "fill_recovered", "fill_corrected"):
             f = e.get("fill", {})
             if f.get("side") != "BUY":
                 continue
@@ -76,6 +76,13 @@ def main():
     if not fills:
         print("no fills yet — resting quotes only; premium accrues when lottery buyers cross.")
         return
+
+    # 只认下过单的 token: 修好的 maker 口径下, 合法 fill 一定落在我们挂过的 token 上;
+    # 未挂单 token 的 fill = 旧 taker-视角 bug 的残留行 (对侧 token) 或异常 — 跳过并示警。
+    for tok in [t for t in fills if t not in token_note]:
+        print(f"⚠ skipping fill on never-placed token {tok[:20]}… "
+              f"({fills[tok]['shares']:.1f} sh — stale taker-view row or manual activity; investigate)")
+        del fills[tok]
 
     tot_shares = tot_cost = tot_prem = tot_ev = 0.0
     realized = 0.0

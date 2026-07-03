@@ -648,20 +648,24 @@ json ClobSubmitter::fetch_trades_raw() {
 std::vector<json> ClobSubmitter::poll_fills() {
     const json data = fetch_trades_raw();
     if (!data.is_array()) return {};
-    return extract_new_fills(data, last_trade_id_, own_taker_ids_, invert_side_);
+    std::string maker_lc = creds_.maker;
+    for (char& c : maker_lc) c = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
+    return extract_new_fills(data, last_trade_id_, own_taker_ids_, invert_side_, maker_lc);
 }
 
 std::vector<json> ClobSubmitter::fills_since(const std::string& from_id) {
     if (from_id.empty()) return {};
     const json data = fetch_trades_raw();
     if (!data.is_array()) return {};
+    std::string maker_lc = creds_.maker;
+    for (char& c : maker_lc) c = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
     std::optional<std::string> cur = from_id;
-    return extract_new_fills(data, cur, own_taker_ids_, invert_side_);
+    return extract_new_fills(data, cur, own_taker_ids_, invert_side_, maker_lc);
 }
 
 std::vector<json> ClobSubmitter::extract_new_fills(const json& data, std::optional<std::string>& last_id,
                                                    const std::set<std::string>& own_taker,
-                                                   bool invert_side) {
+                                                   bool invert_side, const std::string& maker_lc) {
     std::vector<json> out;
     if (!data.is_array()) return out;
     // 进入本轮时的旧游标 (上一轮的最新一笔)。break 必须对它比 —— 不能对循环里刚被推进的 last_id 比,
@@ -689,6 +693,30 @@ std::vector<json> ClobSubmitter::extract_new_fills(const json& data, std::option
             }
         }
         if (own) continue;
+        // ---- maker 口径 (maker_lc 给定且行内有 maker_orders): 顶层 size/price/asset 是 TAKER 视角
+        // (对侧 token + taker 总量 + 混合均价) — 直接用它记账 = 幻影库存 (2026-07-03 实测: 我们挂
+        // BUY NO 15@0.953, taker 买 YES 20@0.05, 顶层多记 5 股且 token 是对侧)。真实成交 = 我们在
+        // maker_orders[] 里的腿: matched_amount/price/asset_id/side 全部无歧义, 不需要 invert。
+        if (!maker_lc.empty()) {
+            if (const json* mos = ju::find(t, "maker_orders"); mos != nullptr && mos->is_array()) {
+                for (const auto& mo : *mos) {
+                    std::string ma;
+                    if (const json* v = ju::find(mo, "maker_address")) ma = ju::to_str(*v);
+                    for (char& c : ma) c = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
+                    if (ma != maker_lc) continue;
+                    json f;
+                    f["id"] = tid;
+                    if (const json* v = ju::find(mo, "order_id")) f["order_id"] = ju::to_str(*v);
+                    f["token_id"] = (ju::find(mo, "asset_id") != nullptr) ? ju::to_str(*ju::find(mo, "asset_id")) : "";
+                    f["side"] = (ju::find(mo, "side") != nullptr) ? upper(ju::to_str(*ju::find(mo, "side"))) : "";
+                    f["size"] = (ju::find(mo, "matched_amount") != nullptr) ? ju::to_double(*ju::find(mo, "matched_amount")) : 0.0;
+                    f["price"] = (ju::find(mo, "price") != nullptr) ? ju::to_double(*ju::find(mo, "price")) : 0.0;
+                    out.push_back(std::move(f));
+                }
+                continue;  // 有 maker_orders 的行不再走顶层口径 (无我们的腿 = 纯 taker 行, 跳过)
+            }
+        }
+        // ---- 顶层口径 (兜底: 无 maker 过滤基准或行内无 maker_orders 的旧 schema) ----
         std::string side;
         if (const json* v = ju::find(t, "side")) side = upper(ju::to_str(*v));
         if (invert_side) side = (side == "BUY") ? "SELL" : "BUY";

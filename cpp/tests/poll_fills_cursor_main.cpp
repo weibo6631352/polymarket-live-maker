@@ -59,6 +59,46 @@ int main() {
     auto r5 = ClobSubmitter::extract_new_fills(d6, cur3, own, true);
     check(r5.size() == 1 && r5[0].value("side", std::string{}) == "SELL", "invert_side flips BUY->SELL");
 
+    // 6. maker 口径 (2026-07-03 实录 trade 1a52336e, 字段为 string): 顶层是 taker 视角 (对侧 YES token,
+    //    taker 总量 20, 混合价 0.05) — 我们的真实腿在 maker_orders[]: BUY NO 15@0.953。老口径把 20 股
+    //    记到对侧 token 上 (幻影库存, 实测余额差=15×0.953 证伪); 新口径必须只取我们的腿, 且不套 invert。
+    json real = json::array({json{
+        {"id", "1a52336e"},
+        {"asset_id", "YES_TOK"},
+        {"side", "BUY"},
+        {"size", "20"},
+        {"price", "0.05"},
+        {"trader_side", "MAKER"},
+        {"taker_order_id", "0x9fe4"},
+        {"maker_orders", json::array({
+            json{{"asset_id", "NO_TOK"}, {"maker_address", "0x78dEAbCd"}, {"matched_amount", "15"},
+                 {"order_id", "0xadec"}, {"outcome", "No"}, {"price", "0.953"}, {"side", "BUY"}},
+            json{{"asset_id", "NO_TOK"}, {"maker_address", "0x6Fd0"}, {"matched_amount", "5"},
+                 {"order_id", "0x87b9"}, {"outcome", "No"}, {"price", "0.941"}, {"side", "BUY"}},
+        })}}});
+    std::optional<std::string> cur4;
+    auto r6 = ClobSubmitter::extract_new_fills(real, cur4, own, /*invert=*/true, "0x78deabcd");
+    check(r6.size() == 1, "maker view: exactly our one leg (not taker total, not the other maker)");
+    check(r6.size() == 1 && r6[0].value("token_id", std::string{}) == "NO_TOK" &&
+              r6[0].value("size", 0.0) == 15.0 && r6[0].value("price", 0.0) == 0.953 &&
+              r6[0].value("side", std::string{}) == "BUY" &&
+              r6[0].value("order_id", std::string{}) == "0xadec",
+          "maker view: our leg's asset/size/price/side/order_id (invert NOT applied to explicit legs)");
+    check(cur4 && *cur4 == "1a52336e", "maker view: cursor still advances per-trade");
+
+    // 7. maker 口径下纯 taker 行 (maker_orders 全是别人) → 0 笔。
+    std::optional<std::string> cur5;
+    auto r7 = ClobSubmitter::extract_new_fills(real, cur5, own, false, "0xnobody");
+    check(r7.size() == 0, "maker view: trade with no leg of ours emits nothing");
+
+    // 8. maker_lc 给定但行无 maker_orders (旧 schema) → 顶层兜底口径仍工作。
+    json legacy = json::array({tr("t8", "A", "BUY")});
+    std::optional<std::string> cur6;
+    auto r8 = ClobSubmitter::extract_new_fills(legacy, cur6, own, false, "0x78deabcd");
+    check(r8.size() == 1 && r8[0].value("token_id", std::string{}) == "A" &&
+              r8[0].value("size", 0.0) == 10.0,
+          "maker view: rows without maker_orders fall back to top-level fields");
+
     std::printf(g_fail ? "POLL_FILLS CURSOR: FAIL=%d\n" : "POLL_FILLS CURSOR: ALL PASS\n", g_fail);
     return g_fail;
 }
