@@ -169,6 +169,7 @@ add_library(pmm_core STATIC
     src/pmm/events.cpp
     src/pmm/analytics.cpp
     src/pmm/api.cpp
+    src/pmm/tail_vendor.cpp
     src/pmm/rewards.cpp
     src/pmm/portfolio.cpp
     src/pmm/maker_live.cpp
@@ -294,6 +295,12 @@ target_link_libraries(order-smoke PRIVATE pmm_core)
 # double-gated PM_TRADER_LIVE+TS_ARM; hard caps on order count + notional) ----
 add_executable(tail-seller apps/tail_seller_main.cpp)
 target_link_libraries(tail-seller PRIVATE pmm_core)
+
+# ---- tail-vendor: 常驻系统性上行尾卖方 (tail-seller 泛化; 纯函数决策核 + gamma 扫描循环) ----
+add_executable(tail-vendor apps/tail_vendor_main.cpp)
+target_link_libraries(tail-vendor PRIVATE pmm_core)
+add_executable(pmm_tail_vendor_test tests/tail_vendor_test_main.cpp)
+target_link_libraries(pmm_tail_vendor_test PRIVATE pmm_core)
 
 # ---- 只读校验: balance-check (打印签名地址 + 查 CLOB 抵押余额; 零下单) ----
 add_executable(balance-check apps/balance_check_main.cpp)

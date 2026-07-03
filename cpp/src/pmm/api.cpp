@@ -241,6 +241,15 @@ double PolymarketClient::chain_position_value(const std::string& user) {
     return total;
 }
 
+json PolymarketClient::gamma_markets_raw(const std::vector<std::pair<std::string, std::string>>& params) {
+    try {
+        const json d = gamma_get("/markets", params);
+        return d.is_array() ? d : json::array();
+    } catch (...) {
+        return json::array();
+    }
+}
+
 json PolymarketClient::gamma_get(const std::string& path, const Params& params) {
     const net::HttpResponse r = gamma_.Get(path + build_query(params));
     if (r.status == 0) throw ApiError("Gamma API request failed");
