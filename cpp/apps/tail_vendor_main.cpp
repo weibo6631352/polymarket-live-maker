@@ -195,15 +195,18 @@ int main() {
             }
         }
 
-        // ---- 4) 新报单 ----
+        // ---- 4) 新报单 (placed_notional: 同一轮内的累计, 否则总上限在循环内失效) ----
+        double placed_notional = 0.0;
         for (const auto& [tok, c] : cands) {
             if (ours.count(tok)) continue;
             if (static_cast<int>(ours.size()) >= cfg.max_orders) break;
-            const auto q = tail::decide(c, cfg, deployed_coin[c.coin], deployed_total);
+            const auto q = tail::decide(c, cfg, deployed_coin[c.coin],
+                                        deployed_total + placed_notional);
             if (!q) continue;
             if (!armed) {
                 jlog(lf, {{"ev", "dry_place"}, {"note", q->note}, {"no_price", q->no_price},
                           {"size", q->size}, {"sell_yes_at", 1.0 - q->no_price}});
+                placed_notional += q->no_price * q->size;  // dry 同样累计, 输出如实反映上限
                 continue;
             }
             sub->warm_token(tok);
@@ -214,6 +217,7 @@ int main() {
             if (r.value("status", "") == "PLACED") {
                 ours[tok] = {q->no_price, q->size, c.coin, c.slug};
                 deployed_coin[c.coin] += q->no_price * q->size;
+                placed_notional += q->no_price * q->size;
                 consecutive_rejects = 0;
             } else if (++consecutive_rejects >= 3) {
                 jlog(lf, {{"ev", "halt"}, {"why", "3 consecutive rejects — investigate"}});
