@@ -78,12 +78,13 @@ HeldState load_held(std::ofstream& lf) {
         json j;
         in >> j;
         st.total = j.value("held_total", 0.0);
-        for (const auto& [k, v] : j.value("held_coin", json::object()).items())
-            st.coin[k] = v.get<double>();
-        for (const auto& [k, v] : j.value("token_coin", json::object()).items())
-            st.token_coin[k] = v.get<std::string>();
-        for (const auto& [k, v] : j.value("token_note", json::object()).items())
-            st.token_note[k] = v.get<std::string>();
+        // range-for 不给 .items() 里层的临时续命 (悬垂 UB) — 先落成具名对象再迭代。
+        const json jc = j.value("held_coin", json::object());
+        for (const auto& [k, v] : jc.items()) st.coin[k] = v.get<double>();
+        const json jtc = j.value("token_coin", json::object());
+        for (const auto& [k, v] : jtc.items()) st.token_coin[k] = v.get<std::string>();
+        const json jtn = j.value("token_note", json::object());
+        for (const auto& [k, v] : jtn.items()) st.token_note[k] = v.get<std::string>();
         st.last_trade_id = j.value("last_trade_id", "");
     } catch (...) {
         // 坏状态文件 = held 低估风险 (上限可能被突破) — 大声报, 人来查
