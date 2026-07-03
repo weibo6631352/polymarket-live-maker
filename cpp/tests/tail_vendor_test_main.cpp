@@ -127,6 +127,29 @@ int main() {
         if (a.kind == Action::Kind::kCancel && a.why == "outbid") has_outbid_cancel = true;
     assert(has_outbid_cancel);
 
-    std::printf("tail_vendor: 20/20 PASS\n");
+    // ---- sheet 模式: 解析 + 校验 ----
+    // 21) 正常解析
+    json sj = json::array({{{"token_id", "123"}, {"price", 0.97}, {"size", 10.0}, {"note", "a"}},
+                           {{"token_id", "456"}, {"price", 0.95}, {"size", 20.0}}});
+    auto sh = parse_sheet(sj);
+    assert(sh && sh->size() == 2 && (*sh)[0].no_price == 0.97 && (*sh)[1].note.empty());
+    // 22) 类型错 -> 整体失败 (不静默跳行)
+    json sbad = json::array({{{"token_id", "123"}, {"price", "0.97"}, {"size", 10.0}}});
+    assert(!parse_sheet(sbad));
+    // 23) 校验通过
+    assert(!validate_sheet(*sh, cfg).has_value());
+    // 24) 价格带 veto (买 YES 价被拒 — 防止把 YES 单误写成 NO 单)
+    json slow = json::array({{{"token_id", "123"}, {"price", 0.05}, {"size", 10.0}}});
+    assert(validate_sheet(*parse_sheet(slow), cfg).has_value());
+    // 25) 总抵押 veto
+    json sbig = json::array({{{"token_id", "123"}, {"price", 0.97}, {"size", 40.0}},
+                             {{"token_id", "456"}, {"price", 0.97}, {"size", 40.0}}});
+    assert(validate_sheet(*parse_sheet(sbig), cfg).has_value());  // 77.6 > 60
+    // 26) 重复 token veto
+    json sdup = json::array({{{"token_id", "123"}, {"price", 0.97}, {"size", 10.0}},
+                             {{"token_id", "123"}, {"price", 0.96}, {"size", 10.0}}});
+    assert(validate_sheet(*parse_sheet(sdup), cfg).has_value());
+
+    std::printf("tail_vendor: 26/26 PASS\n");
     return 0;
 }

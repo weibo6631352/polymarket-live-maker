@@ -87,4 +87,18 @@ struct Action {
                                        const std::map<std::string, double>& held_coin,
                                        double held_total, const Config& cfg);
 
+// ---- sheet 模式: 精确执行人工指定清单 (绕过扫描/decide, 但硬顶与安全校验同一套) ----
+struct SheetEntry {
+    std::string no_token;
+    double no_price{0};
+    double size{0};
+    std::string note;
+};
+// JSON 数组 [{"token_id","price","size","note"}] -> 清单; 字段缺失/类型错的行使解析整体失败 (nullopt)。
+[[nodiscard]] std::optional<std::vector<SheetEntry>> parse_sheet(const nlohmann::json& j);
+// 校验: 条数/总抵押 ≤ cfg 上限, 价格 ∈ [0.80, 0.995] (买 NO 带), 股数 ∈ [min_shares, 100],
+// token 全数字且不重复。返回 nullopt = 通过, 否则错误描述。
+[[nodiscard]] std::optional<std::string> validate_sheet(const std::vector<SheetEntry>& sheet,
+                                                        const Config& cfg);
+
 }  // namespace pmm::tail

@@ -8,8 +8,10 @@
 // 总抵押 $250 / 单币 $100 / 单笔 $25 / 挂单数 24; STOP_TAIL_VENDOR 文件急停 (撤全部+退出);
 // 连续 3 次下单被拒 -> 自动停机保全现场。
 //
-//   ./tail-vendor                # dry: 打印本轮会做什么
-//   PM_TRADER_LIVE=1 TV_ARM=1 TV_TOTAL_USD=50 ./tail-vendor    # 试验档
+//   ./tail-vendor                       # 扫描模式 dry: 打印本轮会做什么
+//   ./tail-vendor orders.json           # sheet 模式 dry: 校验+打印人工清单
+//   PM_TRADER_LIVE=1 TV_ARM=1 TV_TOTAL_USD=50 ./tail-vendor [orders.json]   # armed
+// orders.json: [{"token_id":"...","price":0.97,"size":10,"note":"slug"}] (price = BUY NO 价)
 // env: TV_TOTAL_USD TV_PER_COIN_USD TV_PER_ORDER_USD TV_MAX_ORDERS TV_SCAN_S TV_FUNDER
 #include <atomic>
 #include <chrono>
@@ -61,9 +63,86 @@ double env_low(const char* name, double dflt, double ceil) {
     return std::min(dflt, ceil);
 }
 
+// 下单前活盘复核: gamma/清单价可能陈旧; 若真实 NO ask <= 我们的价, GTC 会过价变 taker。
+bool would_cross(pmm::PolymarketClient& client, const std::string& no_token, double no_price) {
+    const auto book = client.get_order_book(no_token);
+    double live_no_ask = 1.0;
+    for (const auto& lvl : book.asks) live_no_ask = std::min(live_no_ask, lvl.price);
+    return live_no_ask <= no_price + 1e-9;
+}
+
+// ---- sheet 模式: 精确执行人工清单 (不扫描/不撤补; 硬顶+活盘复核+监控与扫描模式同一套) ----
+int run_sheet(const char* path, const pmm::tail::Config& cfg, bool armed,
+              pmm::PolymarketClient& client, pmm::clob::ClobSubmitter* sub, std::ofstream& lf) {
+    nlohmann::json j;
+    {
+        std::ifstream in(path);
+        if (!in) { std::fprintf(stderr, "cannot open %s\n", path); return 2; }
+        try { in >> j; } catch (...) { std::fprintf(stderr, "bad json\n"); return 2; }
+    }
+    const auto sheet = pmm::tail::parse_sheet(j);
+    if (!sheet) { std::fprintf(stderr, "sheet parse failed (need [{token_id,price,size,note}])\n"); return 2; }
+    if (const auto err = pmm::tail::validate_sheet(*sheet, cfg)) {
+        std::fprintf(stderr, "sheet VETO: %s\n", err->c_str());
+        return 3;
+    }
+    double notional = 0.0;
+    for (const auto& e : *sheet) notional += e.no_price * e.size;
+    jlog(lf, {{"ev", "sheet_start"}, {"n", sheet->size()}, {"notional", notional}, {"armed", armed}});
+    if (!armed) {
+        for (const auto& e : *sheet)
+            jlog(lf, {{"ev", "dry_place"}, {"note", e.note}, {"no_price", e.no_price}, {"size", e.size}});
+        return 0;
+    }
+    if (auto bal = sub->usdc_balance()) {
+        jlog(lf, {{"ev", "balance"}, {"usdc", *bal}});
+        if (*bal < notional) { jlog(lf, {{"ev", "abort"}, {"why", "balance < sheet notional"}}); return 1; }
+    }
+    (void)sub->poll_fills();  // prime cursor
+    int rejects = 0;
+    for (const auto& e : *sheet) {
+        if (would_cross(client, e.no_token, e.no_price)) {
+            jlog(lf, {{"ev", "stale_quote_skip"}, {"note", e.note}, {"our_no", e.no_price}});
+            continue;
+        }
+        sub->warm_token(e.no_token);
+        const json r = (*sub)({{"action", "PLACE"}, {"token_id", e.no_token}, {"side", "BUY"},
+                               {"price", e.no_price}, {"size", e.size}});
+        jlog(lf, {{"ev", "place"}, {"note", e.note}, {"no_price", e.no_price}, {"size", e.size},
+                  {"resp", r}});
+        if (r.value("status", "") != "PLACED" && ++rejects >= 3) {
+            jlog(lf, {{"ev", "halt"}, {"why", "3 rejects in sheet — investigate"}});
+            return 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    }
+    // 监控: 成交/急停/心跳 (挂单驻留由 CLOB 保持; 退出不撤单, STOP 文件才撤)。
+    long long tick = 0;
+    while (g_run.load()) {
+        for (int i = 0; i < 60 && g_run.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (std::ifstream("STOP_TAIL_VENDOR").good()) break;
+        }
+        if (std::ifstream("STOP_TAIL_VENDOR").good()) {
+            jlog(lf, {{"ev", "stopfile"}});
+            for (const auto& e : *sheet)
+                jlog(lf, {{"ev", "cancel"}, {"why", "stopfile"},
+                          {"resp", (*sub)({{"action", "CANCEL_ALL"}, {"token_id", e.no_token}})}});
+            break;
+        }
+        for (const auto& f : sub->poll_fills()) jlog(lf, {{"ev", "fill"}, {"fill", f}});
+        if (++tick % 60 == 0) {
+            json bal;
+            if (auto b = sub->usdc_balance()) bal = *b;
+            jlog(lf, {{"ev", "status"}, {"open", sub->list_open_orders().size()}, {"usdc", bal}});
+        }
+    }
+    jlog(lf, {{"ev", "exit"}, {"note", "sheet orders remain resting; rerun to resume monitoring"}});
+    return 0;
+}
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     tail::Config cfg;
     cfg.total_usd = env_low("TV_TOTAL_USD", 60.0, kCeilTotalUsd);
     cfg.per_coin_usd = env_low("TV_PER_COIN_USD", 60.0, kCeilPerCoinUsd);
@@ -92,7 +171,10 @@ int main() {
     std::ofstream lf("tail_vendor_log.jsonl", std::ios::app);
     jlog(lf, {{"ev", "start"}, {"armed", armed}, {"total_usd", cfg.total_usd},
               {"per_coin_usd", cfg.per_coin_usd}, {"per_order_usd", cfg.per_order_usd},
-              {"max_orders", cfg.max_orders}, {"scan_s", scan_s}});
+              {"max_orders", cfg.max_orders}, {"scan_s", scan_s},
+              {"mode", argc > 1 ? "sheet" : "scan"}});
+
+    if (argc > 1) return run_sheet(argv[1], cfg, armed, client, sub.get(), lf);
 
     // 已成交持有的 NO 抵押 (保守按 $1/股计入; 运行中由 poll_fills 增量累加 — 持久, 不随轮清零)。
     double held_total = 0.0;
@@ -188,15 +270,8 @@ int main() {
                           {"size", a.size}, {"sell_yes_at", 1.0 - a.no_price}});
                 continue;
             }
-            // 下单前活盘复核: gamma 快照可能陈旧; 若真实 NO ask <= 我们的价, GTC 会过价变 taker
-            // (付费+坏价即成) — 跳过并记录, 下一轮用新价重议。
-            const auto book = client.get_order_book(a.no_token);
-            double live_no_ask = 1.0;
-            for (const auto& lvl : book.asks)
-                live_no_ask = std::min(live_no_ask, lvl.price);
-            if (live_no_ask <= a.no_price + 1e-9) {
-                jlog(lf, {{"ev", "stale_quote_skip"}, {"note", a.note}, {"our_no", a.no_price},
-                          {"live_no_ask", live_no_ask}});
+            if (would_cross(client, a.no_token, a.no_price)) {  // 陈旧报价防交叉 (详见 helper)
+                jlog(lf, {{"ev", "stale_quote_skip"}, {"note", a.note}, {"our_no", a.no_price}});
                 continue;
             }
             sub->warm_token(a.no_token);

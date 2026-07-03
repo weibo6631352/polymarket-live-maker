@@ -1,0 +1,3 @@
+{"armed":false,"ev":"start","max_orders":8,"mode":"sheet","per_coin_usd":60.0,"per_order_usd":20.0,"scan_s":300,"t_ms":1783070273061,"total_usd":60.0}
+{"armed":false,"ev":"sheet_start","n":1,"notional":9.5,"t_ms":1783070273061}
+{"ev":"dry_place","no_price":0.95,"note":"dry-a","size":10.0,"t_ms":1783070273061}

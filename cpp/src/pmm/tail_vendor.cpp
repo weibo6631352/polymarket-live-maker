@@ -158,4 +158,42 @@ std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
     return out;
 }
 
+std::optional<std::vector<SheetEntry>> parse_sheet(const nlohmann::json& j) {
+    if (!j.is_array() || j.empty()) return std::nullopt;
+    std::vector<SheetEntry> out;
+    for (const auto& r : j) {
+        if (!r.is_object()) return std::nullopt;
+        SheetEntry e;
+        e.no_token = r.value("token_id", "");
+        if (!r.contains("price") || !r["price"].is_number() || !r.contains("size") ||
+            !r["size"].is_number())
+            return std::nullopt;
+        e.no_price = r["price"].get<double>();
+        e.size = r["size"].get<double>();
+        e.note = r.value("note", "");
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+std::optional<std::string> validate_sheet(const std::vector<SheetEntry>& sheet, const Config& cfg) {
+    if (static_cast<int>(sheet.size()) > cfg.max_orders)
+        return "sheet size " + std::to_string(sheet.size()) + " > max_orders";
+    double notional = 0.0;
+    std::map<std::string, int> seen;
+    for (const auto& e : sheet) {
+        if (e.no_token.empty() ||
+            e.no_token.find_first_not_of("0123456789") != std::string::npos)
+            return "bad token_id (" + e.note + ")";
+        if (++seen[e.no_token] > 1) return "duplicate token (" + e.note + ")";
+        if (e.no_price < 0.80 || e.no_price > 0.995)
+            return "price outside NO-buy band [0.80, 0.995] (" + e.note + ")";
+        if (e.size < cfg.min_shares || e.size > 100) return "size outside [min,100] (" + e.note + ")";
+        notional += e.no_price * e.size;
+    }
+    if (notional > cfg.total_usd + 1e-9)
+        return "notional $" + std::to_string(notional) + " > total cap";
+    return std::nullopt;
+}
+
 }  // namespace pmm::tail
