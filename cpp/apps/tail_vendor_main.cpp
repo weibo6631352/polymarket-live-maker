@@ -291,14 +291,12 @@ int main(int argc, char** argv) {
         }
 
         // ---- 5) 心跳/权益地板 ----
-        if (tick_count % 12 == 0) {  // 每 ~1h (scan_s=300)
-            json bal;
-            if (armed)
-                if (auto b = sub->usdc_balance()) bal = *b;
-            jlog(lf, {{"ev", "status"}, {"candidates", cands.size()}, {"open", open.size()},
-                      {"held_usd", held_total}, {"usdc", bal},
-                      {"planned", actions.size()}, {"executed", executed}});
-        }
+        // 每轮心跳 (事件驱动日志与死机不可区分 — 观测性要求每轮走表); 每 ~1h 附带余额。
+        json hb = {{"ev", "scan"}, {"candidates", cands.size()}, {"open", open.size()},
+                   {"held_usd", held_total}, {"planned", actions.size()}, {"executed", executed}};
+        if (tick_count % 12 == 0 && armed)
+            if (auto b = sub->usdc_balance()) hb["usdc"] = *b;
+        jlog(lf, hb);
         ++tick_count;
         for (int i = 0; i < scan_s && g_run.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
