@@ -82,6 +82,9 @@ public:
 
     // 自上次 poll 起的真实 maker 成交: 每条 {id, token_id, side, size, price}。
     std::vector<nlohmann::json> poll_fills() override;
+    // 一次性补账: 比 from_id 更新的全部成交 (newest-first), 不动 poll_fills 的游标。
+    // from_id 空 → 返回空 (没有基准就不吞历史)。重启恢复宕机期间成交用 (调用方持久化自己的游标)。
+    std::vector<nlohmann::json> fills_since(const std::string& from_id);
     // 纯函数 (可测): 从 newest-first 的 trades 数组取比 last_id 更新的成交, 排除 own taker。
     // 副作用: 把 last_id 推进到本轮最新一笔。break 必须对"进入时的旧游标"比, 不能对循环里刚更新的。
     static std::vector<nlohmann::json> extract_new_fills(const nlohmann::json& data,
@@ -128,6 +131,7 @@ private:
     nlohmann::json cancel_all(const std::string& token_id);
     nlohmann::json flatten(const std::string& token_id, const std::string& side, double size);
 
+    nlohmann::json fetch_trades_raw();  // GET /data/trades?maker_address= → data 数组 (poll/fills_since 共用)
     std::string fetch_tick_size(const std::string& token_id);  // 缓存 300s
     bool fetch_neg_risk(const std::string& token_id);          // 缓存永久
     std::optional<double> fetch_marketable_price(const std::string& token_id, const std::string& side);

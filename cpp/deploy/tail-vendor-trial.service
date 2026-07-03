@@ -1,0 +1,25 @@
+# tail-vendor 最小份额 live 试验单元 (基座默认 DRY — 武装靠箱上 drop-in, 不进 git)。
+#
+# 安装 (箱上):
+#   cp cpp/deploy/tail-vendor-trial.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now tail-vendor-trial
+# 武装 (用户决定; drop-in 只存在于箱上, 手法同 PM key):
+#   mkdir -p /etc/systemd/system/tail-vendor-trial.service.d
+#   printf '[Service]\nEnvironment=PM_TRADER_LIVE=1 TV_ARM=1 TV_TOTAL_USD=45 TV_PER_COIN_USD=20 TV_PER_ORDER_USD=15 TV_MAX_ORDERS=6\n' \
+#     > /etc/systemd/system/tail-vendor-trial.service.d/arm.conf
+#   systemctl daemon-reload && systemctl restart tail-vendor-trial
+# 急停: touch /root/polymarket-live-maker/STOP_TAIL_VENDOR (撤全部挂单+退出; 1s 级响应)
+[Unit]
+Description=tail-vendor: systematic up-tail premium vendor (GTC BUY NO, hold to resolution)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/polymarket-live-maker
+ExecStart=/root/polymarket-live-maker/cpp/build/tail-vendor
+# 崩溃/断网自愈; 3 连拒 halt 是干净退出(code 0) → 不会被拉起, 保全现场等人查
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

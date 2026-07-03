@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <string>
@@ -56,6 +57,54 @@ void jlog(std::ofstream& f, json j) {
     f << j.dump() << "\n";
     f.flush();
     std::printf("%s\n", j.dump().c_str());
+    std::fflush(stdout);  // journald 管道是块缓冲 — 不冲则日志滞留到退出, 心跳观测性归零
+}
+
+// ---- 成交记账持久化: 重启/崩溃后 held 抵押 + fill 游标不丢 (资金硬顶跨进程生命周期有效) ----
+struct HeldState {
+    double total{0};                                    // 已成交持有的抵押 ($1/股保守)
+    std::map<std::string, double> coin;                 // 币种 -> 抵押
+    std::map<std::string, std::string> token_coin;      // 下过单的 no_token -> coin (fill 归因)
+    std::map<std::string, std::string> token_note;
+    std::string last_trade_id;                          // 已入账的最新成交 id (重启补账基准)
+};
+constexpr const char* kHeldPath = "state/tail_vendor_held.json";
+
+HeldState load_held(std::ofstream& lf) {
+    HeldState st;
+    std::ifstream in(kHeldPath);
+    if (!in) return st;
+    try {
+        json j;
+        in >> j;
+        st.total = j.value("held_total", 0.0);
+        for (const auto& [k, v] : j.value("held_coin", json::object()).items())
+            st.coin[k] = v.get<double>();
+        for (const auto& [k, v] : j.value("token_coin", json::object()).items())
+            st.token_coin[k] = v.get<std::string>();
+        for (const auto& [k, v] : j.value("token_note", json::object()).items())
+            st.token_note[k] = v.get<std::string>();
+        st.last_trade_id = j.value("last_trade_id", "");
+    } catch (...) {
+        // 坏状态文件 = held 低估风险 (上限可能被突破) — 大声报, 人来查
+        jlog(lf, {{"ev", "error"}, {"what", "held_state_corrupt — held undercounts, investigate"}});
+    }
+    return st;
+}
+
+void save_held(const HeldState& st, std::ofstream& lf) {
+    std::error_code ec;
+    std::filesystem::create_directories("state", ec);
+    const json j{{"held_total", st.total},       {"held_coin", st.coin},
+                 {"token_coin", st.token_coin},  {"token_note", st.token_note},
+                 {"last_trade_id", st.last_trade_id}};
+    const std::string tmp = std::string(kHeldPath) + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        out << j.dump();
+    }
+    std::filesystem::rename(tmp, kHeldPath, ec);
+    if (ec) jlog(lf, {{"ev", "error"}, {"what", "held_state_save"}, {"code", ec.value()}});
 }
 
 double env_low(const char* name, double dflt, double ceil) {
@@ -98,7 +147,7 @@ int run_sheet(const char* path, const pmm::tail::Config& cfg, bool armed,
         jlog(lf, {{"ev", "balance"}, {"usdc", *bal}});
         if (*bal < notional) { jlog(lf, {{"ev", "abort"}, {"why", "balance < sheet notional"}}); return 1; }
     }
-    (void)sub->poll_fills();  // prime cursor
+    // (fill 游标由 ClobSubmitter 构造时 prime; 这里再 prime 会吞掉构造→此处之间旧挂单的成交)
     int rejects = 0;
     for (const auto& e : *sheet) {
         if (would_cross(client, e.no_token, e.no_price)) {
@@ -176,17 +225,34 @@ int main(int argc, char** argv) {
 
     if (argc > 1) return run_sheet(argv[1], cfg, armed, client, sub.get(), lf);
 
-    // 已成交持有的 NO 抵押 (保守按 $1/股计入; 运行中由 poll_fills 增量累加 — 持久, 不随轮清零)。
-    double held_total = 0.0;
-    std::map<std::string, double> held_coin;
-    if (const char* funder = std::getenv("TV_FUNDER")) {
-        for (const auto& [tok, sz] : client.chain_positions(funder)) held_total += std::abs(sz);
-        jlog(lf, {{"ev", "chain_reconcile"}, {"held_shares_as_usd", held_total}});
+    // 已成交持有的 NO 抵押 (保守按 $1/股计入) — 持久账本, 重启/崩溃不清零 (资金硬顶的前提)。
+    HeldState st = load_held(lf);
+    jlog(lf, {{"ev", "held_reconcile"}, {"held_usd", st.total}, {"held_coin", st.coin},
+              {"last_trade_id", st.last_trade_id}, {"tokens", st.token_coin.size()}});
+    if (const char* funder = std::getenv("TV_FUNDER")) {  // 链上对照 (只记日志, 不改账 —
+        double chain_total = 0.0;                         // 链上含残留旧仓, 不可直接当 held)
+        for (const auto& [tok, sz] : client.chain_positions(funder)) chain_total += std::abs(sz);
+        jlog(lf, {{"ev", "chain_reconcile"}, {"chain_shares_as_usd", chain_total},
+                  {"ledger_held_usd", st.total}});
     }
-    if (armed) (void)sub->poll_fills();  // prime cursor
 
-    std::map<std::string, std::string> token_coin;  // no_token -> coin (fill 归因用)
-    std::map<std::string, std::string> token_note;
+    // 入账一笔成交: held 累加 + 游标推进 + 落盘。调用方必须按 oldest→newest 喂 (游标停在最新)。
+    auto ingest_fill = [&](const json& f, const char* ev) {
+        jlog(lf, {{"ev", ev}, {"fill", f}});
+        if (const std::string id = f.value("id", ""); !id.empty()) st.last_trade_id = id;
+        if (f.value("side", "") == "BUY") {  // 我们只 BUY NO; 非 BUY = 人工干预, 只记日志
+            const double sz = f.value("size", 0.0);
+            st.total += sz;
+            if (auto it = st.token_coin.find(f.value("token_id", "")); it != st.token_coin.end())
+                st.coin[it->second] += sz;
+        }
+        save_held(st, lf);
+    };
+    if (armed && !st.last_trade_id.empty()) {  // 宕机期间的成交补账 (newest-first → 反着喂)
+        const auto missed = sub->fills_since(st.last_trade_id);
+        for (auto it = missed.rbegin(); it != missed.rend(); ++it) ingest_fill(*it, "fill_recovered");
+    }
+
     int consecutive_rejects = 0;
     long long tick_count = 0;
 
@@ -226,32 +292,25 @@ int main(int argc, char** argv) {
         // ---- 2) 成交增量 -> 持久 held 记账 ($1/股保守); 在场挂单快照 ----
         std::vector<tail::OpenOrder> open;
         if (armed) {
-            for (const auto& f : sub->poll_fills()) {
-                jlog(lf, {{"ev", "fill"}, {"fill", f}});
-                const std::string tok = f.value("token_id", "");
-                const double sz = f.value("size", 0.0);
-                held_total += sz;
-                if (auto it = token_coin.find(tok); it != token_coin.end()) held_coin[it->second] += sz;
-            }
+            const auto fills = sub->poll_fills();  // newest-first → 反着入账 (游标停在最新)
+            for (auto it = fills.rbegin(); it != fills.rend(); ++it) ingest_fill(*it, "fill");
             for (const auto& oo : sub->list_open_orders()) {
                 tail::OpenOrder o;
                 o.no_token = oo.value("asset_id", "");
                 o.no_price = std::atof(oo.value("price", "0").c_str());
                 o.size = std::atof(oo.value("original_size", "0").c_str()) -
                          std::atof(oo.value("size_matched", "0").c_str());
-                if (auto it = token_coin.find(o.no_token); it != token_coin.end()) o.coin = it->second;
+                if (auto it = st.token_coin.find(o.no_token); it != st.token_coin.end())
+                    o.coin = it->second;
                 else if (auto ic = cands.find(o.no_token); ic != cands.end()) o.coin = ic->second.coin;
-                if (auto in = token_note.find(o.no_token); in != token_note.end()) o.note = in->second;
+                if (auto in = st.token_note.find(o.no_token); in != st.token_note.end())
+                    o.note = in->second;
                 open.push_back(std::move(o));
             }
         }
-        for (const auto& [tok, c] : cands) {  // fill 归因表随候选集更新
-            token_coin[tok] = c.coin;
-            token_note[tok] = c.slug;
-        }
 
         // ---- 3) 决策 (纯函数) -> 执行 ----
-        const auto actions = tail::plan(cands, open, held_coin, held_total, cfg);
+        const auto actions = tail::plan(cands, open, st.coin, st.total, cfg);
         int executed = 0;
         for (const auto& a : actions) {
             if (!g_run.load()) break;
@@ -281,6 +340,12 @@ int main(int argc, char** argv) {
                       {"size", a.size}, {"resp", r}});
             if (r.value("status", "") == "PLACED") {
                 consecutive_rejects = 0;
+                // fill 归因注册 (只登记真下过单的 token — 状态文件保持米粒大)
+                if (auto ic = cands.find(a.no_token); ic != cands.end()) {
+                    st.token_coin[a.no_token] = ic->second.coin;
+                    st.token_note[a.no_token] = ic->second.slug;
+                    save_held(st, lf);
+                }
             } else if (++consecutive_rejects >= 3) {
                 jlog(lf, {{"ev", "halt"}, {"why", "3 consecutive rejects — investigate"}});
                 g_run.store(false);
@@ -293,7 +358,8 @@ int main(int argc, char** argv) {
         // ---- 5) 心跳/权益地板 ----
         // 每轮心跳 (事件驱动日志与死机不可区分 — 观测性要求每轮走表); 每 ~1h 附带余额。
         json hb = {{"ev", "scan"}, {"candidates", cands.size()}, {"open", open.size()},
-                   {"held_usd", held_total}, {"planned", actions.size()}, {"executed", executed}};
+                   {"held_usd", st.total}, {"planned", actions.size()}, {"executed", executed}};
+        if (!st.coin.empty()) hb["held_coin"] = st.coin;
         if (tick_count % 12 == 0 && armed)
             if (auto b = sub->usdc_balance()) hb["usdc"] = *b;
         jlog(lf, hb);

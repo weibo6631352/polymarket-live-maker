@@ -627,30 +627,36 @@ nlohmann::json ClobSubmitter::operator()(const nlohmann::json& action) noexcept 
     return r;
 }
 
-std::vector<json> ClobSubmitter::poll_fills() {
+json ClobSubmitter::fetch_trades_raw() {
     const std::string path = "/data/trades";
     // 两个叠加的 bug 都修: (1) 必须按 ORDER MAKER 查 (sig_type=1 = funder/proxy), 不是 signer;
-    // (2) 去掉 &next_cursor=MA== —— 它让查询返回空 (诊断: 带它 0 条, 不带它 300 条)。增量靠 last_trade_id_ 截断。
+    // (2) 去掉 &next_cursor=MA== —— 它让查询返回空 (诊断: 带它 0 条, 不带它 300 条)。增量靠游标截断。
     std::string maker_lc = creds_.maker;
     for (char& c : maker_lc) c = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
     const std::string query = path + "?maker_address=" + maker_lc;
     const std::string ts = std::to_string(now_unix());
     const Resp r = http("GET", query, l2_headers("GET", path, "", ts), "");
-
-    std::vector<json> out;
-    json data;
     try {
         const json j = json::parse(r.body);
-        if (j.is_array()) {
-            data = j;
-        } else if (const json* d = ju::find(j, "data")) {
-            data = *d;
-        }
+        if (j.is_array()) return j;
+        if (const json* d = ju::find(j, "data")) return *d;
     } catch (...) {
-        return out;
     }
-    if (!data.is_array()) return out;
+    return json();
+}
+
+std::vector<json> ClobSubmitter::poll_fills() {
+    const json data = fetch_trades_raw();
+    if (!data.is_array()) return {};
     return extract_new_fills(data, last_trade_id_, own_taker_ids_, invert_side_);
+}
+
+std::vector<json> ClobSubmitter::fills_since(const std::string& from_id) {
+    if (from_id.empty()) return {};
+    const json data = fetch_trades_raw();
+    if (!data.is_array()) return {};
+    std::optional<std::string> cur = from_id;
+    return extract_new_fills(data, cur, own_taker_ids_, invert_side_);
 }
 
 std::vector<json> ClobSubmitter::extract_new_fills(const json& data, std::optional<std::string>& last_id,
