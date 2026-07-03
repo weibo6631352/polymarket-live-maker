@@ -6,8 +6,10 @@
 // 复用 PolymarketClient + ClobSubmitter。慢频策略 (分钟级) — 性能 = 少请求 + 连接复用 + 无忙等。
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -60,5 +62,29 @@ struct Quote {
 
 // 持单退出判断: true = 该撤 (带外/逼近障碍/临期)。纯函数。
 [[nodiscard]] bool should_pull(const Candidate& c, const Config& cfg);
+
+// ---- 一轮的完整决策 (纯函数, app 只执行) ----
+struct OpenOrder {
+    std::string no_token;
+    double no_price{0};
+    double size{0};      // 未成交剩余
+    std::string coin;    // 可为空 (老单无法归因 -> 只计 total)
+    std::string note;
+};
+struct Action {
+    enum class Kind { kCancel, kPlace };
+    Kind kind{Kind::kPlace};
+    std::string no_token;
+    double no_price{0};  // kPlace
+    double size{0};      // kPlace
+    std::string why;     // kCancel: left_window / pull_signal / outbid
+    std::string note;
+};
+// held_* = 已成交持有的抵押 (app 累计, $1/股保守); resting 从 open 内部推导。
+// 输出顺序: 先撤后报; 报单侧在函数内做轮内累计 (per-coin + total + max_orders), 上限永不越。
+[[nodiscard]] std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
+                                       const std::vector<OpenOrder>& open,
+                                       const std::map<std::string, double>& held_coin,
+                                       double held_total, const Config& cfg);
 
 }  // namespace pmm::tail

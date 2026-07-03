@@ -74,6 +74,58 @@ int main() {
     assert(should_pull(cp, cfg));
     assert(!should_pull(*c, cfg));
 
-    std::printf("tail_vendor: 14/14 PASS\n");
+    // ---- plan(): 一轮决策的上限/撤补语义 ----
+    std::map<std::string, Candidate> cands;
+    auto mk = [&](const char* tok, const char* coin, double bid, double ask, double days) {
+        Candidate cc = *c;
+        cc.no_token = tok; cc.coin = coin; cc.yes_bid = bid; cc.yes_ask = ask; cc.days_left = days;
+        cc.slug = tok;
+        cands[tok] = cc;
+    };
+    // 15) 总上限在一轮内被严格执行: 4 个候选 × ~$19.4, total=60 -> 只能报 3 个
+    mk("t1", "btc", 0.02, 0.03, 2); mk("t2", "eth", 0.02, 0.03, 2);
+    mk("t3", "sol", 0.02, 0.03, 2); mk("t4", "xrp", 0.02, 0.03, 2);
+    auto acts = plan(cands, {}, {}, 0.0, cfg);
+    int places = 0;
+    for (const auto& a : acts) places += (a.kind == Action::Kind::kPlace);
+    assert(places == 3);
+    // 16) held 计入总上限: 已持 $45 -> 只能再报 0 个 (45+19.4*1 <60 -> 实际 1 个? 45+19.4=64.4>60 -> 0)
+    acts = plan(cands, {}, {}, 45.0, cfg);
+    places = 0;
+    for (const auto& a : acts) places += (a.kind == Action::Kind::kPlace);
+    assert(places == 0);
+    // 17) 单币上限: 同币 4 个候选, per_coin=60 -> 3 个 (但 total=60 也是 3) -> 用 per_coin=40 验证
+    Config cfg2 = cfg; cfg2.per_coin_usd = 40; cfg2.total_usd = 200;
+    std::map<std::string, Candidate> cb;
+    for (const char* t : {"b1", "b2", "b3", "b4"}) {
+        Candidate cc = *c; cc.no_token = t; cc.coin = "btc"; cc.yes_bid = 0.02; cc.yes_ask = 0.03;
+        cc.days_left = 2; cc.slug = t; cb[t] = cc;
+    }
+    acts = plan(cb, {}, {}, 0.0, cfg2);
+    places = 0;
+    for (const auto& a : acts) places += (a.kind == Action::Kind::kPlace);
+    assert(places == 2);  // 2×19.42=38.8 <= 40; 第 3 个越限
+    // 18) 撤单释放预算: 在场 1 个 left_window 单 (不在 cands) + 预算刚好 -> 撤它并报新
+    std::vector<OpenOrder> open1 = {{"gone_tok", 0.97, 20, "btc", "old"}};
+    Config cfg3 = cfg; cfg3.total_usd = 25;  // 只够一单
+    std::map<std::string, Candidate> c1;
+    { Candidate cc = *c; cc.no_token = "n1"; cc.coin = "eth"; cc.yes_bid = 0.02; cc.yes_ask = 0.03;
+      cc.days_left = 2; cc.slug = "n1"; c1["n1"] = cc; }
+    acts = plan(c1, open1, {}, 0.0, cfg3);
+    assert(acts.size() == 2 && acts[0].kind == Action::Kind::kCancel &&
+           acts[0].why == "left_window" && acts[1].kind == Action::Kind::kPlace);
+    // 19) 留场单占预算: 在场单是活跃候选且价仍最优 -> 不撤不重报, 预算被占
+    std::vector<OpenOrder> open2 = {{"n1", 0.971, 20, "eth", "n1"}};  // sell_yes 0.029, ask 0.03 -> 仍最优
+    acts = plan(c1, open2, {}, 0.0, cfg3);
+    assert(acts.empty());
+    // 20) 被压价 -> 撤 (ask 已低于我们的隐含卖价 - tick)
+    std::vector<OpenOrder> open3 = {{"n1", 0.960, 20, "eth", "n1"}};  // 我们卖 0.040, ask 0.03 更优
+    acts = plan(c1, open3, {}, 0.0, cfg3);
+    bool has_outbid_cancel = false;
+    for (const auto& a : acts)
+        if (a.kind == Action::Kind::kCancel && a.why == "outbid") has_outbid_cancel = true;
+    assert(has_outbid_cancel);
+
+    std::printf("tail_vendor: 20/20 PASS\n");
     return 0;
 }

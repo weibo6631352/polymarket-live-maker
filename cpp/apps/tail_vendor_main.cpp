@@ -61,12 +61,6 @@ double env_low(const char* name, double dflt, double ceil) {
     return std::min(dflt, ceil);
 }
 
-struct OurOrder {
-    double no_price{0};
-    double size{0};
-    std::string coin;
-    std::string note;
-};
 }  // namespace
 
 int main() {
@@ -100,28 +94,31 @@ int main() {
               {"per_coin_usd", cfg.per_coin_usd}, {"per_order_usd", cfg.per_order_usd},
               {"max_orders", cfg.max_orders}, {"scan_s", scan_s}});
 
-    // 链上已持有的 NO 抵押 (保守按 $1/股计入总上限; 老仓无法归因币种 -> 只计 total)。
+    // 已成交持有的 NO 抵押 (保守按 $1/股计入; 运行中由 poll_fills 增量累加 — 持久, 不随轮清零)。
     double held_total = 0.0;
+    std::map<std::string, double> held_coin;
     if (const char* funder = std::getenv("TV_FUNDER")) {
         for (const auto& [tok, sz] : client.chain_positions(funder)) held_total += std::abs(sz);
         jlog(lf, {{"ev", "chain_reconcile"}, {"held_shares_as_usd", held_total}});
     }
     if (armed) (void)sub->poll_fills();  // prime cursor
 
-    std::map<std::string, OurOrder> ours;  // no_token -> order (重启时从 list_open_orders 重建)
+    std::map<std::string, std::string> token_coin;  // no_token -> coin (fill 归因用)
+    std::map<std::string, std::string> token_note;
     int consecutive_rejects = 0;
     long long tick_count = 0;
 
     while (g_run.load()) {
         const double now = static_cast<double>(std::time(nullptr));
 
-        // ---- STOP 急停 ----
+        // ---- STOP 急停 (轮首; 睡眠中每秒也查 -> 最长 1s 响应) ----
         if (std::ifstream("STOP_TAIL_VENDOR").good()) {
             jlog(lf, {{"ev", "stopfile"}});
             if (armed)
-                for (const auto& [tok, o] : ours)
+                for (const auto& oo : sub->list_open_orders())
                     jlog(lf, {{"ev", "cancel"}, {"why", "stopfile"},
-                              {"resp", (*sub)({{"action", "CANCEL_ALL"}, {"token_id", tok}})}});
+                              {"resp", (*sub)({{"action", "CANCEL_ALL"},
+                                               {"token_id", oo.value("asset_id", "")}})}});
             break;
         }
 
@@ -144,80 +141,70 @@ int main() {
             }
         }
 
-        // ---- 2) 成交轮询 + 在场挂单重建 (armed) ----
-        double resting_total = 0.0, filled_total = 0.0;
-        std::map<std::string, double> deployed_coin;
+        // ---- 2) 成交增量 -> 持久 held 记账 ($1/股保守); 在场挂单快照 ----
+        std::vector<tail::OpenOrder> open;
         if (armed) {
             for (const auto& f : sub->poll_fills()) {
                 jlog(lf, {{"ev", "fill"}, {"fill", f}});
                 const std::string tok = f.value("token_id", "");
                 const double sz = f.value("size", 0.0);
-                filled_total += sz;  // 保守 $1/股
-                if (auto it = ours.find(tok); it != ours.end()) deployed_coin[it->second.coin] += sz;
+                held_total += sz;
+                if (auto it = token_coin.find(tok); it != token_coin.end()) held_coin[it->second] += sz;
             }
-            std::map<std::string, OurOrder> rebuilt;
             for (const auto& oo : sub->list_open_orders()) {
-                const std::string tok = oo.value("asset_id", "");
-                const double px = std::atof(oo.value("price", "0").c_str());
-                const double sz = std::atof(oo.value("original_size", "0").c_str()) -
-                                  std::atof(oo.value("size_matched", "0").c_str());
-                OurOrder o{px, sz, "", ""};
-                if (auto it = ours.find(tok); it != ours.end()) { o.coin = it->second.coin; o.note = it->second.note; }
-                else if (auto ic = cands.find(tok); ic != cands.end()) { o.coin = ic->second.coin; o.note = ic->second.slug; }
-                rebuilt[tok] = o;
-                resting_total += px * sz;
-                if (!o.coin.empty()) deployed_coin[o.coin] += px * sz;
+                tail::OpenOrder o;
+                o.no_token = oo.value("asset_id", "");
+                o.no_price = std::atof(oo.value("price", "0").c_str());
+                o.size = std::atof(oo.value("original_size", "0").c_str()) -
+                         std::atof(oo.value("size_matched", "0").c_str());
+                if (auto it = token_coin.find(o.no_token); it != token_coin.end()) o.coin = it->second;
+                else if (auto ic = cands.find(o.no_token); ic != cands.end()) o.coin = ic->second.coin;
+                if (auto in = token_note.find(o.no_token); in != token_note.end()) o.note = in->second;
+                open.push_back(std::move(o));
             }
-            ours = std::move(rebuilt);
         }
-        const double deployed_total = resting_total + filled_total + held_total;
+        for (const auto& [tok, c] : cands) {  // fill 归因表随候选集更新
+            token_coin[tok] = c.coin;
+            token_note[tok] = c.slug;
+        }
 
-        // ---- 3) 持单管理: 带外/逼近障碍/被压价 -> 撤 ----
-        int actions = 0;
-        for (auto it = ours.begin(); it != ours.end();) {
-            const std::string& tok = it->first;
-            auto ic = cands.find(tok);
-            const bool gone = (ic == cands.end());
-            const bool pull = !gone && tail::should_pull(ic->second, cfg);
-            const bool outbid = !gone && (ic->second.yes_ask < (1.0 - it->second.no_price) - cfg.tick - 1e-9);
-            if (gone || pull || outbid) {
-                const char* why = gone ? "left_window" : (pull ? "pull_signal" : "outbid");
+        // ---- 3) 决策 (纯函数) -> 执行 ----
+        const auto actions = tail::plan(cands, open, held_coin, held_total, cfg);
+        int executed = 0;
+        for (const auto& a : actions) {
+            if (!g_run.load()) break;
+            if (a.kind == tail::Action::Kind::kCancel) {
                 if (armed) {
-                    const json r = (*sub)({{"action", "CANCEL_ALL"}, {"token_id", tok}});
-                    jlog(lf, {{"ev", "cancel"}, {"why", why}, {"note", it->second.note}, {"resp", r}});
+                    const json r = (*sub)({{"action", "CANCEL_ALL"}, {"token_id", a.no_token}});
+                    jlog(lf, {{"ev", "cancel"}, {"why", a.why}, {"note", a.note}, {"resp", r}});
                 } else {
-                    jlog(lf, {{"ev", "dry_cancel"}, {"why", why}, {"note", it->second.note}});
+                    jlog(lf, {{"ev", "dry_cancel"}, {"why", a.why}, {"note", a.note}});
                 }
-                it = ours.erase(it);
-                ++actions;
-            } else {
-                ++it;
-            }
-        }
-
-        // ---- 4) 新报单 (placed_notional: 同一轮内的累计, 否则总上限在循环内失效) ----
-        double placed_notional = 0.0;
-        for (const auto& [tok, c] : cands) {
-            if (ours.count(tok)) continue;
-            if (static_cast<int>(ours.size()) >= cfg.max_orders) break;
-            const auto q = tail::decide(c, cfg, deployed_coin[c.coin],
-                                        deployed_total + placed_notional);
-            if (!q) continue;
-            if (!armed) {
-                jlog(lf, {{"ev", "dry_place"}, {"note", q->note}, {"no_price", q->no_price},
-                          {"size", q->size}, {"sell_yes_at", 1.0 - q->no_price}});
-                placed_notional += q->no_price * q->size;  // dry 同样累计, 输出如实反映上限
+                ++executed;
                 continue;
             }
-            sub->warm_token(tok);
-            const json r = (*sub)({{"action", "PLACE"}, {"token_id", tok}, {"side", "BUY"},
-                                   {"price", q->no_price}, {"size", q->size}});
-            jlog(lf, {{"ev", "place"}, {"note", q->note}, {"no_price", q->no_price},
-                      {"size", q->size}, {"resp", r}});
+            if (!armed) {
+                jlog(lf, {{"ev", "dry_place"}, {"note", a.note}, {"no_price", a.no_price},
+                          {"size", a.size}, {"sell_yes_at", 1.0 - a.no_price}});
+                continue;
+            }
+            // 下单前活盘复核: gamma 快照可能陈旧; 若真实 NO ask <= 我们的价, GTC 会过价变 taker
+            // (付费+坏价即成) — 跳过并记录, 下一轮用新价重议。
+            const auto book = client.get_order_book(a.no_token);
+            double live_no_ask = 1.0;
+            for (const auto& lvl : book.asks)
+                live_no_ask = std::min(live_no_ask, lvl.price);
+            if (live_no_ask <= a.no_price + 1e-9) {
+                jlog(lf, {{"ev", "stale_quote_skip"}, {"note", a.note}, {"our_no", a.no_price},
+                          {"live_no_ask", live_no_ask}});
+                continue;
+            }
+            sub->warm_token(a.no_token);
+            const json r = (*sub)({{"action", "PLACE"}, {"token_id", a.no_token}, {"side", "BUY"},
+                                   {"price", a.no_price}, {"size", a.size}});
+            jlog(lf, {{"ev", "place"}, {"note", a.note}, {"no_price", a.no_price},
+                      {"size", a.size}, {"resp", r}});
             if (r.value("status", "") == "PLACED") {
-                ours[tok] = {q->no_price, q->size, c.coin, c.slug};
-                deployed_coin[c.coin] += q->no_price * q->size;
-                placed_notional += q->no_price * q->size;
                 consecutive_rejects = 0;
             } else if (++consecutive_rejects >= 3) {
                 jlog(lf, {{"ev", "halt"}, {"why", "3 consecutive rejects — investigate"}});
@@ -225,7 +212,7 @@ int main() {
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(400));
-            ++actions;
+            ++executed;
         }
 
         // ---- 5) 心跳/权益地板 ----
@@ -233,12 +220,15 @@ int main() {
             json bal;
             if (armed)
                 if (auto b = sub->usdc_balance()) bal = *b;
-            jlog(lf, {{"ev", "status"}, {"candidates", cands.size()}, {"ours", ours.size()},
-                      {"deployed_total", deployed_total}, {"usdc", bal}, {"actions", actions}});
+            jlog(lf, {{"ev", "status"}, {"candidates", cands.size()}, {"open", open.size()},
+                      {"held_usd", held_total}, {"usdc", bal},
+                      {"planned", actions.size()}, {"executed", executed}});
         }
         ++tick_count;
-        for (int i = 0; i < scan_s && g_run.load(); ++i)
+        for (int i = 0; i < scan_s && g_run.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (std::ifstream("STOP_TAIL_VENDOR").good()) break;  // 1s 级急停响应
+        }
     }
     jlog(lf, {{"ev", "exit"}, {"note", "resting GTC orders remain by design; restart resumes via reconcile"}});
     return 0;

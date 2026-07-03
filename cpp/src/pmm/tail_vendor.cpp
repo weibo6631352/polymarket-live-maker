@@ -121,4 +121,44 @@ bool should_pull(const Candidate& c, const Config& cfg) {
     return false;
 }
 
+std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
+                         const std::vector<OpenOrder>& open,
+                         const std::map<std::string, double>& held_coin, double held_total,
+                         const Config& cfg) {
+    std::vector<Action> out;
+    // ---- 撤单侧: 离场/pull/被压价 ----
+    std::map<std::string, const OpenOrder*> keep;  // 留在场上的单
+    for (const auto& o : open) {
+        const auto ic = cands.find(o.no_token);
+        const char* why = nullptr;
+        if (ic == cands.end()) why = "left_window";
+        else if (should_pull(ic->second, cfg)) why = "pull_signal";
+        else if (ic->second.yes_ask < (1.0 - o.no_price) - cfg.tick - 1e-9) why = "outbid";
+        if (why != nullptr)
+            out.push_back({Action::Kind::kCancel, o.no_token, 0, 0, why, o.note});
+        else
+            keep[o.no_token] = &o;
+    }
+    // ---- 报单侧: 轮内累计 (resting=留场单 + held; 撤掉的预算即时释放) ----
+    double total = held_total;
+    std::map<std::string, double> coin = held_coin;
+    for (const auto& [tok, po] : keep) {
+        total += po->no_price * po->size;
+        if (!po->coin.empty()) coin[po->coin] += po->no_price * po->size;
+    }
+    int n_orders = static_cast<int>(keep.size());
+    for (const auto& [tok, c] : cands) {
+        if (keep.count(tok) != 0U) continue;
+        if (n_orders >= cfg.max_orders) break;
+        const auto q = decide(c, cfg, coin[c.coin], total);
+        if (!q) continue;
+        out.push_back({Action::Kind::kPlace, q->no_token, q->no_price, q->size, "", q->note});
+        const double notional = q->no_price * q->size;
+        total += notional;
+        coin[c.coin] += notional;
+        ++n_orders;
+    }
+    return out;
+}
+
 }  // namespace pmm::tail

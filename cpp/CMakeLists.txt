@@ -291,11 +291,6 @@ target_link_libraries(review-report PRIVATE pmm_core)
 add_executable(order-smoke apps/order_smoke_main.cpp)
 target_link_libraries(order-smoke PRIVATE pmm_core)
 
-# ---- tail-seller: up-tail premium seller (GTC BUY NO, hold to resolution; dry by default,
-# double-gated PM_TRADER_LIVE+TS_ARM; hard caps on order count + notional) ----
-add_executable(tail-seller apps/tail_seller_main.cpp)
-target_link_libraries(tail-seller PRIVATE pmm_core)
-
 # ---- tail-vendor: 常驻系统性上行尾卖方 (tail-seller 泛化; 纯函数决策核 + gamma 扫描循环) ----
 add_executable(tail-vendor apps/tail_vendor_main.cpp)
 target_link_libraries(tail-vendor PRIVATE pmm_core)
