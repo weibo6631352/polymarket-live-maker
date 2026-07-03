@@ -26,6 +26,8 @@ GTC 假死单成为孤儿仓;结算可见性滞后打崩平仓与风控;scalp �
 | 11 | **taker 费(crypto 微市场)** | — | **0.07·p·(1−p)/股/边**(真实成交反推+验证):p=0.5 → 1.75c/边(往返 3.5c);p=0.9 → 0.63c/边。maker 费 0 + 2026 返佣计划(taker 费的 25%,日结) | STRATEGY §7 🔴 |
 | 11b | **温度日盘费用(实查 2026-07-03)** | — | `feeType: weather_fees`,`{rate: 0.05, exponent: 1, takerOnly: true, rebateRate: 0.25}` → **maker 零费 + 收 taker 费 25% 返佣**;taker 付 5% 费率公式 → 垫高知情 taker 扫单门槛,对 maker 结构性利好;我方 taker 平仓也要付(极端价处 p(1−p) 小、费低)。温度桶为 `neg_risk: true`(可 merge/convert) | gamma+clob /markets 实查 |
 | 12 | 奖励结算 | 日结;κ = 真实结算/毛估 ≈ 0.237,但测量窗仅 47min 且落在 bug 期,健康 κ 可能 0.3-0.5 | `/rewards/user/total` 为准 | reward-model-calibration + 2026-07-03 审计 |
+| 12b | **成交带时间戳(致命陷阱,实证 2026-07-03)** | **data-api `/trades` 的 `timestamp` = Polygon 区块(结算)时间,不是撮合时间:滞后撮合 +2~6s(众数 +3s;拥堵更糟)** | RPC 逐笔核对 12/12 完全等于区块时间戳;此假象曾制造出 +$4.36/窗的假 maker 边(校正后 −$1.59,t=−9.3) | 任何用 tape 时间戳的回测必须先加 2-6s 延迟建模,否则必然说谎 |
+| 12c | data-api `/trades` 分页 | — | 新→旧排序 + 静默截断 limit=1000 + offset 硬顶 10000;分页不彻底会制造"安静窗口前视边"(曾造出假 t=5.8) | 必须 offset 分页到穷尽 + 校验每窗完整性 |
 | 13 | 撤单周期(多池串行) | 旧 Python N=45 池 ~104-150s/轮(致命);C++ 重写后见 pmm 基准 | — | PERFORMANCE-AND-OPS.md:41-47 |
 
 ## 二、未知项 + 测量方案(按当前活线索排序)
