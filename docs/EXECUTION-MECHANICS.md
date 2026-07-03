@@ -23,7 +23,8 @@ GTC 假死单成为孤儿仓;结算可见性滞后打崩平仓与风控;scalp �
 | 8 | taker 卖出/平仓(薄盘) | maker-exit 在微市场 ~3.5s 成交(小样本) | 薄盘扫 2-8 tick,单次 −$28 级滑损实录 | STRATEGY §7;execution-settlement-lag-root |
 | 9 | **买后即卖的可用性** | 链上真实结算 ~2-5s(Polygon);"not enough balance" 多为 CLOB 余额缓存过期(可 `updateBalanceAllowance` 强刷);旧"~25s"是混淆观测,已更正 | — | execution-settlement-lag-root(2026-06-28 更正) |
 | 10 | 持仓可见性(data-api /positions) | 滞后 + mark 噪声(幻影 ±$11 级闪烁) | **USDC 是唯一硬底**;风控不得信 positions mark | live-maker 实盘教训 |
-| 11 | **taker 费(crypto 微市场)** | — | **0.07·p·(1−p)/股/边**(真实成交反推+验证):p=0.5 → 1.75c/边(往返 3.5c);p=0.9 → 0.63c/边。maker 费 0 + 2026 返佣计划(taker 费的 25%,日结) | STRATEGY §7 🔴;需按品类核对费用覆盖范围 |
+| 11 | **taker 费(crypto 微市场)** | — | **0.07·p·(1−p)/股/边**(真实成交反推+验证):p=0.5 → 1.75c/边(往返 3.5c);p=0.9 → 0.63c/边。maker 费 0 + 2026 返佣计划(taker 费的 25%,日结) | STRATEGY §7 🔴 |
+| 11b | **温度日盘费用(实查 2026-07-03)** | — | `feeType: weather_fees`,`{rate: 0.05, exponent: 1, takerOnly: true, rebateRate: 0.25}` → **maker 零费 + 收 taker 费 25% 返佣**;taker 付 5% 费率公式 → 垫高知情 taker 扫单门槛,对 maker 结构性利好;我方 taker 平仓也要付(极端价处 p(1−p) 小、费低)。温度桶为 `neg_risk: true`(可 merge/convert) | gamma+clob /markets 实查 |
 | 12 | 奖励结算 | 日结;κ = 真实结算/毛估 ≈ 0.237,但测量窗仅 47min 且落在 bug 期,健康 κ 可能 0.3-0.5 | `/rewards/user/total` 为准 | reward-model-calibration + 2026-07-03 审计 |
 | 13 | 撤单周期(多池串行) | 旧 Python N=45 池 ~104-150s/轮(致命);C++ 重写后见 pmm 基准 | — | PERFORMANCE-AND-OPS.md:41-47 |
 
