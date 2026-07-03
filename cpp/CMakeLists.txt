@@ -301,21 +301,12 @@ target_link_libraries(pmm_tail_vendor_test PRIVATE pmm_core)
 add_executable(balance-check apps/balance_check_main.cpp)
 target_link_libraries(balance-check PRIVATE pmm_core)
 
-# ---- scalp-trial: 硬限额真钱 crypto-scalp 试验 (Kraken WS 价 + gamma 窗口 + ClobSubmitter; $30 死止损 + 双重门) ----
-add_executable(scalp-trial apps/scalp_trial_main.cpp)
-target_link_libraries(scalp-trial PRIVATE pmm_core)
 
 # ---- wss-probe: Phase 0 sniper plan — measure PM CLOB WSS rate/granularity/format (read-only) ----
 add_executable(wss-probe apps/wss_probe_main.cpp)
 target_link_libraries(wss-probe PRIVATE pmm_core)
 
-# ---- binance-sniper: DRY-LIVE crypto-micro sniper (verified seconds-Binance-move edge); orders gated ----
-add_executable(binance-sniper apps/binance_sniper_main.cpp)
-target_link_libraries(binance-sniper PRIVATE pmm_core)
 
-# ---- okx-sniper: EXTREME-low-latency sniper (OKX signal + PM WSS book + busy-poll); orders double-gated ----
-add_executable(okx-sniper apps/okx_sniper_main.cpp)
-target_link_libraries(okx-sniper PRIVATE pmm_core)
 
 # ---- 人工平仓: flatten (市价平掉未跟踪库存换回 USDC; REAL ORDER) ----
 add_executable(flatten apps/flatten_main.cpp)
