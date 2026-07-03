@@ -125,25 +125,22 @@ int main() {
             break;
         }
 
-        // ---- 1) 扫描窗口 (endDate ∈ [now, now+days_max]) ----
+        // ---- 1) 按 series_id 精确扫描 (校准过的可交易家族; 每轮 ~11 请求, 无微市场/体育洪水) ----
+        // strike 家族 5.3x: 45/42=BTC/ETH daily, 10022/10023/10024=SOL/XRP/其它 daily,
+        // 10147/10149=monthly; negrisk 家族 1.9x: 10041/10065/10107/10247。touch 家族定价公允, 不扫。
+        static const char* kSeries[] = {"45", "42", "10022", "10023", "10024",
+                                        "10147", "10149",
+                                        "10041", "10065", "10107", "10247"};
         std::map<std::string, tail::Candidate> cands;  // no_token -> cand
-        {
-            char lo[32], hi[32];
-            // 窗口下沿 now+6h: 跳过即将到期的微市场洪流, 且持单市场在 pull 阈值 (days_min/2=12h)
-            // 前始终可见; tag_id=21 (crypto) 服务端过滤 — 否则体育盘淹没 offset 上限。
-            std::time_t tlo = static_cast<std::time_t>(now + 6 * 3600);
-            std::time_t thi = static_cast<std::time_t>(now + cfg.days_max * 86400);
-            std::strftime(lo, sizeof lo, "%Y-%m-%dT%H:%M:%SZ", gmtime(&tlo));
-            std::strftime(hi, sizeof hi, "%Y-%m-%dT%H:%M:%SZ", gmtime(&thi));
-            for (int off = 0; off < 4000; off += 100) {
-                const json rows = client.gamma_markets_raw(
-                    {{"closed", "false"}, {"limit", "100"}, {"offset", std::to_string(off)},
-                     {"order", "endDate"}, {"ascending", "true"}, {"tag_id", "21"},
-                     {"end_date_min", lo}, {"end_date_max", hi}});
-                if (!rows.is_array() || rows.empty()) break;
-                for (const auto& r : rows)
+        for (const char* sid : kSeries) {
+            const json evs = client.gamma_events_raw(
+                {{"series_id", sid}, {"closed", "false"}, {"limit", "100"}});
+            if (!evs.is_array()) continue;
+            for (const auto& ev : evs) {
+                const auto mk = ev.find("markets");
+                if (mk == ev.end() || !mk->is_array()) continue;
+                for (const auto& r : *mk)
                     if (auto c = tail::parse_candidate(r, now)) cands[c->no_token] = *c;
-                if (rows.size() < 100) break;
             }
         }
 

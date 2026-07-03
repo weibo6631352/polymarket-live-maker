@@ -57,6 +57,8 @@ public:
 
     // 原始 gamma /markets 查询 (tail_vendor 的窗口扫描用); 返回 JSON 数组, 失败返回空数组。
     nlohmann::json gamma_markets_raw(const std::vector<std::pair<std::string, std::string>>& params);
+    // 原始 gamma /events 查询 (tail_vendor 按 series_id 精确扫描用); 返回 JSON 数组, 失败空数组。
+    nlohmann::json gamma_events_raw(const std::vector<std::pair<std::string, std::string>>& params);
 
     // 注入共享 TokenBucket (runner 让 engine 的读路径也走全局 req/s 预算)。
     void set_rate_limiter(RateLimiter* rl) noexcept { rate_limiter_ = rl; }

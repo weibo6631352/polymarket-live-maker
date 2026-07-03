@@ -241,6 +241,15 @@ double PolymarketClient::chain_position_value(const std::string& user) {
     return total;
 }
 
+json PolymarketClient::gamma_events_raw(const std::vector<std::pair<std::string, std::string>>& params) {
+    try {
+        const json d = gamma_get("/events", params);
+        return d.is_array() ? d : json::array();
+    } catch (...) {
+        return json::array();
+    }
+}
+
 json PolymarketClient::gamma_markets_raw(const std::vector<std::pair<std::string, std::string>>& params) {
     try {
         const json d = gamma_get("/markets", params);
