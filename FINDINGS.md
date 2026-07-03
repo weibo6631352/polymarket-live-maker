@@ -115,3 +115,9 @@ wr0ngw4yb3tt0r +$190万(体育方向,技能)· mooseborzoi +$71.7万(世界杯�
 1,064 个慢速加密日期/价位盘(小时-月级,无毫秒竞赛;全部 crypto_fees_v2 taker-only + maker 返佣 20%):**PM 对远尾(≤7c)定价高估 2.5-15× vs Deribit 期权隐含概率,双向**。三重独立验证:模型无关期权价差上界;已结算队列尾部校准(557 快照:期望命中 5.7 vs 实际 1 ≈ 5×,Poisson p≈0.02);对手盘=彩票散户(无逆选/延迟问题)。收益:年底阶梯 ~8-12%/年、容量 $10-50k;周翼 +0.6%/周期但盘口深度碎屑级。主风险:牛市联合击穿上行阶梯(阶梯内相关)。
 
 **确认程序(零真钱,已运行):** `backtest/deribit_fair/`(census→deribit_pull→map_markets→paper_ledger);首日开仓 71 个虚拟尾部卖出(fair<3% 且 bid>fair+0.5c;41 个七月快周期 + 28 个年底阶梯;虚拟占用 $7.6k、期望溢价 ~$156),状态 `~/pm-data/tail_ledger.jsonl`,每周重跑。并行:历史校准加深(全币种×全周期×牛熊分层;决定性格子=牛市期上行尾部)。确认后按 EXECUTION-MECHANICS 协议提最小份额真钱试验方案。
+
+### 最小份额 live 试验(2026-07-03 14:10 UTC 起,用户武装)
+
+执行体 = `cpp/apps/tail_vendor_main.cpp`(tail-vendor:常驻上行尾卖方,GTC BUY NO 压 ask 一 tick,持有到期;纯函数决策核 27 单测)。箱上 `tail-vendor-trial-persist.service`(持久 unit,`Restart=on-failure`,重启自恢复;武装 env 在箱上 drop-in,不进 git)。**上限:总 $45 / 单币 $20 / 单笔 $15 / 6 单**(编译期硬顶 $250/$100/$25/24,env 只能调低);急停 = `STOP_TAIL_VENDOR` 文件(1s 响应);3 连拒自动停机保全现场。可靠性修复(d6d4313):成交账本持久化(`state/tail_vendor_held.json`,fill 游标 + held 抵押跨重启,宕机期成交经 `fills_since` 补账 —— scalp-runaway 教训的"资金硬顶必须跨进程"落地)+ journald 实时心跳(stdout flush)+ anti-churn(1b2c2b4)。
+
+**记账:** live 端 `tail_vendor_log.jsonl`(place/fill/cancel/scan 全事件)→ `pmpull` → `backtest/deribit_fair/live_ledger.py`(真实仓位 vs 结算 vs Deribit fair 记分板)。**持续盈利判据(写在 live_ledger.py):** 领先=每笔入场边际 (1−fair_yes)−no_cost>0;确认=已结算 P&L 累计为正且 YES 命中数 ≤ Deribit 隐含 Poisson 期望+2σ(超出=被逆选,停);样本 ≥2 个独立结算簇(≥2 周)。首个结算簇 7/6-7/8。已知未完项:结算后 held 抵押不自动释放(赢仓需赎回;首簇结算时处理)。
