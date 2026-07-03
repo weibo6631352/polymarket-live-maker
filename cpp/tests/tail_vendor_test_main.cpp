@@ -1,4 +1,5 @@
 // tests/tail_vendor_test_main.cpp — 决策核纯函数单测 (离线, 无网络)。退出码 0 = 全过。
+#undef NDEBUG  // RelWithDebInfo 定义 NDEBUG 会把 assert 编译掉 -> 空测; 单测必须始终真跑
 #include <cassert>
 #include <cstdio>
 
