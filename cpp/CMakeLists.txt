@@ -127,31 +127,46 @@ target_include_directories(nlohmann_json INTERFACE ${CMAKE_SOURCE_DIR}/third_par
 # 全量遥测 (Fast-DDS): WITH_TELEMETRY=ON (盒子, 见 ~/dds) 链 Fast-DDS + 编 dds_publisher.cpp;
 # 默认 OFF → 编 no-op publisher.cpp (Mac 本地/单测零依赖, publish 全空操作)。
 option(WITH_TELEMETRY "Build Fast-DDS telemetry publisher" OFF)
+option(TELEMETRY_REGEN "Re-run fastddsgen on telemetry.idl (needs Java + Fast-DDS-Gen); only after editing the idl" OFF)
 if(WITH_TELEMETRY)
-    # ---- Fast-DDS codegen (盒子构建: cmake -DCMAKE_PREFIX_PATH=$HOME/dds) ----
-    # fastddsgen 把 telemetry.idl 生成 PubSubTypes/TypeObjectSupport .cxx; dds_publisher.cpp include 之。
+    # ---- 预编译 Fast-DDS 动态库 (third_party/prebuilt/fastdds-<ver>-<os>-<arch>.tar.gz, 入 git) ----
+    # 有匹配平台的包 → 配置期解包到 build 目录并接管 find_package, 零源码构建 (盒子 292M/数十分钟的
+    # dds-build 只在升级 Fast-DDS 版本时需要)。无包 → 照旧走 CMAKE_PREFIX_PATH/系统安装。
+    string(TOLOWER "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}" PMM_PLATFORM)
+    file(GLOB PMM_FASTDDS_TARBALL
+         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/prebuilt/fastdds-*-${PMM_PLATFORM}.tar.gz)
+    if(PMM_FASTDDS_TARBALL)
+        list(GET PMM_FASTDDS_TARBALL 0 PMM_FASTDDS_TARBALL)
+        set(PMM_FASTDDS_PREFIX ${CMAKE_BINARY_DIR}/fastdds-prebuilt)
+        if(NOT EXISTS ${PMM_FASTDDS_PREFIX}/lib)
+            message(STATUS "extracting prebuilt Fast-DDS: ${PMM_FASTDDS_TARBALL}")
+            file(ARCHIVE_EXTRACT INPUT ${PMM_FASTDDS_TARBALL} DESTINATION ${PMM_FASTDDS_PREFIX})
+        endif()
+        list(PREPEND CMAKE_PREFIX_PATH ${PMM_FASTDDS_PREFIX})
+    endif()
     find_package(fastcdr REQUIRED)
     find_package(fastdds REQUIRED)
 
-    set(FASTDDSGEN "$ENV{HOME}/dds-build/Fast-DDS-Gen/scripts/fastddsgen"
-        CACHE FILEPATH "Path to fastddsgen launcher")
-
-    set(TGEN ${CMAKE_BINARY_DIR}/telemetry_gen)
-    file(MAKE_DIRECTORY ${TGEN})
-
-    # WORKING_DIRECTORY = idl 所在目录 → fastddsgen 把绝对 idl 路径相对化为 basename, 输出平铺到 ${TGEN}
-    # (否则会把整条目录路径复刻到 ${TGEN} 下, OUTPUT 路径无法预测)。-replace 覆盖旧产物。
-    add_custom_command(
-        OUTPUT
-            ${TGEN}/telemetryPubSubTypes.cxx
-            ${TGEN}/telemetryTypeObjectSupport.cxx
-        COMMAND ${FASTDDSGEN} -replace -d ${TGEN}
-                ${CMAKE_CURRENT_SOURCE_DIR}/telemetry/telemetry.idl
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/telemetry
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/telemetry/telemetry.idl
-        COMMENT "fastddsgen: telemetry.idl -> ${TGEN}"
-        VERBATIM
-    )
+    # ---- IDL 生成物已入库 (telemetry/generated/, 与预编译库同版本) → 默认零 fastddsgen/Java 依赖。
+    # 改了 telemetry.idl 才需要 -DTELEMETRY_REGEN=ON: 直接重生成回 telemetry/generated/ (提交之)。
+    set(TGEN ${CMAKE_CURRENT_SOURCE_DIR}/telemetry/generated)
+    if(TELEMETRY_REGEN)
+        set(FASTDDSGEN "$ENV{HOME}/dds-build/Fast-DDS-Gen/scripts/fastddsgen"
+            CACHE FILEPATH "Path to fastddsgen launcher")
+        # WORKING_DIRECTORY = idl 所在目录 → fastddsgen 把绝对 idl 路径相对化为 basename, 输出平铺到
+        # ${TGEN} (否则会把整条目录路径复刻到 ${TGEN} 下, OUTPUT 路径无法预测)。-replace 覆盖旧产物。
+        add_custom_command(
+            OUTPUT
+                ${TGEN}/telemetryPubSubTypes.cxx
+                ${TGEN}/telemetryTypeObjectSupport.cxx
+            COMMAND ${FASTDDSGEN} -replace -d ${TGEN}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/telemetry/telemetry.idl
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/telemetry
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/telemetry/telemetry.idl
+            COMMENT "fastddsgen: telemetry.idl -> ${TGEN}"
+            VERBATIM
+        )
+    endif()
 
     set(PMM_TELEMETRY_SRC
         src/pmm/telemetry/dds_publisher.cpp
