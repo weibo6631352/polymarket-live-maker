@@ -119,13 +119,20 @@ int main() {
     std::vector<OpenOrder> open2 = {{"n1", 0.971, 20, "eth", "n1"}};  // sell_yes 0.029, ask 0.03 -> 仍最优
     acts = plan(c1, open2, {}, 0.0, cfg3);
     assert(acts.empty());
-    // 20) 被压价 -> 撤 (ask 已低于我们的隐含卖价 - tick)
+    // 20) 被压价 -> 撤 (ask 已低于我们的隐含卖价 - tick, 且重挂价能改进)
     std::vector<OpenOrder> open3 = {{"n1", 0.960, 20, "eth", "n1"}};  // 我们卖 0.040, ask 0.03 更优
     acts = plan(c1, open3, {}, 0.0, cfg3);
     bool has_outbid_cancel = false;
     for (const auto& a : acts)
         if (a.kind == Action::Kind::kCancel && a.why == "outbid") has_outbid_cancel = true;
     assert(has_outbid_cancel);
+    // 20b) 被压价但卖价地板卡住 (重挂只能同价) -> 不撤, 保队列优先级 (anti-churn)
+    std::map<std::string, Candidate> c2m;
+    { Candidate cc = *c; cc.no_token = "n2"; cc.coin = "eth"; cc.yes_bid = 0.010; cc.yes_ask = 0.016;
+      cc.days_left = 2; cc.slug = "n2"; c2m["n2"] = cc; }
+    std::vector<OpenOrder> open4 = {{"n2", 0.980, 20, "eth", "n2"}};  // 我们卖 0.020 = floor
+    acts = plan(c2m, open4, {}, 0.0, cfg3);
+    for (const auto& a : acts) assert(a.kind != Action::Kind::kCancel);
 
     // ---- sheet 模式: 解析 + 校验 ----
     // 21) 正常解析
@@ -150,6 +157,6 @@ int main() {
                              {{"token_id", "123"}, {"price", 0.96}, {"size", 10.0}}});
     assert(validate_sheet(*parse_sheet(sdup), cfg).has_value());
 
-    std::printf("tail_vendor: 26/26 PASS\n");
+    std::printf("tail_vendor: 27/27 PASS\n");
     return 0;
 }

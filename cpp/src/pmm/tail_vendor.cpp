@@ -130,7 +130,13 @@ std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
         const char* why = nullptr;
         if (ic == cands.end()) why = "left_window";
         else if (should_pull(ic->second, cfg)) why = "pull_signal";
-        else if (ic->second.yes_ask < (1.0 - o.no_price) - cfg.tick - 1e-9) why = "outbid";
+        else if (ic->second.yes_ask < (1.0 - o.no_price) - cfg.tick - 1e-9) {
+            // 被压价: 只有当重挂价真能改进时才撤 — 卖价地板卡住时撤了也只能原价重挂,
+            // 白丢同价位队列优先级 (churn)。
+            const double target_yes =
+                round_tick(std::max(cfg.floor_yes, ic->second.yes_ask - cfg.tick), cfg.tick);
+            if (std::abs((1.0 - target_yes) - o.no_price) > cfg.tick / 2) why = "outbid";
+        }
         if (why != nullptr)
             out.push_back({Action::Kind::kCancel, o.no_token, 0, 0, why, o.note});
         else
