@@ -38,6 +38,9 @@ struct RunnerConfig {
     double jump_vol_weight{0.7};      // 跳变感知 bleed: 挂宽到"罕见成交" (奖励来自挂在带里, 成交是纯成本)。
                                       // 0.4 实测把 spread 收太紧 → 30min 11 笔成交 churn → 净亏; 利润靠多池/大size, 非紧 spread
     bool net_edge_gate{true};         // 净边际门: 跳变感知 net=reward-bleed ≤ 0 的池不报价 (毒池自然出局)
+    bool orphan_sweep{true};          // 孤立清扫。同账户跑多策略时必须 LM_ORPHAN_SWEEP=0 —
+                                      // 它会把"无活跃 quote 的链上持仓"全平掉, 包括别的策略的仓
+                                      // (tail-vendor 的 hold-to-resolution 仓正是这种)
     double tail_budget{20.0};         // 尾部-VaR: 单次成交最坏损失 ≤ 此 $ 额 (bug 修后逆选有界, 放宽→更大 size/更多池)
     double tail_k_sigma{3.0};         // 最坏跳变 = k×σ (3σ 尾部); 与 jump_vol_weight 配合估单次成交尾部
     int recenter_ticks{1};

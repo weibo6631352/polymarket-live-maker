@@ -1447,6 +1447,7 @@ std::optional<std::string> LiveRunner::kill_check() {
                     if (!tn.empty()) active_toks.insert(tn);
                 }
                 for (const auto& [tok, sz] : last_chain_positions_) {
+                    if (!cfg_.orphan_sweep) break;  // 共享账户多策略: 别平别家的仓 (LM_ORPHAN_SWEEP=0)
                     if (std::abs(sz) < 1.0 || active_toks.count(tok) != 0) continue;
                     std::fprintf(stderr, "orphan-sweep: flattening untracked %.0f on %s\n", sz,
                                  tok.substr(0, 12).c_str());

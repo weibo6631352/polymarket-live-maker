@@ -60,6 +60,7 @@ RunnerConfig RunnerConfig::from_env() {
     c.extreme_mid_margin = f("LM_EXTREME_MID_MARGIN", 0.2);  // 剔除近极端价池 (逆选/趋势源)
     c.jump_vol_weight = f("LM_JUMP_VOL_WEIGHT", 0.7);  // 跳变感知 bleed (σ 下限=w×最大单步移动)
     c.net_edge_gate = flag_ne("LM_NET_EDGE_GATE", "0", "1");  // 净边际 ≤ 0 的池不报价 (默认开)
+    c.orphan_sweep = flag_ne("LM_ORPHAN_SWEEP", "0", "1");    // 共享账户多策略时置 0 (见 config.hpp)
     c.tail_budget = f("LM_TAIL_BUDGET", 10.0);          // 尾部-VaR 预算 ($/单次成交最坏损失)
     c.tail_k_sigma = f("LM_TAIL_K_SIGMA", 3.0);         // 最坏跳变 = k×σ
     // R2(数学家): mid 仅 0.5¢ 偏移 share 即掉 ~36%, 且 mid 单调漂(重挂会"粘住"不抖) → 早重挂找回份额。
