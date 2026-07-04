@@ -239,14 +239,21 @@ int main(int argc, char** argv) {
     }
 
     // 入账一笔成交: held 累加 + 游标推进 + 落盘。调用方必须按 oldest→newest 喂 (游标停在最新)。
+    // 只认本策略下过单的 token (token_coin 注册表) — 同账户还有别的策略在跑 (pmm temp maker),
+    // 它们的成交若入本账会虚耗 total 硬顶。外来成交记 fill_foreign, 游标照推。
     auto ingest_fill = [&](const json& f, const char* ev) {
-        jlog(lf, {{"ev", ev}, {"fill", f}});
         if (const std::string id = f.value("id", ""); !id.empty()) st.last_trade_id = id;
+        const auto it = st.token_coin.find(f.value("token_id", ""));
+        if (it == st.token_coin.end()) {
+            jlog(lf, {{"ev", "fill_foreign"}, {"fill", f}});
+            save_held(st, lf);
+            return;
+        }
+        jlog(lf, {{"ev", ev}, {"fill", f}});
         if (f.value("side", "") == "BUY") {  // 我们只 BUY NO; 非 BUY = 人工干预, 只记日志
             const double sz = f.value("size", 0.0);
             st.total += sz;
-            if (auto it = st.token_coin.find(f.value("token_id", "")); it != st.token_coin.end())
-                st.coin[it->second] += sz;
+            st.coin[it->second] += sz;
         }
         save_held(st, lf);
     };
