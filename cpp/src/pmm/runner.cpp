@@ -461,6 +461,9 @@ void LiveRunner::reconcile_broker_orders() {
         if (token.empty()) token = o.value("token_id", std::string{});
         std::string oid = o.value("id", std::string{});
         if (oid.empty()) oid = o.value("orderID", o.value("order_id", std::string{}));
+        // 共享账户多策略 (LM_ORPHAN_SWEEP=0): 非本 runner 的挂单是别家策略的, 不许撤 —
+        // 实测 2026-07-04: temp maker 每周期把 tail-vendor 的挂单撤掉, 两个自家 bot 打撤单战。
+        if (!cfg_.orphan_sweep) continue;
         if (!oid.empty() && held.count(token) == 0) {
             try {
                 submitter_->cancel_order(oid);
@@ -1615,11 +1618,21 @@ void LiveRunner::shutdown() {
             }
             // 安全收尾第 1 步 —— 先撤掉 CLOB 上所有挂单 (无论 tracked 与否), 这样平仓期间不会再有新成交。
             // 防撤单竞态/漏网单留在盘口, 软件关了之后被成交造成失控亏损。
+            // 共享账户 (LM_ORPHAN_SWEEP=0): 只撤本 runner 报过价的 token 的单, 别家策略的挂单不动。
             if (use_live_path() && submitter_ != nullptr) {
                 try {
+                    std::set<std::string> own_toks;
+                    for (const auto& q : engine_->get_maker_quotes()) {
+                        own_toks.insert(q.value("token_id", std::string{}));
+                        own_toks.insert(q.value("complement_token_id", std::string{}));
+                    }
+                    for (const auto& [cond, m] : placed_) own_toks.insert(m.value("token", std::string{}));
                     const std::vector<json> open = submitter_->list_open_orders();
                     int swept = 0;
                     for (const auto& o : open) {
+                        std::string tok = o.value("asset_id", std::string{});
+                        if (tok.empty()) tok = o.value("token_id", std::string{});
+                        if (!cfg_.orphan_sweep && own_toks.count(tok) == 0) continue;
                         std::string oid = o.value("id", std::string{});
                         if (oid.empty()) oid = o.value("orderID", o.value("order_id", std::string{}));
                         if (!oid.empty()) {
