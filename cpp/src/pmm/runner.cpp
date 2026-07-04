@@ -6,8 +6,10 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <ctime>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <thread>
 
@@ -242,12 +244,49 @@ void LiveRunner::run() {
             submitter_ = owned_submitter_.get();
         }
         std::fprintf(stderr, "LIVE submitter armed — real orders will be placed\n");
-        // 现实对账急停基线: 记下启动时真实 USDC。之后跌破 (基线 - max_loss) → KILL (账本损坏也刹得住)。
+        // 现实对账急停基线 = 启动时真实净值 (USDC + 链上持仓市值)。只记 USDC 的旧基线在共享账户上
+        // 白送"别家持仓市值"的缓冲 (实测: tail-vendor 的 ~$13.6 持仓让 temp 试验的 max_loss 失真到
+        // $23.6)。基线按 UTC 日持久化到 state/equity_baseline.json — 重启不重置当日亏损预算
+        // (否则每次重启白拿一份新 max_loss, "每日"上限名存实亡)。
         if (auto bal = submitter_->usdc_balance(); bal && *bal > 0.0) {
-            usdc_start_ = *bal;
+            double pos0 = 0.0;
+            try {
+                if (engine_ != nullptr)
+                    pos0 = engine_->api().chain_position_value(pmm::env::str("POLYMARKET_FUNDER"));
+            } catch (...) {
+            }
+            double eq0 = *bal + pos0;
+            const fs::path bp = fs::path(cfg_.state_dir) / "equity_baseline.json";
+            char today[16];
+            const std::time_t tt = std::time(nullptr);
+            std::strftime(today, sizeof(today), "%Y-%m-%d", std::gmtime(&tt));
+            bool loaded = false;
+            try {
+                if (fs::exists(bp)) {
+                    std::ifstream in(bp);
+                    json j;
+                    in >> j;
+                    if (j.value("date", "") == std::string(today)) {
+                        eq0 = j.value("eq", eq0);
+                        loaded = true;
+                    }
+                }
+            } catch (...) {
+            }
+            if (!loaded) {
+                try {
+                    std::ofstream out(bp, std::ios::trunc);
+                    out << json{{"date", today}, {"eq", eq0}}.dump();
+                } catch (...) {
+                }
+            }
+            usdc_start_ = eq0;
             last_usdc_ = *bal;
-            std::fprintf(stderr, "real-USDC kill armed: baseline $%.2f, floor $%.2f (drop > max_loss $%.0f)\n",
-                         *bal, *bal - cfg_.max_loss, cfg_.max_loss);
+            std::fprintf(stderr,
+                         "real-EQUITY kill armed: baseline $%.2f (%s; usdc %.2f + pos %.2f), floor $%.2f "
+                         "(drop > max_loss $%.0f)\n",
+                         eq0, loaded ? "persisted today" : "fresh", *bal, pos0, eq0 - cfg_.max_loss,
+                         cfg_.max_loss);
         } else {
             std::fprintf(stderr, "WARN: could not read real USDC at startup — real-USDC kill DISABLED\n");
         }
