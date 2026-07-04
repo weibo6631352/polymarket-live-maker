@@ -1,0 +1,10 @@
+[Unit]
+Description=hourly tail-vendor whitelist curation
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

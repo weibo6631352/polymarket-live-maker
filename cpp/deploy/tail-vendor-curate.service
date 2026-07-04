@@ -1,0 +1,23 @@
+# 箱上自动策展: census→deribit→map→rank → 原子写 state/tail_vendor_whitelist.json (bot 每轮热读)。
+# 纯网络任务 (~3-4 分钟, CPU 极轻, 不违反"箱上不跑重活"); 每小时由 .timer 触发 → 新上市盘发现延迟 ≤1h。
+# 会话端手动 push_whitelist.sh 仍可随时覆盖 (写同一文件)。
+# 安装: cp tail-vendor-curate.{service,timer} /etc/systemd/system/ && systemctl daemon-reload
+#       && systemctl enable --now tail-vendor-curate.timer
+[Unit]
+Description=tail-vendor whitelist auto-curation (hourly pipeline)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/polymarket-live-maker/backtest/deribit_fair
+TimeoutStartSec=900
+# discrepancies.json 是 git 跟踪文件, 管线会覆写 → 用完恢复, 保持箱上仓库干净可 pull
+ExecStart=/bin/bash -c 'set -e; \
+  python3 census.py && python3 deribit_pull.py && python3 map_markets.py; \
+  python3 make_whitelist.py 24 > /tmp/tv_wl.json; \
+  python3 -c "import json; d=json.load(open(\"/tmp/tv_wl.json\")); assert len(d[\"slugs\"])>=5, \"too few slugs\"" ; \
+  mv /tmp/tv_wl.json /root/polymarket-live-maker/state/tail_vendor_whitelist.json'
+# 无论成败都恢复跟踪文件 (管线中途失败不留脏仓库, 部署 git pull 不被卡)
+ExecStopPost=/bin/bash -c 'cd /root/polymarket-live-maker && git checkout -- backtest/deribit_fair/discrepancies.json || true'
+SyslogIdentifier=tv-curate
