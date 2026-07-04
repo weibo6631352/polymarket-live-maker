@@ -30,3 +30,5 @@ KILL
 .DS_Store
 .coverage
 .coverage.*
+backtest/deribit_fair/census_open.json
+backtest/deribit_fair/deribit_chain.json
