@@ -94,8 +94,9 @@ def main():
         avg_no = d["cost"] / d["shares"] if d["shares"] else 0.0
         prem = (1.0 - avg_no) * d["shares"]
         fr = fair.get(slug, {})
-        fair_yes = fr.get("fair_hi")  # conservative upper bound of options-implied P(YES)
+        fair_yes = fr.get("fair_hi")  # 注意: discrepancies.json 快照价 — 重跑管线后即为"当前 fair",
         ev = ((1.0 - fair_yes) - avg_no) * d["shares"] if fair_yes is not None else None
+        # 与入场价的差 = 入场后 fair 漂移 (持仓被测试的领先信号; BTC 7/4 实测 3.3%→8.1% 即此列)
 
         status = "open"
         m = (get(f"https://gamma-api.polymarket.com/markets?slug={slug}") or [None])[0] if slug != "?" else None
