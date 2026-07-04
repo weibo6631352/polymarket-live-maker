@@ -332,6 +332,30 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ---- 2.5) 白名单候选换实时 CLOB 盘口价 (gamma 分钟级陈旧 — 实测让重挂同价加入 4220 股
+        // 竞争墙后排队而非压前一档)。NO 书镜像: yes_ask = 1 − 最优竞争 NO bid, yes_bid = 1 − 最优
+        // NO ask。必须剔除我们自己的挂单, 否则自己是最优买一时会被当竞争 → 每轮自我压价。
+        if (wl_size != 0) {
+            std::map<std::string, const tail::OpenOrder*> ours;
+            for (const auto& o : open) ours[o.no_token] = &o;
+            for (auto& [tok, c] : cands) {
+                const auto book = client.get_order_book(tok);
+                if (book.bids.empty() && book.asks.empty()) continue;  // 拉书失败 → 留 gamma 价
+                const tail::OpenOrder* mine = nullptr;
+                if (auto it = ours.find(tok); it != ours.end()) mine = it->second;
+                double best_no_bid = 0.0, best_no_ask = 1.0;
+                for (const auto& l : book.asks) best_no_ask = std::min(best_no_ask, l.price);
+                for (const auto& l : book.bids) {
+                    double sz = l.size;
+                    if (mine != nullptr && std::abs(l.price - mine->no_price) < 5e-4) sz -= mine->size;
+                    if (sz > 1e-6 && l.price > best_no_bid) best_no_bid = l.price;
+                }
+                if (best_no_bid > 0.0) c.yes_ask = 1.0 - best_no_bid;
+                else if (mine != nullptr) c.yes_ask = 1.0 - mine->no_price;  // 全场只有我们 → 视稳
+                if (best_no_ask < 1.0) c.yes_bid = 1.0 - best_no_ask;
+            }
+        }
+
         // ---- 3) 决策 (纯函数) -> 执行 ----
         const auto actions = tail::plan(cands, open, st.coin, st.total, cfg);
         int executed = 0;

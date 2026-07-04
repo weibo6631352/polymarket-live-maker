@@ -126,13 +126,30 @@ int main() {
     for (const auto& a : acts)
         if (a.kind == Action::Kind::kCancel && a.why == "outbid") has_outbid_cancel = true;
     assert(has_outbid_cancel);
-    // 20b) 被压价但卖价地板卡住 (重挂只能同价) -> 不撤, 保队列优先级 (anti-churn)
+    // 20b) 竞争墙严格压在上方且地板卡死 (重挂无法改进) -> 撤单轮换 (排队死资本; 2026-07-04
+    //      实测尾部竞争方是 4-5k 股挂墙 bot, 排它后面 = 永不成交)。decide 的 skip 规则保证
+    //      撤后不会在同市场原价重挂 (无 churn)。
     std::map<std::string, Candidate> c2m;
     { Candidate cc = *c; cc.no_token = "n2"; cc.coin = "eth"; cc.yes_bid = 0.010; cc.yes_ask = 0.016;
       cc.days_left = 2; cc.slug = "n2"; c2m["n2"] = cc; }
-    std::vector<OpenOrder> open4 = {{"n2", 0.980, 20, "eth", "n2"}};  // 我们卖 0.020 = floor
+    std::vector<OpenOrder> open4 = {{"n2", 0.980, 20, "eth", "n2"}};  // 我们卖 0.020 = floor, 墙卖 0.016
     acts = plan(c2m, open4, {}, 0.0, cfg3);
+    bool rotated = false;
+    for (const auto& a : acts) {
+        assert(a.kind != Action::Kind::kPlace || a.no_token != "n2");  // skip 规则: 不原地重挂
+        if (a.kind == Action::Kind::kCancel && a.why == "wall_over_floor") rotated = true;
+    }
+    assert(rotated);
+    // 20c) 1 tick 以内被压 -> 滞回保留 (不值得为 1 tick 打 undercut 战)
+    std::map<std::string, Candidate> c3m;
+    { Candidate cc = *c; cc.no_token = "n3"; cc.coin = "eth"; cc.yes_bid = 0.010; cc.yes_ask = 0.025;
+      cc.days_left = 2; cc.slug = "n3"; c3m["n3"] = cc; }
+    std::vector<OpenOrder> open5 = {{"n3", 0.974, 20, "eth", "n3"}};  // 我们卖 0.026, 墙 0.025 (1 tick)
+    acts = plan(c3m, open5, {}, 0.0, cfg3);
     for (const auto& a : acts) assert(a.kind != Action::Kind::kCancel);
+    // 20d) decide skip: 竞争卖压已在地板下 (ask 0.019 < floor 0.02) -> 排不到前面, 不下单
+    auto cw = *c; cw.yes_ask = 0.019; cw.yes_bid = 0.005;
+    assert(!decide(cw, cfg, 0.0, 0.0));
 
     // ---- sheet 模式: 解析 + 校验 ----
     // 21) 正常解析

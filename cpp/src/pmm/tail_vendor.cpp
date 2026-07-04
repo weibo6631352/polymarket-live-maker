@@ -100,6 +100,10 @@ std::optional<Quote> decide(const Candidate& c, const Config& cfg, double deploy
     if (sell_yes < cfg.yes_min || sell_yes > cfg.yes_max) return std::nullopt;
     if (sell_yes <= c.yes_bid + 1e-9) return std::nullopt;
 
+    // 排不到竞争卖压之前 (地板卡死 → 只能同价/更差加入竞争墙后排队 = 死资本) → 不下单,
+    // 资本留给下一个能排到前面的市场。(2026-07-04 实测: 尾部竞争方是 4-5k 股级挂墙 bot)
+    if (sell_yes >= c.yes_ask - 1e-9) return std::nullopt;
+
     const double no_price = round_tick(1.0 - sell_yes, cfg.tick);
     double size = std::floor(cfg.per_order_usd / no_price);
     if (size < cfg.min_shares) return std::nullopt;
@@ -136,6 +140,9 @@ std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
             const double target_yes =
                 round_tick(std::max(cfg.floor_yes, ic->second.yes_ask - cfg.tick), cfg.tick);
             if (std::abs((1.0 - target_yes) - o.no_price) > cfg.tick / 2) why = "outbid";
+            else why = "wall_over_floor";  // 严格压在上方且无法改进 → 排队死资本, 撤单轮换
+        } else if (ic->second.yes_ask < (1.0 - o.no_price) - 1e-9) {
+            // 1 tick 以内被压: 滞回保留 (改进 1 tick 换 undercut 战不值; 等对方走或吃穿)。
         }
         if (why != nullptr)
             out.push_back({Action::Kind::kCancel, o.no_token, 0, 0, why, o.note});
