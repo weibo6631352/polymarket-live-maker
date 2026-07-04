@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -290,6 +291,27 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ---- 1.5) 会话策展白名单 (LLM 端产出 state/tail_vendor_whitelist.json, 每轮热读) ----
+        // {"slugs": [...]}: 非空 → 只做名单内市场; 名单外的在场挂单变 left_window → 撤 → 资本轮换。
+        // 名单全不匹配 = 全撤且不下新单 (安全方向); 坏文件/空名单 = 忽略 (不限制)。
+        std::size_t wl_size = 0;
+        if (std::ifstream wf("state/tail_vendor_whitelist.json"); wf.good()) {
+            try {
+                json wj;
+                wf >> wj;
+                std::set<std::string> allow;
+                for (const auto& s : wj.value("slugs", json::array()))
+                    allow.insert(s.get<std::string>());
+                if (!allow.empty()) {
+                    wl_size = allow.size();
+                    for (auto it = cands.begin(); it != cands.end();)
+                        it = (allow.count(it->second.slug) == 0) ? cands.erase(it) : std::next(it);
+                }
+            } catch (...) {
+                jlog(lf, {{"ev", "error"}, {"what", "whitelist_parse — ignored, scan unrestricted"}});
+            }
+        }
+
         // ---- 2) 成交增量 -> 持久 held 记账 ($1/股保守); 在场挂单快照 ----
         std::vector<tail::OpenOrder> open;
         if (armed) {
@@ -361,6 +383,7 @@ int main(int argc, char** argv) {
         json hb = {{"ev", "scan"}, {"candidates", cands.size()}, {"open", open.size()},
                    {"held_usd", st.total}, {"planned", actions.size()}, {"executed", executed}};
         if (!st.coin.empty()) hb["held_coin"] = st.coin;
+        if (wl_size != 0) hb["whitelist"] = wl_size;  // candidates 已是名单过滤后的数
         if (tick_count % 12 == 0 && armed)
             if (auto b = sub->usdc_balance()) hb["usdc"] = *b;
         jlog(lf, hb);
