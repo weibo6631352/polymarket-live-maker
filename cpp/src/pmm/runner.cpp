@@ -158,6 +158,16 @@ void LiveRunner::trip_kill(const std::string& reason) {
         kill_reason_ = reason;
         stop_.store(true);
         std::fprintf(stderr, "KILL-SWITCH: %s — cancelling all + standing down\n", reason.c_str());
+        // 风险类 kill 上闩: 任何重启 (人为/systemd/运维竞态) 不得自动恢复交易 — 实测 2026-07-04:
+        // max-loss kill 停机 20 分钟后被一条排队中的运维 restart 复活, 继续在知情时段交易。
+        // 人工 `rm state/KILL_LATCH` 后才能重新武装。优雅停机 (signal) 不上闩。
+        if (cfg_.live && reason != "signal" && reason != "kill-latch") {
+            try {
+                std::ofstream out(fs::path(cfg_.state_dir) / "KILL_LATCH", std::ios::trunc);
+                out << reason << "\n";
+            } catch (...) {
+            }
+        }
     }
 }
 
@@ -239,6 +249,14 @@ void LiveRunner::run() {
     }
 
     if (cfg_.live) {
+        // kill 闩锁: 上一次风险 kill 未被人工清除 → 拒绝交易 (stop_ 置位, 主循环不进交易迭代)。
+        if (const fs::path latch_p = fs::path(cfg_.state_dir) / "KILL_LATCH"; fs::exists(latch_p)) {
+            std::fprintf(stderr,
+                         "KILL_LATCH present (%s) — prior risk-kill not cleared; refusing to arm. "
+                         "rm the file to resume.\n",
+                         latch_p.string().c_str());
+            trip_kill("kill-latch");
+        }
         if (submitter_ == nullptr) {
             owned_submitter_ = std::make_unique<clob::ClobSubmitter>(rate_limiter_.get());
             submitter_ = owned_submitter_.get();
