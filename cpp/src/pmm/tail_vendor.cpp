@@ -90,8 +90,8 @@ std::optional<Candidate> parse_candidate(const nlohmann::json& m, double now_uni
     }
 }
 
-std::optional<Quote> decide(const Candidate& c, const Config& cfg, double deployed_coin,
-                            double deployed_total) {
+std::optional<Quote> decide(const Candidate& c, const Config& cfg, double deployed_market,
+                            double deployed_coin, double deployed_total) {
     if (c.days_left < cfg.days_min || c.days_left > cfg.days_max) return std::nullopt;
     if (c.yes_ask <= 0 || c.yes_ask >= 1) return std::nullopt;
     // 卖价 = 压最优卖一 1 tick, 但不低于 floor; 必须仍在校准带内且不越过买一 (绝不当 taker)。
@@ -108,6 +108,7 @@ std::optional<Quote> decide(const Candidate& c, const Config& cfg, double deploy
     double size = std::floor(cfg.per_order_usd / no_price);
     if (size < cfg.min_shares) return std::nullopt;
     const double notional = size * no_price;
+    if (deployed_market + notional > cfg.per_market_usd + 1e-9) return std::nullopt;
     if (deployed_coin + notional > cfg.per_coin_usd + 1e-9) return std::nullopt;
     if (deployed_total + notional > cfg.total_usd + 1e-9) return std::nullopt;
 
@@ -124,7 +125,8 @@ bool should_pull(const Candidate& c, const Config& cfg) {
 
 std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
                          const std::vector<OpenOrder>& open,
-                         const std::map<std::string, double>& held_coin, double held_total,
+                         const std::map<std::string, double>& held_coin,
+                         const std::map<std::string, double>& held_token, double held_total,
                          const Config& cfg) {
     std::vector<Action> out;
     // ---- 撤单侧: 离场/pull/被压价 ----
@@ -152,15 +154,17 @@ std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
     // ---- 报单侧: 轮内累计 (resting=留场单 + held; 撤掉的预算即时释放) ----
     double total = held_total;
     std::map<std::string, double> coin = held_coin;
+    std::map<std::string, double> market = held_token;  // no_token -> 已部署 (held $1/股 + resting)
     for (const auto& [tok, po] : keep) {
         total += po->no_price * po->size;
         if (!po->coin.empty()) coin[po->coin] += po->no_price * po->size;
+        market[tok] += po->no_price * po->size;
     }
     int n_orders = static_cast<int>(keep.size());
     for (const auto& [tok, c] : cands) {
         if (keep.count(tok) != 0U) continue;
         if (n_orders >= cfg.max_orders) break;
-        const auto q = decide(c, cfg, coin[c.coin], total);
+        const auto q = decide(c, cfg, market[tok], coin[c.coin], total);
         if (!q) continue;
         out.push_back({Action::Kind::kPlace, q->no_token, q->no_price, q->size, "", q->note});
         const double notional = q->no_price * q->size;

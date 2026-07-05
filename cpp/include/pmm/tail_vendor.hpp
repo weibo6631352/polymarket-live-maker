@@ -37,6 +37,8 @@ struct Config {
     double days_max{6.0};
     double per_order_usd{20};   // 单笔 NO 抵押上限
     double per_coin_usd{60};    // 单币种已部署 (resting+filled) 抵押上限
+    double per_market_usd{25};  // 单市场已部署上限 (分散优先: 防同一买家反复加注同一盘吃穿币种额度;
+                                // 默认须 ≥ per_order 单笔名义, 否则一单都下不出)
     double total_usd{60};       // 总抵押上限
     int max_orders{8};
     double min_shares{5};       // PM 最小单
@@ -56,9 +58,11 @@ struct Quote {
                                                        double now_unix);
 
 // 候选 -> 报单; 拒绝: 带外/期限外/压过买一/触资金上限。纯函数。
-// deployed_coin / deployed_total = 该币种/全局已占用抵押 (resting notional + held collateral)。
+// deployed_market / deployed_coin / deployed_total = 该市场/币种/全局已占用抵押
+// (resting notional + held collateral)。
 [[nodiscard]] std::optional<Quote> decide(const Candidate& c, const Config& cfg,
-                                          double deployed_coin, double deployed_total);
+                                          double deployed_market, double deployed_coin,
+                                          double deployed_total);
 
 // 持单退出判断: true = 该撤 (带外/逼近障碍/临期)。纯函数。
 [[nodiscard]] bool should_pull(const Candidate& c, const Config& cfg);
@@ -85,6 +89,7 @@ struct Action {
 [[nodiscard]] std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
                                        const std::vector<OpenOrder>& open,
                                        const std::map<std::string, double>& held_coin,
+                                       const std::map<std::string, double>& held_token,
                                        double held_total, const Config& cfg);
 
 // ---- sheet 模式: 精确执行人工指定清单 (绕过扫描/decide, 但硬顶与安全校验同一套) ----

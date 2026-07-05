@@ -43,6 +43,7 @@ namespace {
 constexpr double kCeilTotalUsd = 250.0;
 constexpr double kCeilPerCoinUsd = 100.0;
 constexpr double kCeilPerOrderUsd = 25.0;
+constexpr double kCeilPerMarketUsd = 50.0;
 constexpr int kCeilOrders = 24;
 
 std::atomic<bool> g_run{true};
@@ -65,6 +66,7 @@ void jlog(std::ofstream& f, json j) {
 struct HeldState {
     double total{0};                                    // 已成交持有的抵押 ($1/股保守)
     std::map<std::string, double> coin;                 // 币种 -> 抵押
+    std::map<std::string, double> token_held;           // no_token -> 抵押 (单市场集中度刹车)
     std::map<std::string, std::string> token_coin;      // 下过单的 no_token -> coin (fill 归因)
     std::map<std::string, std::string> token_note;
     std::string last_trade_id;                          // 已入账的最新成交 id (重启补账基准)
@@ -82,6 +84,8 @@ HeldState load_held(std::ofstream& lf) {
         // range-for 不给 .items() 里层的临时续命 (悬垂 UB) — 先落成具名对象再迭代。
         const json jc = j.value("held_coin", json::object());
         for (const auto& [k, v] : jc.items()) st.coin[k] = v.get<double>();
+        const json jth = j.value("token_held", json::object());
+        for (const auto& [k, v] : jth.items()) st.token_held[k] = v.get<double>();
         const json jtc = j.value("token_coin", json::object());
         for (const auto& [k, v] : jtc.items()) st.token_coin[k] = v.get<std::string>();
         const json jtn = j.value("token_note", json::object());
@@ -99,7 +103,7 @@ void save_held(const HeldState& st, std::ofstream& lf) {
     std::filesystem::create_directories("state", ec);
     const json j{{"held_total", st.total},       {"held_coin", st.coin},
                  {"token_coin", st.token_coin},  {"token_note", st.token_note},
-                 {"last_trade_id", st.last_trade_id}};
+                 {"token_held", st.token_held},  {"last_trade_id", st.last_trade_id}};
     const std::string tmp = std::string(kHeldPath) + ".tmp";
     {
         std::ofstream out(tmp, std::ios::trunc);
@@ -198,6 +202,7 @@ int main(int argc, char** argv) {
     cfg.total_usd = env_low("TV_TOTAL_USD", 60.0, kCeilTotalUsd);
     cfg.per_coin_usd = env_low("TV_PER_COIN_USD", 60.0, kCeilPerCoinUsd);
     cfg.per_order_usd = env_low("TV_PER_ORDER_USD", 20.0, kCeilPerOrderUsd);
+    cfg.per_market_usd = env_low("TV_PER_MARKET_USD", 15.0, kCeilPerMarketUsd);
     cfg.max_orders = static_cast<int>(env_low("TV_MAX_ORDERS", 8, kCeilOrders));
     const int scan_s = static_cast<int>(env_low("TV_SCAN_S", 300, 3600));
 
@@ -254,6 +259,7 @@ int main(int argc, char** argv) {
             const double sz = f.value("size", 0.0);
             st.total += sz;
             st.coin[it->second] += sz;
+            st.token_held[f.value("token_id", "")] += sz;
         }
         save_held(st, lf);
     };
@@ -364,7 +370,7 @@ int main(int argc, char** argv) {
         }
 
         // ---- 3) 决策 (纯函数) -> 执行 ----
-        const auto actions = tail::plan(cands, open, st.coin, st.total, cfg);
+        const auto actions = tail::plan(cands, open, st.coin, st.token_held, st.total, cfg);
         int executed = 0;
         for (const auto& a : actions) {
             if (!g_run.load()) break;
