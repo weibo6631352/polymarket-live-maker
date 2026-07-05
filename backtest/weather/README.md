@@ -9,7 +9,19 @@ correction → bucket probabilities → comparison/backtest vs PM mids.
 **Zero orders, zero keys, stdlib-only Python.** Everything caches under `cache/`
 (gitignored).
 
-## VERDICT (2026-07, ~unchanged on the 2026-07-03 rebuild)
+## VERDICT — CLOSED 2026-07-05 (strategy line decommissioned)
+
+Final chain of evidence: (1) model line — PM beats the free model (below); (2) maker line — live
+trial 2026-07-04 lost $11.24 (all fills in the Shanghai ramp, -14c/sh settle-P&L); (3) 3-day
+resolved-cohort tape re-measurement (jul-1/2/3, 260k prints, 11.7M shares): pooled maker capture
++0.07/-0.06/-0.46 c/sh ~= ZERO, no local-hour cell stable across days; (4) crypto-tail transplant
+(sell 2-7c temp tails): -0.02/-1.36 c/sh — temp is FORECASTABLE, tails are priced by forecasts;
+(5) every "positive pocket" (buy-side 15-40c etc.) flipped sign across days = noise. Rewards for
+the trial day: $0.49 vs -$11.24 trading. Tooling: maker_hour_slice.py (--cohort). Ops units
+removed 2026-07-05 (box archive /root/temp-trial-archive.tar.gz). REVIVAL = real forecasting
+skill (MOS path below) only.
+
+## Original model verdict (2026-07, ~unchanged on the 2026-07-03 rebuild)
 
 **The market beats the free model.** Original full run: PM T−1 mids Brier **0.0616** vs
 free-model **0.0674** (paired t ≈ 2.6); PM won in *every* subset (US/intl, hot/cold,
