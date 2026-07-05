@@ -15,7 +15,7 @@
     expected_edge ≈ sell_px × (1 − 1/ratio),与锚定 edge 同一尺度合并排名。
   - 输出 top-N slugs;bot 端热读,名单外挂单自动撤(资本轮换)。
 """
-import json, os, sys, time
+import json, os, re, sys, time
 import requests
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,6 +31,27 @@ def days_left(T):
 
 def sell_px(ask):
     return max(0.02, round(ask - TICK, 3))
+
+
+def parse_strike(slug):
+    """slug 里的执行价: above-68k -> 68000, above-1pt1 -> 1.1, above-120 -> 120。解析不出 -> None。"""
+    m = re.search(r"above-(\d+(?:pt\d+)?)(k?)", slug or "")
+    if not m:
+        return None
+    v = float(m.group(1).replace("pt", "."))
+    return v * (1000 if m.group(2) == "k" else 1)
+
+
+def spot_prices():
+    out = {}
+    for sym, coin in (("SOLUSDT", "SOL"), ("XRPUSDT", "XRP"), ("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")):
+        try:
+            r = requests.get(f"https://data-api.binance.vision/api/v3/ticker/price?symbol={sym}",
+                             timeout=15, headers={"User-Agent": "research/0.1"})
+            out[coin] = float(r.json()["price"])
+        except Exception:
+            pass
+    return out
 
 
 def act_w(vol24):
@@ -73,6 +94,7 @@ def anchored_rows():
 def unanchored_rows():
     """SOL/XRP strike dailies via the bot's own gamma series (10022=SOL, 10023=XRP)."""
     out = []
+    spots = spot_prices()
     # XRP 日盘实际挂在 series 10024 (10023 空转了两天, 2026-07-05 普查发现); 两个都查取并集。
     for sid, coin in (("10022", "SOL"), ("10023", "XRP"), ("10024", "XRP")):
         try:
@@ -103,10 +125,17 @@ def unanchored_rows():
                     bid = float(m.get("bestBid") or 0)
                 except Exception:
                     bid = 0.0
+                # 执行价-现货常识校验 (2026-07-06 实亏教训: "SOL above 30" 在 SOL=82 时是深度实值,
+                # 空 bid 让 bid≤0.04 形同虚设 → 卖 7c 的必赢 YES = 送钱)。无锚行一律要求真 OTM。
+                strike = parse_strike(slug)
+                spot = spots.get(coin)
+                if strike is None or spot is None or strike < spot * 1.05:
+                    continue
                 clamp = False
                 if ask > BAND[1]:
-                    # 无锚币的首卖授权: 买盘 ≤4c 确认仍是深尾 (bid 已抬高 = 市场认真了, 不碰)
-                    if bid <= 0.04:
+                    # 首卖授权: 需可见买盘且 ≤4c (None/空书按拒绝处理) + 更深的 OTM 余量
+                    raw_bid = m.get("bestBid")
+                    if raw_bid is not None and 0 < float(raw_bid) <= 0.04 and strike >= spot * 1.08:
                         clamp = True
                     else:
                         continue
