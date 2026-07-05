@@ -272,6 +272,7 @@ int main(int argc, char** argv) {
     long long tick_count = 0;
 
     while (g_run.load()) {
+        try {
         const double now = static_cast<double>(std::time(nullptr));
 
         // ---- STOP 急停 (轮首; 睡眠中每秒也查 -> 最长 1s 响应) ----
@@ -424,6 +425,11 @@ int main(int argc, char** argv) {
         if (tick_count % 12 == 0 && armed)
             if (auto b = sub->usdc_balance()) hb["usdc"] = *b;
         jlog(lf, hb);
+        } catch (const std::exception& e) {
+            // 瞬时 API 故障 (CLOB 5xx/网络) 不炸进程 — 记日志, 睡到下一轮重试。实测 2026-07-05:
+            // 一次 get_order_book 抛 ApiError → SIGABRT → systemd 重启 (状态无损, 但不该死)。
+            jlog(lf, {{"ev", "error"}, {"what", std::string("scan_exception: ") + e.what()}});
+        }
         ++tick_count;
         for (int i = 0; i < scan_s && g_run.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
