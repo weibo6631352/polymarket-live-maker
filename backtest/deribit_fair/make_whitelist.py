@@ -73,7 +73,8 @@ def anchored_rows():
 def unanchored_rows():
     """SOL/XRP strike dailies via the bot's own gamma series (10022=SOL, 10023=XRP)."""
     out = []
-    for sid, coin in (("10022", "SOL"), ("10023", "XRP")):
+    # XRP 日盘实际挂在 series 10024 (10023 空转了两天, 2026-07-05 普查发现); 两个都查取并集。
+    for sid, coin in (("10022", "SOL"), ("10023", "XRP"), ("10024", "XRP")):
         try:
             evs = requests.get(f"{GAMMA}/events",
                                params={"series_id": sid, "closed": "false", "limit": "100"},
