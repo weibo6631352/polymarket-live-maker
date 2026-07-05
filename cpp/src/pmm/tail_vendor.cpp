@@ -97,7 +97,13 @@ std::optional<Quote> decide(const Candidate& c, const Config& cfg, double deploy
     // 卖价 = 压最优卖一 1 tick, 但不低于 floor; 必须仍在校准带内且不越过买一 (绝不当 taker)。
     double sell_yes = std::max(cfg.floor_yes, c.yes_ask - cfg.tick);
     sell_yes = round_tick(sell_yes, cfg.tick);
-    if (sell_yes < cfg.yes_min || sell_yes > cfg.yes_max) return std::nullopt;
+    if (sell_yes > cfg.yes_max) {
+        // ask 肥/空书: 默认跳过 (ask 高可能是真概率高)。策展授权 band_clamp 的市场 (fair 锚证明便宜)
+        // → 站到带顶当第一个卖家, 吃压缩前的肥溢价 (实测: 新 SOL 盘卖侧空置 15h+)。
+        if (!c.band_clamp) return std::nullopt;
+        sell_yes = cfg.yes_max;
+    }
+    if (sell_yes < cfg.yes_min) return std::nullopt;
     if (sell_yes <= c.yes_bid + 1e-9) return std::nullopt;
 
     // 排不到竞争卖压之前 (地板卡死 → 只能同价/更差加入竞争墙后排队 = 死资本) → 不下单,
@@ -116,9 +122,14 @@ std::optional<Quote> decide(const Candidate& c, const Config& cfg, double deploy
 }
 
 bool should_pull(const Candidate& c, const Config& cfg) {
+    if (c.days_left < cfg.days_min * 0.5) return true;         // 临期 -> 撤 (最后半天不接新逆选)
+    if (c.band_clamp) {
+        // 首卖 (空书/junk 报价) 盘: mid/spread 规则会被垃圾远端 ask 假触发 (bid 0.01/ask 0.96
+        // → mid 0.49 → 误撤 → churn)。只信买盘: 买一真抬到出口价才是行情逼近的可靠信号。
+        return c.yes_bid >= cfg.yes_exit;
+    }
     const double mid = (c.yes_bid + c.yes_ask) / 2.0;
     if (mid >= cfg.yes_exit) return true;                      // 行情逼近障碍 -> 撤
-    if (c.days_left < cfg.days_min * 0.5) return true;         // 临期 -> 撤 (最后半天不接新逆选)
     if (c.yes_ask - c.yes_bid > 0.20) return true;             // 书面崩坏 -> 撤
     return false;
 }

@@ -47,16 +47,27 @@ def anchored_rows():
     for r in d:
         if r.get("kind") != "terminal_gt" or not r.get("ask") or r.get("fair_hi") is None:
             continue
-        if not (BAND[0] <= r["ask"] <= BAND[1]) or not (DAYS[0] <= days_left(r["T"]) <= DAYS[1]):
+        if not (DAYS[0] <= days_left(r["T"]) <= DAYS[1]):
             continue
-        px = sell_px(r["ask"])
+        clamp = False
+        if r["ask"] > BAND[1]:
+            # 首卖 (clamp): ask 肥/空书但锚定 fair 极低 → 授权 bot 站到带顶 7c 当第一个卖家。
+            # 锚是唯一授权来源: fair_hi ≤ 2% 才够 (7c − 2% ≥ 5c 边际); bid 已抬到带内的不碰。
+            if r["fair_hi"] <= 0.02 and (r.get("bid") or 0) <= 0.04 and r["ask"] <= 0.98:
+                clamp = True
+            else:
+                continue
+        elif r["ask"] < BAND[0]:
+            continue
+        px = BAND[1] if clamp else sell_px(r["ask"])
         edge = px - r["fair_hi"]
         if edge < MIN_ANCHORED_EDGE:
             continue
         out.append({"slug": r["slug"], "coin": r["coin"], "ask": r["ask"], "sell": px,
                     "fair_hi": r["fair_hi"], "edge": round(edge, 4), "anchor": "deribit",
                     "days": round(days_left(r["T"]), 2), "vol24": round(float(r.get("vol24") or 0)),
-                    "score": round(edge * act_w(r.get("vol24")), 4)})
+                    "clamp": clamp,
+                    "score": round(edge * (act_w(r.get("vol24")) if not clamp else 0.6), 4)})
     return out
 
 def unanchored_rows():
@@ -85,16 +96,30 @@ def unanchored_rows():
                     T = datetime.datetime.fromisoformat(end.replace("Z", "+00:00")).timestamp()
                 except Exception:
                     continue
-                if not (BAND[0] <= ask <= BAND[1]) or not (DAYS[0] <= days_left(T) <= DAYS[1]):
+                if not (DAYS[0] <= days_left(T) <= DAYS[1]):
                     continue
-                px = sell_px(ask)
+                try:
+                    bid = float(m.get("bestBid") or 0)
+                except Exception:
+                    bid = 0.0
+                clamp = False
+                if ask > BAND[1]:
+                    # 无锚币的首卖授权: 买盘 ≤4c 确认仍是深尾 (bid 已抬高 = 市场认真了, 不碰)
+                    if bid <= 0.04:
+                        clamp = True
+                    else:
+                        continue
+                elif ask < BAND[0]:
+                    continue
                 ratio = HIST_RATIO[coin]
+                px = BAND[1] if clamp else sell_px(ask)
                 v24 = m.get("volume24hr") or 0
                 e = px * (1 - 1 / ratio)
                 out.append({"slug": m.get("slug"), "coin": coin, "ask": ask, "sell": px,
                             "fair_hi": round(px / ratio, 4), "edge": round(e, 4),
                             "anchor": f"hist{ratio}x", "days": round(days_left(T), 2),
-                            "vol24": round(float(v24)), "score": round(e * act_w(v24), 4)})
+                            "vol24": round(float(v24)), "clamp": clamp,
+                            "score": round(e * (act_w(v24) if not clamp else 0.5), 4)})
     return out
 
 def main():
@@ -112,8 +137,10 @@ def main():
         print(f"  {r['slug']:55} {r['coin']:4} ask={r['ask']:.3f} sell={r['sell']:.3f} "
               f"fair≤{r['fair_hi']:.4f} edge={r['edge']:+.4f} v24={r['vol24']:>6} score={r['score']:.4f} "
               f"d={r['days']:.1f} [{r['anchor']}]", file=sys.stderr)
-    print(json.dumps({"generated_at": int(time.time()), "criteria": "up-tail 2.1-7c, d1-6, ranked edge",
-                      "slugs": [r["slug"] for r in top], "detail": top}, indent=1))
+    print(json.dumps({"generated_at": int(time.time()), "criteria": "up-tail 2.1-7c, d1-6, ranked edge+activity; clamp=first-seller",
+                      "slugs": [r["slug"] for r in top],
+                      "clamp": [r["slug"] for r in top if r.get("clamp")],
+                      "detail": top}, indent=1))
 
 if __name__ == "__main__":
     main()

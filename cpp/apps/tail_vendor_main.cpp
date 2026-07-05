@@ -316,10 +316,16 @@ int main(int argc, char** argv) {
                 std::set<std::string> allow;
                 for (const auto& s : wj.value("slugs", json::array()))
                     allow.insert(s.get<std::string>());
+                std::set<std::string> clamp;
+                for (const auto& s : wj.value("clamp", json::array()))
+                    clamp.insert(s.get<std::string>());
                 if (!allow.empty()) {
                     wl_size = allow.size();
-                    for (auto it = cands.begin(); it != cands.end();)
-                        it = (allow.count(it->second.slug) == 0) ? cands.erase(it) : std::next(it);
+                    for (auto it = cands.begin(); it != cands.end();) {
+                        if (allow.count(it->second.slug) == 0) { it = cands.erase(it); continue; }
+                        it->second.band_clamp = clamp.count(it->second.slug) != 0;
+                        ++it;
+                    }
                 }
             } catch (...) {
                 jlog(lf, {{"ev", "error"}, {"what", "whitelist_parse — ignored, scan unrestricted"}});

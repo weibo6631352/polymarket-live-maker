@@ -25,6 +25,8 @@ struct Candidate {
     double yes_bid{0};       // gamma bestBid (YES)
     double yes_ask{1};       // gamma bestAsk (YES)
     double days_left{0};     // endDate - now
+    bool band_clamp{false};  // 策展授权"首卖": ask 肥/空书时允许 clamp 到带顶 yes_max 当第一个卖家
+                             // (授权条件在 curator 端: 锚定 fair≤2% 或无锚但 bid≤4c 确认深尾)
 };
 
 // 卖价决策 + 风控参数。编译期硬顶在 app 层 (env 只能调低)。

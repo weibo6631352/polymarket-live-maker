@@ -150,6 +150,22 @@ int main() {
     // 20d) decide skip: 竞争卖压已在地板下 (ask 0.019 < floor 0.02) -> 排不到前面, 不下单
     auto cw = *c; cw.yes_ask = 0.019; cw.yes_bid = 0.005;
     assert(!decide(cw, cfg, 0.0, 0.0, 0.0));
+    // 20f) 首卖 clamp: ask 肥 (0.5) 时默认跳过; band_clamp 授权 -> 站到带顶 7c (NO 0.93)
+    auto cfat = *c; cfat.yes_ask = 0.50; cfat.yes_bid = 0.01;
+    assert(!decide(cfat, cfg, 0.0, 0.0, 0.0));
+    cfat.band_clamp = true;
+    auto qc = decide(cfat, cfg, 0.0, 0.0, 0.0);
+    assert(qc && std::abs((1.0 - qc->no_price) - 0.07) < 1e-9);
+    // 20g) clamp 但买盘已越过带顶 (bid 0.08 > 0.07) -> 拒绝 (不越 bid)
+    cfat.yes_bid = 0.08;
+    assert(!decide(cfat, cfg, 0.0, 0.0, 0.0));
+
+    // 20h) clamp 盘的 pull: 垃圾书 (bid 0.01/ask 0.96) 不误杀; 买一真抬到 0.10+ 才撤
+    auto cjunk = *c; cjunk.band_clamp = true; cjunk.yes_bid = 0.01; cjunk.yes_ask = 0.96;
+    assert(!should_pull(cjunk, cfg));
+    cjunk.yes_bid = 0.11;
+    assert(should_pull(cjunk, cfg));
+
     // 20e) 单市场集中度 cap: 该市场已部署接近 per_market_usd -> 拒绝 (同一买家反复加注防吃穿)
     assert(!decide(*c, cfg, cfg.per_market_usd - 1.0, 0.0, 0.0));
     // plan 侧: held_token 里已计入的市场不再补挂
