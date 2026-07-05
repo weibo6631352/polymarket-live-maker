@@ -34,7 +34,13 @@ def main():
         if sh <= 0:
             continue
         slug = notes.get(tok, "")
-        m = (get(f"https://gamma-api.polymarket.com/markets?slug={slug}") or [None])[0] if slug else None
+        m = None
+        if slug:
+            # gamma /markets 默认过滤 closed 行 (删失陷阱, EXECUTION-MECHANICS) — 先查活的, 空则查 closed
+            rows = get(f"https://gamma-api.polymarket.com/markets?slug={slug}") or []
+            if not rows:
+                rows = get(f"https://gamma-api.polymarket.com/markets?slug={slug}&closed=true") or []
+            m = rows[0] if rows else None
         if not m or not m.get("closed"):
             continue
         try:
