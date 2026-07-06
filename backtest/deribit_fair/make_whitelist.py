@@ -65,10 +65,16 @@ def act_w(vol24):
 def anchored_rows():
     d = json.load(open(os.path.join(HERE, "discrepancies.json")))
     out = []
+    spots = spot_prices()
+    COIN_KEY = {"BTC": "BTC", "ETH": "ETH"}
     for r in d:
         if r.get("kind") != "terminal_gt" or not r.get("ask") or r.get("fair_hi") is None:
             continue
         if not (DAYS[0] <= days_left(r["T"]) <= DAYS[1]):
+            continue
+        # 执行价-现货皮带 (锚定路径也要: 防 fair 映射错误/K 错位让实值盘混入 — clamp 事故的同类洞)
+        spot = spots.get(r.get("coin"))
+        if not r.get("K") or not spot or r["K"] < spot * 1.03:
             continue
         clamp = False
         if r["ask"] > BAND[1]:

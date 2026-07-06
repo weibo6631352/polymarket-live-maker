@@ -308,27 +308,38 @@ int main(int argc, char** argv) {
         // ---- 1.5) 会话策展白名单 (LLM 端产出 state/tail_vendor_whitelist.json, 每轮热读) ----
         // {"slugs": [...]}: 非空 → 只做名单内市场; 名单外的在场挂单变 left_window → 撤 → 资本轮换。
         // 名单全不匹配 = 全撤且不下新单 (安全方向); 坏文件/空名单 = 忽略 (不限制)。
+        // 策展白名单是唯一的交易授权来源 — FAIL-CLOSED: 文件缺失/损坏/空名单 → 本轮不交易
+        // (candidates 清空; 在场挂单会被 left_window 撤掉 = 安全方向)。绝不退化为无策展全宇宙交易。
         std::size_t wl_size = 0;
-        if (std::ifstream wf("state/tail_vendor_whitelist.json"); wf.good()) {
-            try {
-                json wj;
-                wf >> wj;
-                std::set<std::string> allow;
-                for (const auto& s : wj.value("slugs", json::array()))
-                    allow.insert(s.get<std::string>());
-                std::set<std::string> clamp;
-                for (const auto& s : wj.value("clamp", json::array()))
-                    clamp.insert(s.get<std::string>());
-                if (!allow.empty()) {
-                    wl_size = allow.size();
-                    for (auto it = cands.begin(); it != cands.end();) {
-                        if (allow.count(it->second.slug) == 0) { it = cands.erase(it); continue; }
-                        it->second.band_clamp = clamp.count(it->second.slug) != 0;
-                        ++it;
+        {
+            bool authorized = false;
+            std::ifstream wf("state/tail_vendor_whitelist.json");
+            if (wf.good()) {
+                try {
+                    json wj;
+                    wf >> wj;
+                    std::set<std::string> allow;
+                    for (const auto& s : wj.value("slugs", json::array()))
+                        allow.insert(s.get<std::string>());
+                    std::set<std::string> clamp;
+                    for (const auto& s : wj.value("clamp", json::array()))
+                        clamp.insert(s.get<std::string>());
+                    if (!allow.empty()) {
+                        authorized = true;
+                        wl_size = allow.size();
+                        for (auto it = cands.begin(); it != cands.end();) {
+                            if (allow.count(it->second.slug) == 0) { it = cands.erase(it); continue; }
+                            it->second.band_clamp = clamp.count(it->second.slug) != 0;
+                            ++it;
+                        }
                     }
+                } catch (...) {
                 }
-            } catch (...) {
-                jlog(lf, {{"ev", "error"}, {"what", "whitelist_parse — ignored, scan unrestricted"}});
+            }
+            if (!authorized) {
+                cands.clear();
+                jlog(lf, {{"ev", "error"},
+                          {"what", "whitelist missing/corrupt/empty — FAIL-CLOSED, no trading this scan"}});
             }
         }
 
