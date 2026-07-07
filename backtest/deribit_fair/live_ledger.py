@@ -99,7 +99,14 @@ def main():
         # 与入场价的差 = 入场后 fair 漂移 (持仓被测试的领先信号; BTC 7/4 实测 3.3%→8.1% 即此列)
 
         status = "open"
-        m = (get(f"https://gamma-api.polymarket.com/markets?slug={slug}") or [None])[0] if slug != "?" else None
+        # gamma /markets?slug= 默认过滤 closed 行 (删失陷阱, commit e3d1174) — 先查活的, 空则查 closed;
+        # 否则已结算仓位永远显示 open, realized P&L 永远为 0 (确认指标失灵)。
+        m = None
+        if slug != "?":
+            rows = get(f"https://gamma-api.polymarket.com/markets?slug={slug}") or []
+            if not rows:
+                rows = get(f"https://gamma-api.polymarket.com/markets?slug={slug}&closed=true") or []
+            m = rows[0] if rows else None
         if m and m.get("closed"):
             try:
                 yes_px = float(json.loads(m["outcomePrices"])[0]) if isinstance(m.get("outcomePrices"), str) \
