@@ -26,7 +26,7 @@
 ## 每周
 - `paper_ledger.py`(标记 + 按规则开新纸面仓;5 结算/0 触及 @ 07-04)。
 
-## 结算周运维(7/6 起,每个结算日 12:00Z 后)
+## 结算周运维(7/6 起,每个结算日 **16:00Z**(noon ET,Binance 收盘)后 — 2026-07-07 实测 89/89 事件确认;此前误记 12:00Z)
 1. **确认结算**:gamma `/markets?slug=` → closed + outcomePrices。
 2. **记分**:live_ledger 自动把 RESOLVED 行计入 realized P&L 与命中数(判据:累计正 + 命中 ≤ Poisson+2σ)。
 3. **释放 held 上限**:结算后该 token 的抵押风险已定,但 USDC 未回(PM 不自动赎回)。
