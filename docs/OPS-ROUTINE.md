@@ -5,6 +5,10 @@
   白名单热读,实时盘口定价压墙前,持久账本 `state/tail_vendor_held.json`。
 - **监控**:会话内 Monitor 每 10min 巡检双单元(fills/halt/error/心跳失联/单元死亡,期望态文件
   `tv_expected.txt`);自主循环 ~1h 兜底心跳。
+- **持久看门狗**(会话外,2026-07-07 起):`tv-watchdog.timer` 每 5min 跑 `cpp/deploy/tv_watchdog.sh` —
+  尊重 STOP flag;真业务拒单 halt 告警不拉起(保全现场);其它 down/卡死(心跳>15min)限速自动拉起
+  (≤4/h 超则闩锁);白名单>90min 未刷新告警。每轮写 `state/tv_watchdog_status.json`(pmpull 一眼看健康:
+  active/hb_age_s/wl_age_s/verdict/action)。补 systemd `Restart=on-failure` 不救 clean-exit(code 0) 的洞。
 - **急停**:`touch /root/polymarket-live-maker/STOP_TAIL_VENDOR`(1s 撤全部+退出)。
 
 ## 每日(会话循环里做,全零成本)
