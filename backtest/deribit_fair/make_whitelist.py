@@ -25,6 +25,11 @@ TICK = 0.001
 BAND = (0.021, 0.070)
 DAYS = (1.0, 6.0)
 MIN_ANCHORED_EDGE = 0.008
+# 2026-07-07 决策: 只做可 Deribit 直接锚定的 BTC/ETH。SOL/XRP 短期尾部无期权锚 (行权价落在
+# 短期双边期权 wing 之外, 实测 SOL wing 仅到 1.08x/PM 最近尾 1.11x = 零重叠), 只能用粗糙的历史
+# 常数比率, 是高 edge / 烂锚 / 高相关簇风险的一半; 且其大名义 edge 会在排名里挤掉干净锚定的 BTC/ETH。
+# 关掉 unanchored 路径 (代码保留, 可逆): 复活条件 = 给 SOL/XRP 上 ATM-IV regime 感知锚并离线证明。
+INCLUDE_UNANCHORED = False
 
 def days_left(T):
     return (T - time.time()) / 86400.0
@@ -160,7 +165,8 @@ def unanchored_rows():
 
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 12
-    rows = sorted(anchored_rows() + unanchored_rows(), key=lambda r: -r["score"])
+    rows = sorted(anchored_rows() + (unanchored_rows() if INCLUDE_UNANCHORED else []),
+                  key=lambda r: -r["score"])
     seen, top = set(), []
     for r in rows:
         if r["slug"] in seen:
