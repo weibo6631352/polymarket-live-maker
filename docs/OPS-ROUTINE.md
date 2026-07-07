@@ -13,7 +13,9 @@
 
 ## 每日(会话循环里做,全零成本)
 1. **刷新策展白名单**:`backtest/deribit_fair/push_whitelist.sh`(census→deribit→map→rank→推箱)。
-   边际口径:BTC/ETH 用 Deribit 锚,SOL/XRP 用历史比率 10.8x/6.4x。在场单若仍在新名单内不受影响。
+   边际口径(2026-07-07 起 **只做 BTC/ETH 直接 Deribit 锚**):SOL/XRP 短期尾部无期权锚(粗糙历史
+   比率 + 高相关簇风险 + 挤占干净锚定盘),已在 make_whitelist 关闭(`INCLUDE_UNANCHORED=False`,代码保留)。
+   已成交的 SOL/XRP 老仓持有到结算(不强平);挂单在新名单外自动撤(left_window)。在场单若仍在新名单内不受影响。
 2. **记分板**:`pmpull .../tail_vendor_log.jsonl ~/pm-data/ && python3 backtest/deribit_fair/live_ledger.py`
    (领先指标=入场 EV;fair 漂移在 fairY 列)。
 3. **账目对账**:USDC 变化必须能被成交/锁定逐笔解释(balance-check;差异>$0.5 即查)。
