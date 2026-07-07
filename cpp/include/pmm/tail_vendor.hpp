@@ -69,6 +69,11 @@ struct Quote {
 // 持单退出判断: true = 该撤 (带外/逼近障碍/临期)。纯函数。
 [[nodiscard]] bool should_pull(const Candidate& c, const Config& cfg);
 
+// 下单 response 分类 (纯函数, 可单测): 传输层 (http==0 超时/断连) 或服务端 5xx = 瞬时故障 ->
+// 只退避重试, 绝不计入 3-连拒 halt; 唯有真实 4xx 业务拒单 (坏定价/授权/余额) 才 halt 保全现场。
+// 2026-07-06 事故根因: 24s 网络抖动连拒 3 单误触 halt -> 干净退出 8h 无人管。
+[[nodiscard]] inline bool is_transient_place_error(int http) { return http == 0 || http >= 500; }
+
 // ---- 一轮的完整决策 (纯函数, app 只执行) ----
 struct OpenOrder {
     std::string no_token;

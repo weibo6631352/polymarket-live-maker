@@ -268,7 +268,8 @@ int main(int argc, char** argv) {
         for (auto it = missed.rbegin(); it != missed.rend(); ++it) ingest_fill(*it, "fill_recovered");
     }
 
-    int consecutive_rejects = 0;
+    int consecutive_rejects = 0;   // 业务拒单 (http 4xx) 连计数 -> 3 连 halt 保全现场
+    int consecutive_neterr = 0;    // 传输层/5xx 瞬时故障连计数 -> 退避, 绝不 halt
     long long tick_count = 0;
 
     while (g_run.load()) {
@@ -416,18 +417,36 @@ int main(int argc, char** argv) {
                                    {"price", a.no_price}, {"size", a.size}});
             jlog(lf, {{"ev", "place"}, {"note", a.note}, {"no_price", a.no_price},
                       {"size", a.size}, {"resp", r}});
-            if (r.value("status", "") == "PLACED") {
+            const std::string place_status = r.value("status", "");
+            const int place_http = r.value("http", 0);
+            // 传输层 (http==0: 超时/断连) 与服务端 (5xx) 瞬时故障 != 业务拒单: 订单未必真被拒,
+            // 更不代表定价/授权/余额系统性坏。2026-07-06 一次 24s 网络抖动连拒 3 单 -> 误触 halt
+            // -> bot 干净退出 8h 无人管 (挂单继续被吃)。故瞬时故障只退避, 绝不计入 halt。
+            const bool transient = tail::is_transient_place_error(place_http);
+            if (place_status == "PLACED") {
                 consecutive_rejects = 0;
+                consecutive_neterr = 0;
                 // fill 归因注册 (只登记真下过单的 token — 状态文件保持米粒大)
                 if (auto ic = cands.find(a.no_token); ic != cands.end()) {
                     st.token_coin[a.no_token] = ic->second.coin;
                     st.token_note[a.no_token] = ic->second.slug;
                     save_held(st, lf);
                 }
-            } else if (++consecutive_rejects >= 3) {
-                jlog(lf, {{"ev", "halt"}, {"why", "3 consecutive rejects — investigate"}});
-                g_run.store(false);
-                break;
+            } else if (transient) {
+                jlog(lf, {{"ev", "neterr"}, {"note", a.note}, {"http", place_http}});
+                if (++consecutive_neterr >= 8) {  // 持续不可用 -> 本轮停手但保活到下一轮自愈
+                    jlog(lf, {{"ev", "pause"}, {"why", "sustained transport errors — backing off this scan"}});
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(800));
+                continue;  // 不计 executed, 不走 400ms 常规间隔
+            } else {  // 真实 4xx 业务拒单 (收到响应 -> 连通性正常); 3 连拒 halt 保全现场等人查
+                consecutive_neterr = 0;
+                if (++consecutive_rejects >= 3) {
+                    jlog(lf, {{"ev", "halt"}, {"why", "3 consecutive business rejects (http 4xx) — investigate"}});
+                    g_run.store(false);
+                    break;
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(400));
             ++executed;

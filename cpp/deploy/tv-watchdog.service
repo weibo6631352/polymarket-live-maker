@@ -1,0 +1,14 @@
+# tail-vendor 持久看门狗 (oneshot, 由 tv-watchdog.timer 每 5min 触发)。
+# 保活 + 心跳/白名单新鲜度告警 + 状态文件; 详见 tv_watchdog.sh 头注。
+# 安装: cp tv-watchdog.{service,timer} /etc/systemd/system/ && systemctl daemon-reload
+#       && systemctl enable --now tv-watchdog.timer
+[Unit]
+Description=tail-vendor watchdog (liveness + heartbeat/whitelist freshness)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+TimeoutStartSec=120
+ExecStart=/root/polymarket-live-maker/cpp/deploy/tv_watchdog.sh
+SyslogIdentifier=tv-watchdog

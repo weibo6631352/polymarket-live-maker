@@ -198,6 +198,15 @@ int main() {
                              {{"token_id", "123"}, {"price", 0.96}, {"size", 10.0}}});
     assert(validate_sheet(*parse_sheet(sdup), cfg).has_value());
 
-    std::printf("tail_vendor: 27/27 PASS\n");
+    // 27) 下单 response 分类: 传输层/5xx = 瞬时 (退避, 不 halt); 4xx/2xx-unmatched = 业务拒单 (计 halt)
+    assert(is_transient_place_error(0));      // 超时/断连 (curl 无 http 响应) -> 2026-07-06 事故根因
+    assert(is_transient_place_error(500));    // 服务端错误
+    assert(is_transient_place_error(503));    // 服务不可用
+    assert(!is_transient_place_error(400));   // 坏请求 (坏定价/参数) -> 真拒单
+    assert(!is_transient_place_error(401));   // 授权失败 -> 真拒单
+    assert(!is_transient_place_error(429));   // 限流 -> 业务信号, 该退但计入拒单谱系
+    assert(!is_transient_place_error(200));   // 2xx-but-unmatched 的业务拒单
+
+    std::printf("tail_vendor: 28/28 PASS\n");
     return 0;
 }
