@@ -5,7 +5,7 @@
 // 复用 + 每轮 ~10-30 个请求 + 无忙等; 无 SQLite 状态 (重启从 list_open_orders + 链上持仓对账)。
 //
 // 安全 (同 tail-seller): 默认 DRY; 武装 = PM_TRADER_LIVE=1 且 TV_ARM=1; 编译期硬顶 (env 只能调低):
-// 总抵押 $250 / 单币 $100 / 单笔 $25 / 挂单数 24; STOP_TAIL_VENDOR 文件急停 (撤全部+退出);
+// 总抵押 $500 / 单币 $200 / 单笔 $25 / 挂单数 60 (2026-07-07 扩容, 用户授权); STOP_TAIL_VENDOR 急停;
 // 连续 3 次下单被拒 -> 自动停机保全现场。
 //
 //   ./tail-vendor                       # 扫描模式 dry: 打印本轮会做什么
@@ -40,11 +40,11 @@ namespace tail = pmm::tail;
 
 namespace {
 // 编译期硬顶 — env 只能调低, 不能调高。
-constexpr double kCeilTotalUsd = 250.0;
-constexpr double kCeilPerCoinUsd = 100.0;
+constexpr double kCeilTotalUsd = 500.0;    // 2026-07-07 扩容 (用户授权; env 只能调低于此)
+constexpr double kCeilPerCoinUsd = 200.0;
 constexpr double kCeilPerOrderUsd = 25.0;
 constexpr double kCeilPerMarketUsd = 50.0;
-constexpr int kCeilOrders = 24;
+constexpr int kCeilOrders = 60;
 
 std::atomic<bool> g_run{true};
 void on_sig(int) { g_run.store(false); }
