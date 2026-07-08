@@ -21,6 +21,10 @@ try:
     import regime          # mania regime gate (same dir; CWD is set by the curate script)
 except Exception:
     regime = None
+try:
+    import touch_curate    # touch/reach satellite leg (env TV_TOUCH; dry/OFF by default)
+except Exception:
+    touch_curate = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GAMMA = "https://gamma-api.polymarket.com"
@@ -48,6 +52,11 @@ except ValueError:
 # tail hit). Couple the flags so a half-armed config (unanchored ON, gate OFF) can't sell them naked.
 if INCLUDE_UNANCHORED and not REGIME_GATE:
     sys.exit("make_whitelist: TV_UNANCHORED=1 requires TV_REGIME_GATE=1 (SOL/XRP must run behind the mania gate)")
+# Touch/reach satellite leg. Separate gate/floor/sizing lives in touch_curate; OFF by default. It carries
+# its OWN mania gate (tighter thresholds) so it does NOT require TV_REGIME_GATE here.
+# ⚠ NOT SAFE TO ARM until integration part (b): the bot must honor per-row collateral/shares, else it
+# default-sizes the touch tails and oversizes. Keep TV_TOUCH=0 until that ships.
+INCLUDE_TOUCH = os.environ.get("TV_TOUCH", "0") == "1"
 
 def days_left(T):
     return (T - time.time()) / 86400.0
@@ -214,15 +223,30 @@ def main():
         top.append(r)
         if len(top) >= n:
             break
-    for r in top:
+    # touch/reach satellite: separate gate/cap/sizing (touch_curate); APPENDED after core so it never
+    # competes for core's top-N slots or the per-coin slot cap. anchor="touch-model" marks these rows.
+    touch = []
+    if INCLUDE_TOUCH:
+        if touch_curate is None:
+            sys.exit("make_whitelist: TV_TOUCH=1 but touch_curate failed to import — refusing (fail-closed)")
+        tr = touch_curate.touch_rows()
+        if tr is None:
+            # touch mania gate unavailable -> omit the touch leg this cycle (core unaffected). Preserving
+            # last-good touch slugs on an outage lands with the C++ per-row sizing (integration part b).
+            print("  [touch] regime gate unavailable — omitting touch leg this cycle", file=sys.stderr)
+        else:
+            seen_core = {r["slug"] for r in top}
+            touch = [r for r in tr if r["slug"] not in seen_core]   # never duplicate a core slug
+    final = top + touch
+    for r in final:
         print(f"  {r['slug']:55} {r['coin']:4} ask={r['ask']:.3f} sell={r['sell']:.3f} "
               f"fair≤{r['fair_hi']:.4f} edge={r['edge']:+.4f} v24={r['vol24']:>6} score={r['score']:.4f} "
               f"d={r['days']:.1f} [{r['anchor']}]", file=sys.stderr)
     print(json.dumps({"generated_at": int(time.time()), "criteria": "up-tail 2.1-7c, d1-6, ranked edge+activity; clamp=first-seller",
-                      "slugs": [r["slug"] for r in top],
-                      "clamp": [r["slug"] for r in top if r.get("clamp")],
+                      "slugs": [r["slug"] for r in final],
+                      "clamp": [r["slug"] for r in final if r.get("clamp")],
                       "regime_paused": paused,   # coins the mania gate paused this run (validate_curation must not treat the shrink as a partial-pull)
-                      "detail": top}, indent=1))
+                      "detail": final}, indent=1))
 
 if __name__ == "__main__":
     main()

@@ -31,6 +31,14 @@ def coin_of(slug):
     return "?"
 
 
+def touch_slugs(wl):
+    """Slugs from the touch/reach satellite leg (anchor=touch-model). It is a VARIABLE-size satellite
+    (0..few; its own gate/cap in touch_curate), so it is EXCLUDED from the CORE completeness/collapse
+    gate below — otherwise a touch surge could mask a core partial-pull, or a legitimate touch drop-to-0
+    could trip the collapse floor. Empty when absent (backward compatible with pre-touch whitelists)."""
+    return {r.get("slug") for r in (wl.get("detail") or []) if r.get("anchor") == "touch-model"}
+
+
 def check(cond, msg):
     if not cond:
         FAILS.append(msg)
@@ -90,19 +98,22 @@ def main():
     except Exception as e:
         FAILS.append(f"新白名单读不动: {e}")
         new, slugs, n = {}, [], 0
+    core = [s for s in slugs if s not in touch_slugs(new)]   # 完整性/坍缩闸只在核心腿上跑 (触碰卫星腿豁免)
     paused = set(new.get("regime_paused", []))     # 空 = 无暂停 = 与旧行为完全一致 (向后兼容)
     active = {"BTC", "ETH", "SOL", "XRP"} - paused
-    new_np = sum(1 for s in slugs if coin_of(s) not in paused)   # 未暂停币的名单数
+    new_np = sum(1 for s in core if coin_of(s) not in paused)   # 未暂停"核心"币的名单数
     # 有未暂停币就要求它们至少出 5 个 (挡"某币被 mania 暂停时, 另一活跃币又部分拉取"的漏网);
     # 只有全币被暂停 (真·全面狂潮) 才允许空名单 = 整体停手。
     if active:
         check(new_np >= 5, f"未暂停币 slugs {new_np} < 5 (active={sorted(active)}, paused={sorted(paused)}) — 疑似部分拉取")
     if cur_wl_path and os.path.exists(cur_wl_path):
         try:
-            prev_slugs = json.load(open(cur_wl_path)).get("slugs", [])
+            prev = json.load(open(cur_wl_path))
+            prev_slugs = prev.get("slugs", [])
         except Exception:
-            prev_slugs = []
-        prev_np = sum(1 for s in prev_slugs if coin_of(s) not in paused)
+            prev, prev_slugs = {}, []
+        prev_core = [s for s in prev_slugs if s not in touch_slugs(prev)]
+        prev_np = sum(1 for s in prev_core if coin_of(s) not in paused)
         if prev_np >= 8:  # 上一版(未暂停币)足够大才做坍缩比较, 免小样本噪声
             floor = max(5, int(0.4 * prev_np))
             check(new_np >= floor,
