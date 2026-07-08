@@ -1,0 +1,20 @@
+[Unit]
+# Drop-aligned curation: the daily BTC/ETH tail ladder is created on a FIXED clock at
+# 16:00Z sharp (= settlement time), and its up-tail premium is fattest in the first ~30min
+# (measured: peak ~8.5c @10-20min -> ~5c @60min -> ~3c @120min) before it decays. The hourly
+# timer (OnUnitActiveSec=1h + jitter) is phase-random vs 16:00Z, so on the drop day it can miss
+# the fat window by up to ~60min. This fires the SAME curate.service a few times across the
+# fat window so the fresh ladder is whitelisted while premium is still fat. Reuses the pipeline's
+# fail-closed completeness gate (a too-early fire before the book opens just keeps the last good
+# whitelist). Books open ~10-20min post-creation, so the first fire is offset accordingly.
+Description=drop-aligned tail-vendor curation (16:00Z daily ladder, catch fat early premium)
+
+[Timer]
+OnCalendar=*-*-* 16:05:00 UTC
+OnCalendar=*-*-* 16:15:00 UTC
+OnCalendar=*-*-* 16:25:00 UTC
+Persistent=false
+Unit=tail-vendor-curate.service
+
+[Install]
+WantedBy=timers.target
