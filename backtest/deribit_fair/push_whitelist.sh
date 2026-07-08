@@ -18,6 +18,8 @@ echo "== pipeline (census -> deribit -> map) ==" >&2
 "$PY" map_markets.py >&2
 echo "== ranking ==" >&2
 "$PY" make_whitelist.py "$N" > /tmp/tail_whitelist.json
+echo "== completeness gate ==" >&2
+"$PY" validate_curation.py /tmp/tail_whitelist.json >&2   # same fail-closed gate as the hourly curate; set -e aborts before push on exit 1
 B64=$(base64 < /tmp/tail_whitelist.json | tr -d '\n')
 echo "== push to box ==" >&2
 pmbox "echo $B64 | base64 -d > /root/polymarket-live-maker/state/tail_vendor_whitelist.json && python3 -c 'import json; d=json.load(open(\"/root/polymarket-live-maker/state/tail_vendor_whitelist.json\")); print(len(d[\"slugs\"]), \"slugs installed, generated_at\", d[\"generated_at\"])'"

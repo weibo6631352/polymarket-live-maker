@@ -17,6 +17,10 @@
 """
 import json, os, re, sys, time
 import requests
+try:
+    import regime          # mania regime gate (same dir; CWD is set by the curate script)
+except Exception:
+    regime = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GAMMA = "https://gamma-api.polymarket.com"
@@ -25,11 +29,25 @@ TICK = 0.001
 BAND = (0.021, 0.070)
 DAYS = (1.0, 6.0)
 MIN_ANCHORED_EDGE = 0.008
-# 2026-07-07 决策: 只做可 Deribit 直接锚定的 BTC/ETH。SOL/XRP 短期尾部无期权锚 (行权价落在
-# 短期双边期权 wing 之外, 实测 SOL wing 仅到 1.08x/PM 最近尾 1.11x = 零重叠), 只能用粗糙的历史
-# 常数比率, 是高 edge / 烂锚 / 高相关簇风险的一半; 且其大名义 edge 会在排名里挤掉干净锚定的 BTC/ETH。
-# 关掉 unanchored 路径 (代码保留, 可逆): 复活条件 = 给 SOL/XRP 上 ATM-IV regime 感知锚并离线证明。
-INCLUDE_UNANCHORED = False
+# 2026-07-08: SOL/XRP REVIVED — adversarial re-eval overturned the 07-07 kill. Model-free 2-7c
+# realized edge +2.5/+4.1c, OOS-stable, SAFER than BTC/ETH in calm regimes (hit 0.4% vs 1.2%,
+# Sharpe 11.7 vs 5.3). The kill was ITM-clamp-bug-contaminated + assumed(not measured) cluster risk.
+# No pricing anchor needed: 2-7c band + strike-vs-spot sanity IS the selection. The ONE real caveat
+# (2021 mania: SOL tail hit 25-42%, 18mo undersamples it) is handled by regime.py's gate, NOT by
+# cutting the coin. Crowd-out of clean BTC/ETH (the 07-07 complaint) is fixed by PER_COIN_SLOTS.
+# Flags DEFAULT to the old live behavior (unanchored off, no gate) so this file is safe to deploy
+# as-is; arm the revival via env:  TV_UNANCHORED=1 TV_REGIME_GATE=1 TV_PER_COIN_SLOTS=8
+INCLUDE_UNANCHORED = os.environ.get("TV_UNANCHORED", "0") == "1"
+REGIME_GATE = os.environ.get("TV_REGIME_GATE", "0") == "1"
+try:
+    PER_COIN_SLOTS = int(os.environ.get("TV_PER_COIN_SLOTS", "0"))   # 0 = no per-coin slot cap
+except ValueError:
+    print(f"  [warn] TV_PER_COIN_SLOTS={os.environ.get('TV_PER_COIN_SLOTS')!r} malformed — using 8", file=sys.stderr)
+    PER_COIN_SLOTS = 8
+# Unanchored SOL/XRP MUST run behind the mania gate — it's their single blow-up regime (2021: 25-42%
+# tail hit). Couple the flags so a half-armed config (unanchored ON, gate OFF) can't sell them naked.
+if INCLUDE_UNANCHORED and not REGIME_GATE:
+    sys.exit("make_whitelist: TV_UNANCHORED=1 requires TV_REGIME_GATE=1 (SOL/XRP must run behind the mania gate)")
 
 def days_left(T):
     return (T - time.time()) / 86400.0
@@ -167,11 +185,32 @@ def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 12
     rows = sorted(anchored_rows() + (unanchored_rows() if INCLUDE_UNANCHORED else []),
                   key=lambda r: -r["score"])
-    seen, top = set(), []
+    # mania regime gate: drop coins flagged as mania-onset (2021-style blow-up protection; see regime.py)
+    paused = []
+    if REGIME_GATE:
+        if regime is None:
+            # fail-closed: never sell (esp. unanchored SOL/XRP) with the gate silently absent
+            sys.exit("make_whitelist: TV_REGIME_GATE=1 but regime.py failed to import — refusing (fail-closed)")
+        gate = regime.coin_gate()
+        errored = sorted(c for c, s in gate.items() if s.get("error"))
+        if errored:
+            # data-provider outage != mania. Refuse to emit a whitelist (exit non-zero) so the curate
+            # keeps the last-good complete list — never flush the book / never emit empty over a Binance blip.
+            sys.exit(f"make_whitelist: regime data unavailable for {errored} — refusing (fail-closed, keep last-good)")
+        paused = sorted(c for c, s in gate.items() if s["paused"])
+        if paused:
+            print("  [regime] PAUSED (mania gate): "
+                  + ", ".join(f"{c}({gate[c]['reason']})" for c in paused), file=sys.stderr)
+        rows = [r for r in rows if r["coin"] not in paused]
+    seen, top, per_coin = set(), [], {}
     for r in rows:
         if r["slug"] in seen:
             continue
+        # per-coin slot cap: stop a high-edge coin (SOL/XRP) crowding clean BTC/ETH out of the top-N
+        if PER_COIN_SLOTS and per_coin.get(r["coin"], 0) >= PER_COIN_SLOTS:
+            continue
         seen.add(r["slug"])
+        per_coin[r["coin"]] = per_coin.get(r["coin"], 0) + 1
         top.append(r)
         if len(top) >= n:
             break
@@ -182,6 +221,7 @@ def main():
     print(json.dumps({"generated_at": int(time.time()), "criteria": "up-tail 2.1-7c, d1-6, ranked edge+activity; clamp=first-seller",
                       "slugs": [r["slug"] for r in top],
                       "clamp": [r["slug"] for r in top if r.get("clamp")],
+                      "regime_paused": paused,   # coins the mania gate paused this run (validate_curation must not treat the shrink as a partial-pull)
                       "detail": top}, indent=1))
 
 if __name__ == "__main__":

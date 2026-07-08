@@ -80,22 +80,33 @@ def main():
     elif dd is not None:
         FAILS.append("discrepancies.json 不是 list")
 
-    # 4) 新白名单: >=5, 且相对上一版没有异常坍缩 (旧闸门只有 >=5)
+    # 4) 新白名单: >=5, 且相对上一版没有异常坍缩 (旧闸门只有 >=5)。
+    #    regime 感知: mania gate 会合法地缩表甚至清空 (整币暂停) — 这不是"部分拉取"。坍缩比较只在
+    #    "未暂停币"上做, 否则狂潮里 gate 反被完整性闸废掉 (gate 存在的意义正是那一刻)。
     try:
         new = json.load(open(new_wl_path))
-        n = len(new.get("slugs", []))
+        slugs = new.get("slugs", [])
+        n = len(slugs)
     except Exception as e:
         FAILS.append(f"新白名单读不动: {e}")
-        n = 0
-    check(n >= 5, f"新白名单 slugs {n} < 5")
+        new, slugs, n = {}, [], 0
+    paused = set(new.get("regime_paused", []))     # 空 = 无暂停 = 与旧行为完全一致 (向后兼容)
+    active = {"BTC", "ETH", "SOL", "XRP"} - paused
+    new_np = sum(1 for s in slugs if coin_of(s) not in paused)   # 未暂停币的名单数
+    # 有未暂停币就要求它们至少出 5 个 (挡"某币被 mania 暂停时, 另一活跃币又部分拉取"的漏网);
+    # 只有全币被暂停 (真·全面狂潮) 才允许空名单 = 整体停手。
+    if active:
+        check(new_np >= 5, f"未暂停币 slugs {new_np} < 5 (active={sorted(active)}, paused={sorted(paused)}) — 疑似部分拉取")
     if cur_wl_path and os.path.exists(cur_wl_path):
         try:
-            prev = len(json.load(open(cur_wl_path)).get("slugs", []))
+            prev_slugs = json.load(open(cur_wl_path)).get("slugs", [])
         except Exception:
-            prev = 0
-        if prev >= 8:  # 上一版足够大才做坍缩比较, 免小样本噪声
-            floor = max(5, int(0.4 * prev))
-            check(n >= floor, f"新白名单 {n} 相对上版 {prev} 坍缩 (需 >= {floor}) — 疑似部分拉取")
+            prev_slugs = []
+        prev_np = sum(1 for s in prev_slugs if coin_of(s) not in paused)
+        if prev_np >= 8:  # 上一版(未暂停币)足够大才做坍缩比较, 免小样本噪声
+            floor = max(5, int(0.4 * prev_np))
+            check(new_np >= floor,
+                  f"新白名单未暂停币 {new_np} 相对上版 {prev_np} 坍缩 (需 >= {floor}, paused={sorted(paused)}) — 疑似部分拉取")
 
     if FAILS:
         print("CURATION VALIDATION FAILED — 保留上一版白名单:", file=sys.stderr)
