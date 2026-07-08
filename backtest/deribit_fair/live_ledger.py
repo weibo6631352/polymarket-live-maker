@@ -45,6 +45,22 @@ def load_events(path):
     return evs
 
 
+HIST_RATIO = {"SOL": 10.8, "XRP": 6.4}   # unanchored fallback fair = premium / ratio (calibration 2026-07-03)
+
+
+def coin_of(slug):
+    s = (slug or "").lower()
+    if "bitcoin" in s: return "BTC"
+    if "ethereum" in s: return "ETH"
+    if "solana" in s: return "SOL"
+    if "xrp" in s: return "XRP"
+    return "?"
+
+
+def seg_of(coin):
+    return "core" if coin in ("BTC", "ETH") else "sx" if coin in ("SOL", "XRP") else "other"
+
+
 def main():
     evs = load_events(LOG)
     token_note = {}   # token -> slug (from place events)
@@ -86,15 +102,19 @@ def main():
 
     tot_shares = tot_cost = tot_prem = tot_ev = 0.0
     realized = 0.0
-    n_resolved = n_yes = 0
-    exp_yes = 0.0  # sum of fair_yes over resolved positions (Poisson expectation of tail hits)
+    # segment BTC/ETH (Deribit-anchored core) from SOL/XRP (unanchored) — a SOL/XRP hit must NOT be
+    # charged against the Deribit-core Poisson expectation (that conflation = false +2σ STOP alarm).
+    seg = {s: {"resolved": 0, "yes": 0, "exp": 0.0, "realized": 0.0} for s in ("core", "sx")}
     print(f"\n{'slug':52} {'sh':>6} {'no_cost':>8} {'prem':>7} {'fairY':>6} {'EV':>7}  status")
     for tok, d in sorted(fills.items(), key=lambda kv: -kv[1]["shares"]):
         slug = token_note.get(tok, "?")
+        coin = coin_of(slug); sg = seg_of(coin)
         avg_no = d["cost"] / d["shares"] if d["shares"] else 0.0
         prem = (1.0 - avg_no) * d["shares"]
         fr = fair.get(slug, {})
         fair_yes = fr.get("fair_hi")  # 注意: discrepancies.json 快照价 — 重跑管线后即为"当前 fair",
+        if fair_yes is None and coin in HIST_RATIO:   # SOL/XRP: 无 Deribit 锚 -> 扁平比率兜底 fair
+            fair_yes = round((1.0 - avg_no) / HIST_RATIO[coin], 4)
         ev = ((1.0 - fair_yes) - avg_no) * d["shares"] if fair_yes is not None else None
         # 与入场价的差 = 入场后 fair 漂移 (持仓被测试的领先信号; BTC 7/4 实测 3.3%→8.1% 即此列)
 
@@ -114,13 +134,15 @@ def main():
             except Exception:
                 yes_px = None
             if yes_px is not None:
-                n_resolved += 1
                 hit = yes_px > 0.5
-                n_yes += int(hit)
-                if fair_yes is not None:
-                    exp_yes += fair_yes
                 pnl = (-avg_no if hit else (1.0 - avg_no)) * d["shares"]
                 realized += pnl
+                if sg in seg:
+                    seg[sg]["resolved"] += 1
+                    seg[sg]["yes"] += int(hit)
+                    if fair_yes is not None:
+                        seg[sg]["exp"] += fair_yes
+                    seg[sg]["realized"] += pnl
                 status = f"RESOLVED {'YES(hit)' if hit else 'NO(win)'} pnl={pnl:+.2f}"
         tot_shares += d["shares"]
         tot_cost += d["cost"]
@@ -132,15 +154,24 @@ def main():
               f"{(f'{ev:7.2f}' if ev is not None else '      ?')}  {status}")
 
     print(f"\ndeployed (filled collateral): ${tot_cost:.2f}   premium sold: ${tot_prem:.2f}   "
-          f"entry EV vs Deribit fair: ${tot_ev:+.2f}")
-    if n_resolved:
-        sigma = (exp_yes ** 0.5) if exp_yes > 0 else float("nan")
-        print(f"resolved: {n_resolved}  tail hits (YES): {n_yes}  expected hits (Deribit): {exp_yes:.2f} "
-              f"(±2σ ≈ {2*sigma:.2f})   realized P&L: ${realized:+.2f}")
-        if exp_yes > 0 and n_yes > exp_yes + 2 * sigma:
-            print("⚠ hits exceed fair expectation +2σ — adverse selection / miscalibration; STOP and re-audit.")
+          f"entry EV vs fair: ${tot_ev:+.2f}")
+    labels = {"core": "BTC/ETH core (Deribit-anchored)", "sx": "SOL/XRP (flat-ratio, unanchored)"}
+    tot_resolved = sum(seg[s]["resolved"] for s in seg)
+    if tot_resolved:
+        # +2σ STOP alarm applied PER SEGMENT — a SOL/XRP hit is judged against the SOL/XRP expectation,
+        # never against the Deribit-core expectation (the old conflation fired false STOPs).
+        for sg in ("core", "sx"):
+            s = seg[sg]
+            if s["resolved"] == 0:
+                continue
+            sigma = (s["exp"] ** 0.5) if s["exp"] > 0 else float("nan")
+            print(f"[{labels[sg]}] resolved: {s['resolved']}  hits: {s['yes']}  "
+                  f"expected: {s['exp']:.2f} (±2σ≈{2*sigma:.2f})   realized P&L: ${s['realized']:+.2f}")
+            if s["exp"] > 0 and s["yes"] > s["exp"] + 2 * sigma:
+                print(f"  ⚠ {labels[sg]}: hits exceed +2σ in THIS segment — adverse selection/miscalibration; STOP & re-audit.")
+        print(f"TOTAL realized P&L: ${realized:+.2f}  (resolved {tot_resolved})")
     else:
-        print("resolved: 0 — realized P&L arrives with the first settlement cluster (Jul 6-8).")
+        print("resolved: 0 — realized P&L arrives with the first settlement cluster.")
 
 
 if __name__ == "__main__":
