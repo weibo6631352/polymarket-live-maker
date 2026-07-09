@@ -61,6 +61,27 @@ def seg_of(coin):
     return "core" if coin in ("BTC", "ETH") else "sx" if coin in ("SOL", "XRP") else "other"
 
 
+TOUCH_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "touch_model.json")
+
+
+def is_touch(slug):
+    """触碰/reach 卫星腿仓位: 盘名 'Will X reach $Y' -> slug 含 'reach'。终值盘用 'above', 不误判。
+    (若首个真触碰仓 slug 不含 'reach', 按实际格式更新此判据 — 触碰段独立于 core/SOL-XRP 记账。)"""
+    return "reach" in (slug or "").lower()
+
+
+def touch_deep_rate(coin):
+    """触碰腿 fair = 模型深档 (>=+15% moneyness, iron-rule 地板) 触碰率; 所有触碰仓都落此档 (~0.5-0.6%)。
+    非 Deribit 锚、非 SOL/XRP flat-ratio —— 触碰有自己的经验触碰模型 (touch_model.json)。"""
+    try:
+        for lo, hi, rate in json.load(open(TOUCH_MODEL_PATH)).get(coin, []):
+            if lo <= 0.15 < hi:
+                return rate
+    except Exception:
+        pass
+    return 0.006   # 深档触碰先验兜底 (模型文件缺失时)
+
+
 def main():
     evs = load_events(LOG)
     token_note = {}   # token -> slug (from place events)
@@ -104,17 +125,20 @@ def main():
     realized = 0.0
     # segment BTC/ETH (Deribit-anchored core) from SOL/XRP (unanchored) — a SOL/XRP hit must NOT be
     # charged against the Deribit-core Poisson expectation (that conflation = false +2σ STOP alarm).
-    seg = {s: {"resolved": 0, "yes": 0, "exp": 0.0, "realized": 0.0} for s in ("core", "sx")}
+    seg = {s: {"resolved": 0, "yes": 0, "exp": 0.0, "realized": 0.0} for s in ("core", "sx", "touch")}
     print(f"\n{'slug':52} {'sh':>6} {'no_cost':>8} {'prem':>7} {'fairY':>6} {'EV':>7}  status")
     for tok, d in sorted(fills.items(), key=lambda kv: -kv[1]["shares"]):
         slug = token_note.get(tok, "?")
-        coin = coin_of(slug); sg = seg_of(coin)
+        coin = coin_of(slug); sg = "touch" if is_touch(slug) else seg_of(coin)
         avg_no = d["cost"] / d["shares"] if d["shares"] else 0.0
         prem = (1.0 - avg_no) * d["shares"]
         fr = fair.get(slug, {})
-        fair_yes = fr.get("fair_hi")  # 注意: discrepancies.json 快照价 — 重跑管线后即为"当前 fair",
-        if fair_yes is None and coin in HIST_RATIO:   # SOL/XRP: 无 Deribit 锚 -> 扁平比率兜底 fair
-            fair_yes = round((1.0 - avg_no) / HIST_RATIO[coin], 4)
+        if sg == "touch":                             # 触碰: 模型深档触碰率 (非 Deribit、非 flat-ratio)
+            fair_yes = touch_deep_rate(coin)
+        else:
+            fair_yes = fr.get("fair_hi")  # 注意: discrepancies.json 快照价 — 重跑管线后即为"当前 fair",
+            if fair_yes is None and coin in HIST_RATIO:   # SOL/XRP: 无 Deribit 锚 -> 扁平比率兜底 fair
+                fair_yes = round((1.0 - avg_no) / HIST_RATIO[coin], 4)
         ev = ((1.0 - fair_yes) - avg_no) * d["shares"] if fair_yes is not None else None
         # 与入场价的差 = 入场后 fair 漂移 (持仓被测试的领先信号; BTC 7/4 实测 3.3%→8.1% 即此列)
 
@@ -155,12 +179,13 @@ def main():
 
     print(f"\ndeployed (filled collateral): ${tot_cost:.2f}   premium sold: ${tot_prem:.2f}   "
           f"entry EV vs fair: ${tot_ev:+.2f}")
-    labels = {"core": "BTC/ETH core (Deribit-anchored)", "sx": "SOL/XRP (flat-ratio, unanchored)"}
+    labels = {"core": "BTC/ETH core (Deribit-anchored)", "sx": "SOL/XRP (flat-ratio, unanchored)",
+              "touch": "touch/reach (model deep-bucket)"}
     tot_resolved = sum(seg[s]["resolved"] for s in seg)
     if tot_resolved:
-        # +2σ STOP alarm applied PER SEGMENT — a SOL/XRP hit is judged against the SOL/XRP expectation,
+        # +2σ STOP alarm applied PER SEGMENT — a SOL/XRP or touch hit is judged against ITS OWN expectation,
         # never against the Deribit-core expectation (the old conflation fired false STOPs).
-        for sg in ("core", "sx"):
+        for sg in ("core", "sx", "touch"):
             s = seg[sg]
             if s["resolved"] == 0:
                 continue
