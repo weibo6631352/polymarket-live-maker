@@ -54,6 +54,7 @@ struct Config {
     double touch_per_market_usd{0};  // 单触碰市场 (= 一个 reach 行权价) 上限
     double touch_per_coin_usd{0};    // 单币触碰已部署上限
     double touch_total_usd{0};       // 触碰总抵押上限 (0 = 触碰执行未武装)
+    int touch_max_orders{8};         // 触碰订单数子上限 (core 先铺, 触碰只用剩余名额且不超此数; 防挤占 core)
 };
 
 // 报出的单 (BUY NO)。

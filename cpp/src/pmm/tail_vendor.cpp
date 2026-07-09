@@ -53,11 +53,14 @@ std::optional<Candidate> parse_candidate(const nlohmann::json& m, double now_uni
     const std::string coin = coin_of(sq);
     if (coin.empty()) return std::nullopt;
     // 只做上行尾: 需要向上方向词, 且不含向下方向词。
-    //   terminal 上行: "above/greater/or-higher";  触碰(reach)上行尾: "reach/hit" (2026-07-09 触碰腿)。
-    // 微市场 ("up or down") 无这些词 -> 仍天然排除。放宽 reach/hit 只是让 reach 盘能进候选池; 方向与选择
-    // 仍由白名单授权 + curator 的 K>spot(只上行) 把关 (下行 "dip to $X" 已被下方向词挡掉)。
-    if (contains_any(sq, {"below", "less than", "or-lower", "or lower", "dip"})) return std::nullopt;
-    if (!contains_any(sq, {"above", "greater than", "-greater-", "or-higher", "or higher", "reach", "hit"}))
+    //   terminal 上行: "above/greater/or-higher";  触碰(reach)上行尾: "reach" (2026-07-09 触碰腿)。
+    // 只放宽 "reach" (curator 只 curate question 含 "reach" 的盘); 不收 "hit" —— "hit $50k"(下行)、
+    // "hit all-time high"(无行权价) 都不是我们的盘, 收了反而开下行/无锚漏洞。方向再由白名单授权 +
+    // curator K>spot 把关。下行词表加宽 (drop/fall/under/new-low) 作纵深防御。
+    if (contains_any(sq, {"below", "less than", "or-lower", "or lower", "dip", "drop", "fall",
+                          "under", "beneath", "new low", "all-time low", "record low"}))
+        return std::nullopt;
+    if (!contains_any(sq, {"above", "greater than", "-greater-", "or-higher", "or higher", "reach"}))
         return std::nullopt;
 
     // token 结构安全检查: outcomes 必须是 ["Yes","No"] (NO = tokens[1])。
@@ -194,24 +197,32 @@ std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
         }
     }
     int n_orders = static_cast<int>(keep.size());
-    for (const auto& [tok, c] : cands) {
-        if (keep.count(tok) != 0U) continue;
-        if (n_orders >= cfg.max_orders) break;
-        const double dep_coin = c.is_touch ? coin_t[c.coin] : coin[c.coin];
-        const double dep_total = c.is_touch ? total_t : total;
-        const auto q = decide(c, cfg, market[tok], dep_coin, dep_total);
-        if (!q) continue;
-        out.push_back({Action::Kind::kPlace, q->no_token, q->no_price, q->size, "", q->note});
-        const double notional = q->no_price * q->size;
-        market[tok] += notional;
-        if (c.is_touch) {
-            total_t += notional;
-            coin_t[c.coin] += notional;
-        } else {
-            total += notional;
-            coin[c.coin] += notional;
+    // core 优先两遍: 先铺 core 候选占满/满足后, 触碰候选才用剩余的 max_orders 名额 (且不超 touch_max_orders)。
+    // 触碰卫星腿绝不挤占 core 的订单名额。(单 token 在两遍中只会被处理一次: core/touch 互斥。)
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool want_touch = (pass == 1);
+        int touch_placed = 0;
+        for (const auto& [tok, c] : cands) {
+            if (c.is_touch != want_touch) continue;
+            if (keep.count(tok) != 0U) continue;
+            if (n_orders >= cfg.max_orders) break;
+            if (want_touch && touch_placed >= cfg.touch_max_orders) break;
+            const double dep_coin = c.is_touch ? coin_t[c.coin] : coin[c.coin];
+            const double dep_total = c.is_touch ? total_t : total;
+            const auto q = decide(c, cfg, market[tok], dep_coin, dep_total);
+            if (!q) continue;
+            out.push_back({Action::Kind::kPlace, q->no_token, q->no_price, q->size, "", q->note});
+            const double notional = q->no_price * q->size;
+            if (c.is_touch) {
+                total_t += notional;
+                coin_t[c.coin] += notional;
+                ++touch_placed;
+            } else {
+                total += notional;
+                coin[c.coin] += notional;
+            }
+            ++n_orders;
         }
-        ++n_orders;
     }
     return out;
 }

@@ -96,7 +96,8 @@ HeldState load_held(std::ofstream& lf) {
         const json jtn = j.value("token_note", json::object());
         for (const auto& [k, v] : jtn.items()) st.token_note[k] = v.get<std::string>();
         const json jtt = j.value("token_touch", json::object());
-        for (const auto& [k, v] : jtt.items()) st.token_touch[k] = v.get<bool>();
+        for (const auto& [k, v] : jtt.items())
+            if (v.is_boolean()) st.token_touch[k] = v.get<bool>();  // 坏条目跳过, 不抛 (否则整表被清空 → 触碰 held 低估 → 超 $80)
         st.last_trade_id = j.value("last_trade_id", "");
     } catch (...) {
         // 坏状态文件 = held 低估风险 (上限可能被突破) — 大声报, 人来查
@@ -341,11 +342,21 @@ int main(int argc, char** argv) {
                         clamp.insert(s.get<std::string>());
                     // detail[] 里携带触碰腿的 anchor + per-row collateral (curator 风险平价)。
                     // slug -> collateral; 只有 anchor==touch-model 的行进触碰腿 (独立预算+sizing)。
+                    // 全程类型守卫: 任何畸形 detail 行只跳过, 绝不抛异常 —— 否则会连累 core 授权 fail-closed
+                    // (authorized 停在 false → cands.clear() → core 书被撤)。触碰的 curator 笔误不许拖垮 core。
                     std::map<std::string, double> touch_coll;
-                    for (const auto& d : wj.value("detail", json::array())) {
-                        if (d.value("anchor", "") != "touch-model") continue;
-                        const std::string ds = d.value("slug", "");
-                        if (!ds.empty()) touch_coll[ds] = d.value("collateral", 0.0);
+                    if (const auto jd = wj.find("detail"); jd != wj.end() && jd->is_array()) {
+                        for (const auto& d : *jd) {
+                            if (!d.is_object()) continue;
+                            const auto ja = d.find("anchor");
+                            if (ja == d.end() || !ja->is_string() || ja->get<std::string>() != "touch-model")
+                                continue;
+                            const auto js = d.find("slug");
+                            if (js == d.end() || !js->is_string()) continue;
+                            const auto jc = d.find("collateral");
+                            touch_coll[js->get<std::string>()] =
+                                (jc != d.end() && jc->is_number()) ? jc->get<double>() : 0.0;
+                        }
                     }
                     if (!allow.empty()) {
                         authorized = true;
@@ -415,8 +426,8 @@ int main(int argc, char** argv) {
         }
 
         // ---- 3) 决策 (纯函数) -> 执行 ----
-        // held 按 token 归属拆出触碰腿 (core 侧仍传全量 held = 保守, 零行为变化)。触碰 held 只在
-        // 本策略下过的触碰 token 上计 (token_touch 注册表, 跨重启持久)。
+        // held 按 token 归属拆分: 触碰腿从 token_touch 子集聚合; core = 全量 − 触碰。两腿预算真正隔离
+        // (触碰成交绝不占用 core 额度, 反之亦然)。token_touch 是本策略下过的触碰 token 注册表 (持久)。
         std::map<std::string, double> held_coin_touch;
         double held_total_touch = 0.0;
         for (const auto& [tok, amt] : st.token_held) {
@@ -426,7 +437,11 @@ int main(int argc, char** argv) {
             if (const auto ci = st.token_coin.find(tok); ci != st.token_coin.end())
                 held_coin_touch[ci->second] += amt;
         }
-        const auto actions = tail::plan(cands, open, st.coin, st.token_held, st.total, cfg,
+        std::map<std::string, double> held_coin_core = st.coin;
+        for (const auto& [coin, amt] : held_coin_touch)
+            held_coin_core[coin] = std::max(0.0, held_coin_core[coin] - amt);   // 从 core 扣除触碰部分 (夹 ≥0)
+        const double held_total_core = std::max(0.0, st.total - held_total_touch);
+        const auto actions = tail::plan(cands, open, held_coin_core, st.token_held, held_total_core, cfg,
                                         held_coin_touch, held_total_touch);
         int executed = 0;
         for (const auto& a : actions) {

@@ -40,9 +40,19 @@ int main() {
                                   "Will Bitcoin reach $150k?", 0.03, 0.04,
                                   "2026-12-31T23:59:00Z"), kNow);
     assert(cr && cr->coin == "btc");
-    // 4b) 拒绝: 下行触碰 "dip to $X" (含向下方向词, 仍挡)
+    // 4b) 拒绝: 下行触碰词 (dip/fall/新低) — 纵深防御, 不靠单一 curator 把关
     assert(!parse_candidate(row("will-bitcoin-dip-to-50k", "Will Bitcoin dip to $50k?", 0.03, 0.04,
                                 "2026-12-31T23:59:00Z"), kNow));
+    assert(!parse_candidate(row("will-bitcoin-fall-to-50k", "Will Bitcoin fall to $50k?", 0.03, 0.04,
+                                "2026-12-31T23:59:00Z"), kNow));
+    assert(!parse_candidate(row("will-bitcoin-reach-new-all-time-low",
+                                "Will Bitcoin reach a new all-time low of $30k?", 0.03, 0.04,
+                                "2026-12-31T23:59:00Z"), kNow));
+    // 4c) 拒绝: "hit" 已不再收 ("hit $50k" 下行 / "hit all-time high" 无锚 都不是我们的盘)
+    assert(!parse_candidate(row("will-bitcoin-hit-50k", "Will Bitcoin hit $50k?", 0.03, 0.04,
+                                "2026-12-31T23:59:00Z"), kNow));
+    assert(!parse_candidate(row("will-bitcoin-hit-ath", "Will Bitcoin hit a new all-time high?",
+                                0.03, 0.04, "2026-12-31T23:59:00Z"), kNow));
     // 5) 拒绝: 微市场
     assert(!parse_candidate(row("bitcoin-up-or-down-july-6-3pm-et",
                                 "Bitcoin Up or Down?", 0.4, 0.6, "2026-07-06T19:05:00Z"), kNow));
@@ -224,6 +234,18 @@ int main() {
         for (const auto& a : ma)
             if (a.kind == Action::Kind::kPlace) (a.note == std::string("cc1") ? core_place : touch_place)++;
         assert(core_place == 1 && touch_place == 1);
+        // T8) core 优先: 只剩 1 个 max_orders 名额, core+touch 各一候选 -> core 先占, 触碰不挤占
+        Config tc1 = tc; tc1.max_orders = 1;
+        auto ma1 = plan(mix, {}, {}, {}, 0.0, tc1);
+        int core_p1 = 0, touch_p1 = 0;
+        for (const auto& a : ma1)
+            if (a.kind == Action::Kind::kPlace) (a.note == std::string("cc1") ? core_p1 : touch_p1)++;
+        assert(core_p1 == 1 && touch_p1 == 0);
+        // T9) 反向隔离 (bug #1): 巨额触碰 held 传入不挡 core 下单 (core 只看 core 预算)
+        std::map<std::string, Candidate> ccore; ccore["cc1"] = core_c;
+        auto ma9 = plan(ccore, {}, {}, {}, 0.0, tc, {{"btc", 999.0}}, 999.0);  // touch held 巨大
+        int core_p9 = 0; for (const auto& a : ma9) core_p9 += (a.kind == Action::Kind::kPlace);
+        assert(core_p9 == 1);
     }
 
     // ---- sheet 模式: 解析 + 校验 ----
