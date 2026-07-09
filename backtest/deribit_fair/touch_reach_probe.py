@@ -16,7 +16,7 @@ import touch_curate as tc
 MAXD = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
 COINS = ("bitcoin", "ethereum", "solana", "xrp")
 
-evs = tc._get("/events", dict(tag_slug="crypto", active="true", closed="false", limit=500)) or []
+evs = tc._get_crypto_events()   # PAGINATED (gamma caps a page at ~100; single-shot hid weekly/monthly reach)
 now = time.time()
 short, longd = [], 0
 for e in evs:

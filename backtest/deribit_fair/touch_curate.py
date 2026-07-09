@@ -95,10 +95,24 @@ def spot(coin):
     except Exception:
         return None
 
+def _get_crypto_events():
+    """ALL active crypto events, PAGINATED. gamma caps a single page at ~100 regardless of `limit`, so a
+    one-shot limit=200 silently sees only the first page — which hid the weekly/monthly reach markets on
+    later pages (they sort after the year-end 'before-2027' series). Root cause of the touch leg fetching
+    0 reach tails. Paginate via offset until a short page (cap ~1000 events)."""
+    evs = []
+    for off in range(0, 1000, 100):
+        page = _get("/events", dict(tag_slug="crypto", active="true", closed="false", limit=100, offset=off)) or []
+        evs += page
+        if len(page) < 100:
+            break
+    return evs
+
+
 def fetch_reach_markets(coins):
-    """Pull crypto events ONCE; return normalized, slug-deduped reach markets: {coin,slug,K,T,ask,vol24}."""
+    """Pull crypto events (paginated); return normalized, slug-deduped reach markets: {coin,slug,K,T,ask,vol24}."""
     word2coin = {REACH_WORD[c]: c for c in coins}
-    evs = _get("/events", dict(tag_slug="crypto", active="true", closed="false", limit=200)) or []
+    evs = _get_crypto_events()
     out, seen = [], set()
     for ev in evs:
         blob = (ev.get("title", "") + " " + ev.get("slug", "")).lower()
