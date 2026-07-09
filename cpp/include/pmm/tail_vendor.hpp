@@ -27,6 +27,8 @@ struct Candidate {
     double days_left{0};     // endDate - now
     bool band_clamp{false};  // 策展授权"首卖": ask 肥/空书时允许 clamp 到带顶 yes_max 当第一个卖家
                              // (授权条件在 curator 端: 锚定 fair≤2% 或无锚但 bid≤4c 确认深尾)
+    bool is_touch{false};    // curator anchor=touch-model — 触碰/reach 卫星腿, 走独立小预算 + per-row sizing
+    double wl_collateral{0}; // 白名单 detail 提供的 per-row 抵押 $ (触碰腿风险平价); 0 = 用 cfg 默认
 };
 
 // 卖价决策 + 风控参数。编译期硬顶在 app 层 (env 只能调低)。
@@ -45,6 +47,13 @@ struct Config {
     int max_orders{8};
     double min_shares{5};       // PM 最小单
     double tick{0.001};
+    // 触碰/reach 卫星腿的独立预算 (与上面的 core 上限完全隔离; core 永不吃触碰额度, 反之亦然)。
+    // 默认全 0 = 触碰执行 OFF: 即便白名单含触碰 slug, 未设 touch_total>0 时 decide() 一律拒触碰单。
+    // per-order 抵押来自白名单 (Candidate::wl_collateral), 这里是执行侧硬顶 (env 只能调低)。
+    double touch_per_order_usd{0};   // 单触碰仓抵押上限 (curator 送 ≤24)
+    double touch_per_market_usd{0};  // 单触碰市场 (= 一个 reach 行权价) 上限
+    double touch_per_coin_usd{0};    // 单币触碰已部署上限
+    double touch_total_usd{0};       // 触碰总抵押上限 (0 = 触碰执行未武装)
 };
 
 // 报出的单 (BUY NO)。
@@ -93,11 +102,15 @@ struct Action {
 };
 // held_* = 已成交持有的抵押 (app 累计, $1/股保守); resting 从 open 内部推导。
 // 输出顺序: 先撤后报; 报单侧在函数内做轮内累计 (per-coin + total + max_orders), 上限永不越。
+// held_coin_touch / held_total_touch = 触碰腿已成交抵押 (按 token 归属拆出; 默认空 = 无触碰, 行为不变)。
+// core 侧 held_coin/held_total 保持传全量 (含触碰, 保守), 故 core 路径零行为变化。
 [[nodiscard]] std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
                                        const std::vector<OpenOrder>& open,
                                        const std::map<std::string, double>& held_coin,
                                        const std::map<std::string, double>& held_token,
-                                       double held_total, const Config& cfg);
+                                       double held_total, const Config& cfg,
+                                       const std::map<std::string, double>& held_coin_touch = {},
+                                       double held_total_touch = 0.0);
 
 // ---- sheet 模式: 精确执行人工指定清单 (绕过扫描/decide, 但硬顶与安全校验同一套) ----
 struct SheetEntry {

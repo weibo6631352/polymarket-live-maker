@@ -35,9 +35,13 @@ int main() {
     assert(!parse_candidate(row("bitcoin-below-50k-on-july-6-2026",
                                 "Will Bitcoin be below $50k?", 0.02, 0.03,
                                 "2026-07-06T16:00:00Z"), kNow));
-    // 4) 拒绝: touch 家族 (reach/hit/dip/ath)
-    assert(!parse_candidate(row("will-bitcoin-reach-150k-by-december-31-2026",
-                                "Will Bitcoin reach $150k?", 0.03, 0.04,
+    // 4) 接受: reach 触碰上行尾 (2026-07-09 触碰腿 — 方向靠白名单 + curator K>spot 把关, 此处放行)
+    auto cr = parse_candidate(row("will-bitcoin-reach-150k-by-december-31-2026",
+                                  "Will Bitcoin reach $150k?", 0.03, 0.04,
+                                  "2026-12-31T23:59:00Z"), kNow);
+    assert(cr && cr->coin == "btc");
+    // 4b) 拒绝: 下行触碰 "dip to $X" (含向下方向词, 仍挡)
+    assert(!parse_candidate(row("will-bitcoin-dip-to-50k", "Will Bitcoin dip to $50k?", 0.03, 0.04,
                                 "2026-12-31T23:59:00Z"), kNow));
     // 5) 拒绝: 微市场
     assert(!parse_candidate(row("bitcoin-up-or-down-july-6-3pm-et",
@@ -175,6 +179,53 @@ int main() {
     acts = plan(cmk, {}, {}, {{"m1", cfg.per_market_usd - 1.0}}, 0.0, cfg);
     for (const auto& a : acts) assert(a.kind != Action::Kind::kPlace);
 
+    // ---- 触碰/reach 卫星腿: 独立预算 + per-row sizing (2026-07-09 (b) 集成) ----
+    {
+        auto mkt = [&](const char* tok, const char* coin, double coll) {
+            Candidate cc = *c;
+            cc.no_token = tok; cc.coin = coin; cc.slug = tok;
+            cc.yes_bid = 0.02; cc.yes_ask = 0.04; cc.days_left = 2;   // 卖 0.039 -> NO 0.961
+            cc.is_touch = true; cc.wl_collateral = coll;
+            return cc;
+        };
+        Config tc = cfg;   // core caps 默认, 触碰预算先全 0 (未武装)
+        // T1) 触碰未武装 (touch_total=0) -> 拒触碰单, 即便白名单给了 collateral
+        assert(!decide(mkt("u1", "btc", 24.0), tc, 0.0, 0.0, 0.0));
+        tc.touch_total_usd = 80; tc.touch_per_coin_usd = 48;
+        tc.touch_per_order_usd = 24; tc.touch_per_market_usd = 24;
+        // T2) size 由 per-row collateral 决定 (24/0.961=24 股), 而非 core 的 per_order_usd(20 -> 20 股)
+        auto qt = decide(mkt("u2", "btc", 24.0), tc, 0.0, 0.0, 0.0);
+        assert(qt && qt->size == std::floor(24.0 / qt->no_price) && qt->size > 20);
+        // T3) per-order 硬顶: collateral=40 夹到 touch_per_order=24
+        auto qcap = decide(mkt("u3", "btc", 40.0), tc, 0.0, 0.0, 0.0);
+        assert(qcap && qcap->size == std::floor(24.0 / qcap->no_price));
+        // T4) 触碰用 touch_total(80) 而非 core total(60): touch 已部署 50 -> 下得出; 60 -> 越限
+        assert(decide(mkt("u4", "btc", 24.0), tc, 0.0, 0.0, 50.0));   // 50+23<80 (core 会在 >60 拒)
+        assert(!decide(mkt("u4b", "btc", 24.0), tc, 0.0, 0.0, 60.0));  // 60+23=83>80 拒
+        // T5) 预算隔离: 巨额 core held (sol $999) 不吃触碰预算 -> 两个触碰 sol 单照下
+        std::map<std::string, Candidate> tcands;
+        tcands["tt1"] = mkt("tt1", "sol", 24.0);
+        tcands["tt2"] = mkt("tt2", "sol", 24.0);
+        auto ta = plan(tcands, {}, {{"sol", 999.0}}, {}, 999.0, tc);   // core held/total 巨大
+        int tp = 0; for (const auto& a : ta) tp += (a.kind == Action::Kind::kPlace);
+        assert(tp == 2);
+        // T6) 触碰 per_coin(48) 上限: 同币第 3 个越限
+        tcands["tt3"] = mkt("tt3", "sol", 24.0);
+        ta = plan(tcands, {}, {}, {}, 0.0, tc);
+        tp = 0; for (const auto& a : ta) tp += (a.kind == Action::Kind::kPlace);
+        assert(tp == 2);
+        // T7) 混合轮: core 候选走 core 预算, 触碰候选走触碰预算, 互不影响
+        auto core_c = *c; core_c.no_token = "cc1"; core_c.coin = "btc"; core_c.slug = "cc1";
+        core_c.yes_bid = 0.02; core_c.yes_ask = 0.04; core_c.days_left = 2;  // is_touch=false
+        std::map<std::string, Candidate> mix;
+        mix["cc1"] = core_c; mix["tt1"] = mkt("tt1", "sol", 24.0);
+        auto ma = plan(mix, {}, {}, {}, 0.0, tc);
+        int core_place = 0, touch_place = 0;
+        for (const auto& a : ma)
+            if (a.kind == Action::Kind::kPlace) (a.note == std::string("cc1") ? core_place : touch_place)++;
+        assert(core_place == 1 && touch_place == 1);
+    }
+
     // ---- sheet 模式: 解析 + 校验 ----
     // 21) 正常解析
     json sj = json::array({{{"token_id", "123"}, {"price", 0.97}, {"size", 10.0}, {"note", "a"}},
@@ -207,6 +258,6 @@ int main() {
     assert(!is_transient_place_error(429));   // 限流 -> 业务信号, 该退但计入拒单谱系
     assert(!is_transient_place_error(200));   // 2xx-but-unmatched 的业务拒单
 
-    std::printf("tail_vendor: 28/28 PASS\n");
+    std::printf("tail_vendor: all tests PASS (incl. touch-leg sizing/budget-isolation)\n");
     return 0;
 }

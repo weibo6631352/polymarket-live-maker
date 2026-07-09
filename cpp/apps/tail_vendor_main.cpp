@@ -45,6 +45,10 @@ constexpr double kCeilPerCoinUsd = 200.0;
 constexpr double kCeilPerOrderUsd = 25.0;
 constexpr double kCeilPerMarketUsd = 50.0;
 constexpr int kCeilOrders = 60;
+// 触碰/reach 卫星腿的执行硬顶 (小; env 只能调低)。默认预算 0 = 触碰执行 OFF, 需显式 TV_TOUCH_TOTAL_USD>0 武装。
+constexpr double kCeilTouchTotalUsd = 120.0;   // 2026-07-09 触碰腿首试 (用户选 $80 总)
+constexpr double kCeilTouchPerCoinUsd = 60.0;
+constexpr double kCeilTouchOrderUsd = 25.0;    // 单触碰仓 (curator 风险平价送 base$12/cap$24)
 
 std::atomic<bool> g_run{true};
 void on_sig(int) { g_run.store(false); }
@@ -69,6 +73,7 @@ struct HeldState {
     std::map<std::string, double> token_held;           // no_token -> 抵押 (单市场集中度刹车)
     std::map<std::string, std::string> token_coin;      // 下过单的 no_token -> coin (fill 归因)
     std::map<std::string, std::string> token_note;
+    std::map<std::string, bool> token_touch;            // no_token -> 是否触碰腿 (held 拆分 core/触碰预算)
     std::string last_trade_id;                          // 已入账的最新成交 id (重启补账基准)
 };
 constexpr const char* kHeldPath = "state/tail_vendor_held.json";
@@ -90,6 +95,8 @@ HeldState load_held(std::ofstream& lf) {
         for (const auto& [k, v] : jtc.items()) st.token_coin[k] = v.get<std::string>();
         const json jtn = j.value("token_note", json::object());
         for (const auto& [k, v] : jtn.items()) st.token_note[k] = v.get<std::string>();
+        const json jtt = j.value("token_touch", json::object());
+        for (const auto& [k, v] : jtt.items()) st.token_touch[k] = v.get<bool>();
         st.last_trade_id = j.value("last_trade_id", "");
     } catch (...) {
         // 坏状态文件 = held 低估风险 (上限可能被突破) — 大声报, 人来查
@@ -101,9 +108,10 @@ HeldState load_held(std::ofstream& lf) {
 void save_held(const HeldState& st, std::ofstream& lf) {
     std::error_code ec;
     std::filesystem::create_directories("state", ec);
-    const json j{{"held_total", st.total},       {"held_coin", st.coin},
-                 {"token_coin", st.token_coin},  {"token_note", st.token_note},
-                 {"token_held", st.token_held},  {"last_trade_id", st.last_trade_id}};
+    const json j{{"held_total", st.total},         {"held_coin", st.coin},
+                 {"token_coin", st.token_coin},    {"token_note", st.token_note},
+                 {"token_touch", st.token_touch},  {"token_held", st.token_held},
+                 {"last_trade_id", st.last_trade_id}};
     const std::string tmp = std::string(kHeldPath) + ".tmp";
     {
         std::ofstream out(tmp, std::ios::trunc);
@@ -204,6 +212,12 @@ int main(int argc, char** argv) {
     cfg.per_order_usd = env_low("TV_PER_ORDER_USD", 20.0, kCeilPerOrderUsd);
     cfg.per_market_usd = env_low("TV_PER_MARKET_USD", 15.0, kCeilPerMarketUsd);
     cfg.max_orders = static_cast<int>(env_low("TV_MAX_ORDERS", 8, kCeilOrders));
+    // 触碰腿执行预算 (默认 0 = OFF; 首试 arm 用 TV_TOUCH_TOTAL_USD=80 TV_TOUCH_PER_COIN_USD=48)。
+    // 与 curation 侧的 TV_TOUCH=1 双门: 白名单出触碰 slug 且此处预算>0 才会真下触碰单。
+    cfg.touch_total_usd = env_low("TV_TOUCH_TOTAL_USD", 0.0, kCeilTouchTotalUsd);
+    cfg.touch_per_coin_usd = env_low("TV_TOUCH_PER_COIN_USD", 0.0, kCeilTouchPerCoinUsd);
+    cfg.touch_per_order_usd = env_low("TV_TOUCH_PER_ORDER_USD", 24.0, kCeilTouchOrderUsd);
+    cfg.touch_per_market_usd = cfg.touch_per_order_usd;  // 一个 reach 行权价 = 一个市场
     const int scan_s = static_cast<int>(env_low("TV_SCAN_S", 300, 3600));
 
     const char* lv = std::getenv("PM_TRADER_LIVE");
@@ -325,12 +339,24 @@ int main(int argc, char** argv) {
                     std::set<std::string> clamp;
                     for (const auto& s : wj.value("clamp", json::array()))
                         clamp.insert(s.get<std::string>());
+                    // detail[] 里携带触碰腿的 anchor + per-row collateral (curator 风险平价)。
+                    // slug -> collateral; 只有 anchor==touch-model 的行进触碰腿 (独立预算+sizing)。
+                    std::map<std::string, double> touch_coll;
+                    for (const auto& d : wj.value("detail", json::array())) {
+                        if (d.value("anchor", "") != "touch-model") continue;
+                        const std::string ds = d.value("slug", "");
+                        if (!ds.empty()) touch_coll[ds] = d.value("collateral", 0.0);
+                    }
                     if (!allow.empty()) {
                         authorized = true;
                         wl_size = allow.size();
                         for (auto it = cands.begin(); it != cands.end();) {
                             if (allow.count(it->second.slug) == 0) { it = cands.erase(it); continue; }
                             it->second.band_clamp = clamp.count(it->second.slug) != 0;
+                            if (const auto tc = touch_coll.find(it->second.slug); tc != touch_coll.end()) {
+                                it->second.is_touch = true;
+                                it->second.wl_collateral = tc->second;
+                            }
                             ++it;
                         }
                     }
@@ -389,7 +415,19 @@ int main(int argc, char** argv) {
         }
 
         // ---- 3) 决策 (纯函数) -> 执行 ----
-        const auto actions = tail::plan(cands, open, st.coin, st.token_held, st.total, cfg);
+        // held 按 token 归属拆出触碰腿 (core 侧仍传全量 held = 保守, 零行为变化)。触碰 held 只在
+        // 本策略下过的触碰 token 上计 (token_touch 注册表, 跨重启持久)。
+        std::map<std::string, double> held_coin_touch;
+        double held_total_touch = 0.0;
+        for (const auto& [tok, amt] : st.token_held) {
+            const auto tt = st.token_touch.find(tok);
+            if (tt == st.token_touch.end() || !tt->second) continue;
+            held_total_touch += amt;
+            if (const auto ci = st.token_coin.find(tok); ci != st.token_coin.end())
+                held_coin_touch[ci->second] += amt;
+        }
+        const auto actions = tail::plan(cands, open, st.coin, st.token_held, st.total, cfg,
+                                        held_coin_touch, held_total_touch);
         int executed = 0;
         for (const auto& a : actions) {
             if (!g_run.load()) break;
@@ -430,6 +468,7 @@ int main(int argc, char** argv) {
                 if (auto ic = cands.find(a.no_token); ic != cands.end()) {
                     st.token_coin[a.no_token] = ic->second.coin;
                     st.token_note[a.no_token] = ic->second.slug;
+                    if (ic->second.is_touch) st.token_touch[a.no_token] = true;  // held 拆分用: 触碰腿标记
                     save_held(st, lf);
                 }
             } else if (transient) {

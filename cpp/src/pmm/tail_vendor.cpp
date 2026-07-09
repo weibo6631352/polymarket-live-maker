@@ -52,10 +52,12 @@ std::optional<Candidate> parse_candidate(const nlohmann::json& m, double now_uni
 
     const std::string coin = coin_of(sq);
     if (coin.empty()) return std::nullopt;
-    // 只做上行尾: 需要向上方向词, 且不含向下方向词。这同时天然排除 touch 家族
-    // ("reach/hit/dip" 无上行词) 与微市场 ("up or down" 无上行词) — 无需单列检查。
+    // 只做上行尾: 需要向上方向词, 且不含向下方向词。
+    //   terminal 上行: "above/greater/or-higher";  触碰(reach)上行尾: "reach/hit" (2026-07-09 触碰腿)。
+    // 微市场 ("up or down") 无这些词 -> 仍天然排除。放宽 reach/hit 只是让 reach 盘能进候选池; 方向与选择
+    // 仍由白名单授权 + curator 的 K>spot(只上行) 把关 (下行 "dip to $X" 已被下方向词挡掉)。
     if (contains_any(sq, {"below", "less than", "or-lower", "or lower", "dip"})) return std::nullopt;
-    if (!contains_any(sq, {"above", "greater than", "-greater-", "or-higher", "or higher"}))
+    if (!contains_any(sq, {"above", "greater than", "-greater-", "or-higher", "or higher", "reach", "hit"}))
         return std::nullopt;
 
     // token 结构安全检查: outcomes 必须是 ["Yes","No"] (NO = tokens[1])。
@@ -111,12 +113,21 @@ std::optional<Quote> decide(const Candidate& c, const Config& cfg, double deploy
     if (sell_yes >= c.yes_ask - 1e-9) return std::nullopt;
 
     const double no_price = round_tick(1.0 - sell_yes, cfg.tick);
-    double size = std::floor(cfg.per_order_usd / no_price);
+    // 触碰腿: per-row 抵押来自白名单 (风险平价 ∝1/touch), 夹到执行侧硬顶; 走独立触碰预算。
+    // core 腿: 原固定 per_order_usd + 原 core 上限。触碰未武装 (touch_total<=0) → 拒触碰单。
+    const bool touch = c.is_touch;
+    if (touch && cfg.touch_total_usd <= 0.0) return std::nullopt;
+    const double order_usd = touch ? std::min(c.wl_collateral, cfg.touch_per_order_usd) : cfg.per_order_usd;
+    if (order_usd <= 0.0) return std::nullopt;
+    double size = std::floor(order_usd / no_price);
     if (size < cfg.min_shares) return std::nullopt;
     const double notional = size * no_price;
-    if (deployed_market + notional > cfg.per_market_usd + 1e-9) return std::nullopt;
-    if (deployed_coin + notional > cfg.per_coin_usd + 1e-9) return std::nullopt;
-    if (deployed_total + notional > cfg.total_usd + 1e-9) return std::nullopt;
+    const double cap_market = touch ? cfg.touch_per_market_usd : cfg.per_market_usd;
+    const double cap_coin = touch ? cfg.touch_per_coin_usd : cfg.per_coin_usd;
+    const double cap_total = touch ? cfg.touch_total_usd : cfg.total_usd;
+    if (deployed_market + notional > cap_market + 1e-9) return std::nullopt;
+    if (deployed_coin + notional > cap_coin + 1e-9) return std::nullopt;
+    if (deployed_total + notional > cap_total + 1e-9) return std::nullopt;
 
     return Quote{c.no_token, no_price, size, c.slug};
 }
@@ -138,7 +149,9 @@ std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
                          const std::vector<OpenOrder>& open,
                          const std::map<std::string, double>& held_coin,
                          const std::map<std::string, double>& held_token, double held_total,
-                         const Config& cfg) {
+                         const Config& cfg,
+                         const std::map<std::string, double>& held_coin_touch,
+                         double held_total_touch) {
     std::vector<Action> out;
     // ---- 撤单侧: 离场/pull/被压价 ----
     std::map<std::string, const OpenOrder*> keep;  // 留在场上的单
@@ -163,24 +176,41 @@ std::vector<Action> plan(const std::map<std::string, Candidate>& cands,
             keep[o.no_token] = &o;
     }
     // ---- 报单侧: 轮内累计 (resting=留场单 + held; 撤掉的预算即时释放) ----
-    double total = held_total;
-    std::map<std::string, double> coin = held_coin;
+    // core 与触碰各自独立累计 total/coin, 互不占用额度。market[] 按 token 共享 (core/触碰 token 不相交)。
+    double total = held_total, total_t = held_total_touch;
+    std::map<std::string, double> coin = held_coin, coin_t = held_coin_touch;
     std::map<std::string, double> market = held_token;  // no_token -> 已部署 (held $1/股 + resting)
     for (const auto& [tok, po] : keep) {
-        total += po->no_price * po->size;
-        if (!po->coin.empty()) coin[po->coin] += po->no_price * po->size;
-        market[tok] += po->no_price * po->size;
+        const double n = po->no_price * po->size;
+        market[tok] += n;
+        const auto ic = cands.find(tok);
+        const bool t = ic != cands.end() && ic->second.is_touch;  // 留场单 = 在名单内 → 可归属
+        if (t) {
+            total_t += n;
+            if (!po->coin.empty()) coin_t[po->coin] += n;
+        } else {
+            total += n;
+            if (!po->coin.empty()) coin[po->coin] += n;
+        }
     }
     int n_orders = static_cast<int>(keep.size());
     for (const auto& [tok, c] : cands) {
         if (keep.count(tok) != 0U) continue;
         if (n_orders >= cfg.max_orders) break;
-        const auto q = decide(c, cfg, market[tok], coin[c.coin], total);
+        const double dep_coin = c.is_touch ? coin_t[c.coin] : coin[c.coin];
+        const double dep_total = c.is_touch ? total_t : total;
+        const auto q = decide(c, cfg, market[tok], dep_coin, dep_total);
         if (!q) continue;
         out.push_back({Action::Kind::kPlace, q->no_token, q->no_price, q->size, "", q->note});
         const double notional = q->no_price * q->size;
-        total += notional;
-        coin[c.coin] += notional;
+        market[tok] += notional;
+        if (c.is_touch) {
+            total_t += notional;
+            coin_t[c.coin] += notional;
+        } else {
+            total += notional;
+            coin[c.coin] += notional;
+        }
         ++n_orders;
     }
     return out;

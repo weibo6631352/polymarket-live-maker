@@ -44,9 +44,12 @@ class TouchConfig:
     edge_margin: float = 0.010          # sell only if premium > model_fair + 1c
     mom_th: float = 0.40                # 20d momentum mania trip
     tick: float = 0.001
-    base_coll: float = 20.0             # risk-parity base $; coll = base*(0.02/touch), cap size_cap_x*base
+    base_coll: float = 12.0             # risk-parity base $; coll = base*(0.02/touch), cap size_cap_x*base.
+                                        # scaled DOWN from touch_optimal's $20 for the small first live trial
+                                        # ($12·2x=$24 fits the C++ kCeilTouchOrderUsd=$25). Risk-parity SHAPE
+                                        # unchanged -> strategy identical to backtest, only the stake shrinks.
     size_cap_x: float = 2.0             # sizing cap (deepest/safest gets at most 2x base) — touch_optimal
-    percoin_week_cap: float = 60.0      # max $ collateral per coin per ISO-week — touch_optimal
+    percoin_week_cap: float = 48.0      # max $ collateral per coin per ISO-week (matches C++ touch_per_coin_usd)
     vol_th: dict = field(default_factory=lambda: {"BTC": 0.65, "ETH": 0.65, "SOL": 0.55, "XRP": 0.55})
 
 CFG = TouchConfig()
