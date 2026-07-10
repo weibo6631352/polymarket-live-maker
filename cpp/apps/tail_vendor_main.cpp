@@ -312,12 +312,15 @@ int main(int argc, char** argv) {
             break;
         }
 
-        // ---- 1) 按 series_id 精确扫描 (校准过的可交易家族; 每轮 ~11 请求, 无微市场/体育洪水) ----
+        // ---- 1) 按 series_id 精确扫描 (校准过的可交易家族; 每轮 ~15 请求, 无微市场/体育洪水) ----
         // strike 家族 5.3x: 45/42=BTC/ETH daily, 10022/10023/10024=SOL/XRP/其它 daily,
-        // 10147/10149=monthly; negrisk 家族 1.9x: 10041/10065/10107/10247。touch 家族定价公允, 不扫。
+        // 10147/10149=monthly; negrisk 家族 1.9x: 10041/10065/10107/10247。
+        // touch/reach 家族 (2026-07-10 触碰腿; 周盘 "what-price-will-X-hit-july-6-12"): 10151/10152/10170/10239
+        // = BTC/ETH/SOL/XRP。TV_TOUCH 关时它们进 cands 但不在白名单 -> 被过滤, 无害。
         static const char* kSeries[] = {"45", "42", "10022", "10023", "10024",
                                         "10147", "10149",
-                                        "10041", "10065", "10107", "10247"};
+                                        "10041", "10065", "10107", "10247",
+                                        "10151", "10152", "10170", "10239"};
         std::map<std::string, tail::Candidate> cands;  // no_token -> cand
         for (const char* sid : kSeries) {
             const json evs = client.gamma_events_raw(
