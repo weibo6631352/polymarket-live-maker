@@ -261,12 +261,39 @@ int main(int argc, char** argv) {
     HeldState st = load_held(lf);
     jlog(lf, {{"ev", "held_reconcile"}, {"held_usd", st.total}, {"held_coin", st.coin},
               {"last_trade_id", st.last_trade_id}, {"tokens", st.token_coin.size()}});
-    if (const char* funder = std::getenv("TV_FUNDER")) {  // 链上对照 (只记日志, 不改账 —
-        double chain_total = 0.0;                         // 链上含残留旧仓, 不可直接当 held)
-        for (const auto& [tok, sz] : client.chain_positions(funder)) chain_total += std::abs(sz);
-        jlog(lf, {{"ev", "chain_reconcile"}, {"chain_shares_as_usd", chain_total},
-                  {"ledger_held_usd", st.total}});
-    }
+    // ---- held 链上校正 (2026-07-10 根因修复) ----
+    // 根因: ingest_fill 只在成交时 +held, 结算/赎回时不减 -> held 单调虚增 -> 数日后 BTC/ETH 虚满 per_coin
+    // 上限 -> 拒下新单 -> 成交枯竭 (实测 BTC held $147 vs 链上真实 $78, 近2倍)。修法: 用链上真实持仓
+    // (data-api /positions, $1/股) 重建 held, 只作用于本策略下过的 token (token_held 键, 避开共享账户
+    // pmm-maker 的仓)。已赎回的仓链上 size≈0 -> 移除 -> 释放其额度。
+    // FAIL-SAFE: funder 未设 / 拉取空或过少 (<3 仓, 疑似 API 抖动) -> 不动 held (保守用旧值, 绝不因残缺
+    // 拉取虚减 held 导致超铺)。
+    const std::string funder = std::getenv("TV_FUNDER") ? std::getenv("TV_FUNDER") : "";
+    auto reconcile_held = [&]() {
+        if (funder.empty() || st.token_held.empty()) return;
+        const auto cp = client.chain_positions(funder);   // token -> 链上真实 size
+        if (cp.size() < 3) return;                         // 空/过少 = 疑似残缺拉取 -> 跳过 (保守)
+        std::map<std::string, double> new_coin, new_th;
+        double new_total = 0.0;
+        for (const auto& [tok, sz] : st.token_held) {
+            const auto it = cp.find(tok);
+            const double real = (it != cp.end()) ? std::abs(it->second) : 0.0;  // <0.5 = 已赎回/清仓
+            if (real < 0.5) continue;                      // 仓已消失 -> 从 held 移除, 释放额度
+            new_th[tok] = real;
+            new_total += real;
+            if (const auto ci = st.token_coin.find(tok); ci != st.token_coin.end())
+                new_coin[ci->second] += real;
+        }
+        const double freed = st.total - new_total;
+        if (std::abs(freed) < 0.5) return;                 // 无变化则不写盘
+        jlog(lf, {{"ev", "held_chain_reconcile"}, {"old_held", st.total}, {"new_held", new_total},
+                  {"freed", freed}, {"coin", new_coin}});
+        st.token_held = std::move(new_th);
+        st.coin = std::move(new_coin);
+        st.total = new_total;
+        save_held(st, lf);
+    };
+    reconcile_held();  // 启动即校正一次
 
     // 入账一笔成交: held 累加 + 游标推进 + 落盘。调用方必须按 oldest→newest 喂 (游标停在最新)。
     // 只认本策略下过单的 token (token_coin 注册表) — 同账户还有别的策略在跑 (pmm temp maker),
@@ -311,6 +338,9 @@ int main(int argc, char** argv) {
                                                {"token_id", oo.value("asset_id", "")}})}});
             break;
         }
+
+        // ---- 0.5) held 链上校正 (每轮): 移除已结算/赎回的仓 -> 释放虚占的 per_coin/total 额度。 ----
+        if (armed) reconcile_held();
 
         // ---- 1) 按 series_id 精确扫描 (校准过的可交易家族; 每轮 ~15 请求, 无微市场/体育洪水) ----
         // strike 家族 5.3x: 45/42=BTC/ETH daily, 10022/10023/10024=SOL/XRP/其它 daily,
