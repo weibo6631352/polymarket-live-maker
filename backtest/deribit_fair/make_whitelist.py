@@ -30,7 +30,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GAMMA = "https://gamma-api.polymarket.com"
 HIST_RATIO = {"SOL": 10.8, "XRP": 6.4}   # 无锚币的历史高估比率(校准 2026-07-03)
 TICK = 0.001
-BAND = (0.021, 0.070)
+# 2026-07-10: 带顶可抬到 10c 追流量 (回测 7-10c 尾仍 +EV: core+2.58c/SOLXRP+3.19c on 2-10c; Deribit/regime 门兜底)。
+# 默认保持旧值 0.07 (与执行器一致); 抬顶=curate drop-in TV_YES_MAX=0.10 (可秒回退)。env 顶 0.12。
+try:
+    _YES_MAX = min(float(os.environ.get("TV_YES_MAX", "0.07")), 0.12)
+except ValueError:
+    _YES_MAX = 0.07
+BAND = (0.021, _YES_MAX)
 DAYS = (1.0, 6.0)
 MIN_ANCHORED_EDGE = 0.008
 # 2026-07-08: SOL/XRP REVIVED — adversarial re-eval overturned the 07-07 kill. Model-free 2-7c
@@ -242,7 +248,7 @@ def main():
         print(f"  {r['slug']:55} {r['coin']:4} ask={r['ask']:.3f} sell={r['sell']:.3f} "
               f"fair≤{r['fair_hi']:.4f} edge={r['edge']:+.4f} v24={r['vol24']:>6} score={r['score']:.4f} "
               f"d={r['days']:.1f} [{r['anchor']}]", file=sys.stderr)
-    print(json.dumps({"generated_at": int(time.time()), "criteria": "up-tail 2.1-7c, d1-6, ranked edge+activity; clamp=first-seller",
+    print(json.dumps({"generated_at": int(time.time()), "criteria": f"up-tail 2.1-{int(_YES_MAX*100)}c, d1-6, ranked edge+activity; clamp=first-seller",
                       "slugs": [r["slug"] for r in final],
                       "clamp": [r["slug"] for r in final if r.get("clamp")],
                       "regime_paused": paused,   # coins the mania gate paused this run (validate_curation must not treat the shrink as a partial-pull)

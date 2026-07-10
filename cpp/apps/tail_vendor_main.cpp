@@ -49,6 +49,9 @@ constexpr int kCeilOrders = 60;
 constexpr double kCeilTouchTotalUsd = 120.0;   // 2026-07-09 触碰腿首试 (用户选 $80 总)
 constexpr double kCeilTouchPerCoinUsd = 60.0;
 constexpr double kCeilTouchOrderUsd = 25.0;    // 单触碰仓 (curator 风险平价送 base$12/cap$24)
+// 卖价带上限硬顶 (2026-07-10 抬顶追流量; env 只能低于此)。yes_exit 硬顶须 > yes_max 硬顶 (卖后不立即退出)。
+constexpr double kCeilYesMax = 0.12;
+constexpr double kCeilYesExit = 0.20;
 
 std::atomic<bool> g_run{true};
 void on_sig(int) { g_run.store(false); }
@@ -219,6 +222,11 @@ int main(int argc, char** argv) {
     cfg.touch_per_coin_usd = env_low("TV_TOUCH_PER_COIN_USD", 0.0, kCeilTouchPerCoinUsd);
     cfg.touch_per_order_usd = env_low("TV_TOUCH_PER_ORDER_USD", 24.0, kCeilTouchOrderUsd);
     cfg.touch_per_market_usd = cfg.touch_per_order_usd;  // 一个 reach 行权价 = 一个市场
+    // 卖价带上限 (2026-07-10): 回测显示 7-10c 尾仍 +EV, 而散户流量移到旧 7c 带顶之外 -> 抬顶追流量。
+    // 默认保持旧值 0.07/0.10 (重编不改行为); 抬顶=显式 drop-in TV_YES_MAX=0.10 TV_YES_EXIT=0.15 (可秒回退)。
+    // 风险由 Deribit fair 过滤 (BTC/ETH) + regime gate (SOL/XRP) 兜底。yes_exit 必须 > yes_max。
+    cfg.yes_max = env_low("TV_YES_MAX", 0.07, kCeilYesMax);
+    cfg.yes_exit = env_low("TV_YES_EXIT", 0.10, kCeilYesExit);
     const int scan_s = static_cast<int>(env_low("TV_SCAN_S", 300, 3600));
 
     const char* lv = std::getenv("PM_TRADER_LIVE");
@@ -243,6 +251,8 @@ int main(int argc, char** argv) {
     jlog(lf, {{"ev", "start"}, {"armed", armed}, {"total_usd", cfg.total_usd},
               {"per_coin_usd", cfg.per_coin_usd}, {"per_order_usd", cfg.per_order_usd},
               {"max_orders", cfg.max_orders}, {"scan_s", scan_s},
+              {"yes_max", cfg.yes_max}, {"yes_exit", cfg.yes_exit},
+              {"touch_total_usd", cfg.touch_total_usd},
               {"mode", argc > 1 ? "sheet" : "scan"}});
 
     if (argc > 1) return run_sheet(argv[1], cfg, armed, client, sub.get(), lf);
