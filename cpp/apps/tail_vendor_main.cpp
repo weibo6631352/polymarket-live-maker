@@ -40,8 +40,9 @@ namespace tail = pmm::tail;
 
 namespace {
 // 编译期硬顶 — env 只能调低, 不能调高。
-constexpr double kCeilTotalUsd = 500.0;    // 2026-07-07 扩容 (用户授权; env 只能调低于此)
-constexpr double kCeilPerCoinUsd = 200.0;
+constexpr double kCeilTotalUsd = 650.0;    // 2026-07-12 扩容 (用户授权; env 只能调低于此)。
+                                           // 前提: 核心 0命中/22 + 7-10c 深带已实盘结算干净 (+EV 验证)。
+constexpr double kCeilPerCoinUsd = 250.0;  // 07-12: BTC/ETH 核心加码; SOL/XRP 已砍不受影响。
 constexpr double kCeilPerOrderUsd = 25.0;
 constexpr double kCeilPerMarketUsd = 50.0;
 constexpr int kCeilOrders = 60;
