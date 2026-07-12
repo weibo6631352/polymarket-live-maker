@@ -81,6 +81,21 @@ int main() {
     // 12) 资金上限: per_coin 已满 -> 拒绝
     assert(!decide(*c, cfg, 0.0, 59.0, 0.0));
     assert(!decide(*c, cfg, 0.0, 0.0, 59.0));
+    // 12b) 非对称无锚上限 (per_coin_alt_usd): 同一 deployed=100, btc 过 (cap 200) / sol,xrp 拒 (cap 75);
+    //      alt=0 时回落 per_coin_usd (向后兼容)。
+    {
+        Config ca = cfg; ca.per_coin_usd = 200; ca.per_coin_alt_usd = 75; ca.total_usd = 500;
+        auto cbtc = *c; cbtc.coin = "btc";
+        auto csol = *c; csol.coin = "sol";
+        auto cxrp = *c; cxrp.coin = "xrp";
+        assert(decide(cbtc, ca, 0.0, 100.0, 0.0));   // btc 100 < 200 -> 过
+        assert(!decide(csol, ca, 0.0, 100.0, 0.0));  // sol 100 > 75 -> 拒 (无锚段收紧)
+        assert(!decide(cxrp, ca, 0.0, 100.0, 0.0));  // xrp 同
+        assert(decide(csol, ca, 0.0, 40.0, 0.0));    // sol 40 (+~20 名义) < 75 -> 过
+        Config cb = cfg; cb.per_coin_usd = 200; cb.per_coin_alt_usd = 0; cb.total_usd = 500;
+        auto csol2 = *c; csol2.coin = "sol";
+        assert(decide(csol2, cb, 0.0, 100.0, 0.0));  // alt=0 回落 200 -> sol 100 过 (向后兼容)
+    }
     // 13) 期限窗: 太远
     auto cd = *c; cd.days_left = 30;
     assert(!decide(cd, cfg, 0.0, 0.0, 0.0));

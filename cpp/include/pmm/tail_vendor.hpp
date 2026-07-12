@@ -40,7 +40,9 @@ struct Config {
     double days_min{1.0};
     double days_max{6.0};
     double per_order_usd{20};   // 单笔 NO 抵押上限
-    double per_coin_usd{60};    // 单币种已部署 (resting+filled) 抵押上限
+    double per_coin_usd{60};    // 单币种已部署 (resting+filled) 抵押上限 (锚定核心 btc/eth)
+    double per_coin_alt_usd{0}; // 无锚段 (sol/xrp) 单币上限; 0 = 回落 per_coin_usd (向后兼容)。
+                                // 边际未经 Deribit 锚验证 + 已实盘命中 -> 收紧, 防 mania 流量铺满不安全段。
     double per_market_usd{25};  // 单市场已部署上限 (分散优先: 防同一买家反复加注同一盘吃穿币种额度;
                                 // 默认须 ≥ per_order 单笔名义, 否则一单都下不出)
     double total_usd{60};       // 总抵押上限

@@ -126,7 +126,11 @@ std::optional<Quote> decide(const Candidate& c, const Config& cfg, double deploy
     if (size < cfg.min_shares) return std::nullopt;
     const double notional = size * no_price;
     const double cap_market = touch ? cfg.touch_per_market_usd : cfg.per_market_usd;
-    const double cap_coin = touch ? cfg.touch_per_coin_usd : cfg.per_coin_usd;
+    // 无锚段 (sol/xrp) 用更紧的单币上限 (若配置了 per_coin_alt_usd>0); 核心 btc/eth 用 per_coin_usd。
+    const bool is_alt = (c.coin == "sol" || c.coin == "xrp");
+    const double cap_coin = touch ? cfg.touch_per_coin_usd
+                            : (is_alt && cfg.per_coin_alt_usd > 0.0 ? cfg.per_coin_alt_usd
+                                                                    : cfg.per_coin_usd);
     const double cap_total = touch ? cfg.touch_total_usd : cfg.total_usd;
     if (deployed_market + notional > cap_market + 1e-9) return std::nullopt;
     if (deployed_coin + notional > cap_coin + 1e-9) return std::nullopt;

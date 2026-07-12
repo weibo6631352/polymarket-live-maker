@@ -213,6 +213,7 @@ int main(int argc, char** argv) {
     tail::Config cfg;
     cfg.total_usd = env_low("TV_TOTAL_USD", 60.0, kCeilTotalUsd);
     cfg.per_coin_usd = env_low("TV_PER_COIN_USD", 60.0, kCeilPerCoinUsd);
+    cfg.per_coin_alt_usd = env_low("TV_PER_COIN_ALT_USD", 0.0, kCeilPerCoinUsd);
     cfg.per_order_usd = env_low("TV_PER_ORDER_USD", 20.0, kCeilPerOrderUsd);
     cfg.per_market_usd = env_low("TV_PER_MARKET_USD", 15.0, kCeilPerMarketUsd);
     cfg.max_orders = static_cast<int>(env_low("TV_MAX_ORDERS", 8, kCeilOrders));
@@ -249,7 +250,8 @@ int main(int argc, char** argv) {
     }
     std::ofstream lf("tail_vendor_log.jsonl", std::ios::app);
     jlog(lf, {{"ev", "start"}, {"armed", armed}, {"total_usd", cfg.total_usd},
-              {"per_coin_usd", cfg.per_coin_usd}, {"per_order_usd", cfg.per_order_usd},
+              {"per_coin_usd", cfg.per_coin_usd}, {"per_coin_alt_usd", cfg.per_coin_alt_usd},
+              {"per_order_usd", cfg.per_order_usd},
               {"max_orders", cfg.max_orders}, {"scan_s", scan_s},
               {"yes_max", cfg.yes_max}, {"yes_exit", cfg.yes_exit},
               {"touch_total_usd", cfg.touch_total_usd},
