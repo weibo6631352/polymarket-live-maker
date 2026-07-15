@@ -108,6 +108,12 @@ std::optional<Quote> decide(const Candidate& c, const Config& cfg, double deploy
         if (!c.band_clamp) return std::nullopt;
         sell_yes = cfg.yes_max;
     }
+    // 执行期边际地板 (2026-07-15): curator 只在策展快照价上验了边际 ≥0.8c; 执行器压盘到 yes_ask-tick
+    // 时并未复核 —— 若活价被别的 MM 压缩到 fair 之下, 会以负/薄边际卖出尾 (高流量近尾风险最大, 例:
+    // eth-2000 fair 3.95c, ask 压到 3c -> 卖 2.9c = 负 1.05c 边际)。用 curator 送来的 fair (wl_fair)
+    // 兜底: 卖价 YES 绝不低于 wl_fair + min_edge; 低于则本轮不报 (让位给对手的薄边际流, 并停止追价 churn)。
+    // 仍会一路吃到地板为止的所有 +EV 流量; 只是不越过被验证的边际线。band_clamp 卖 yes_max 恒过 (fair≤2%)。
+    if (c.wl_fair >= 0.0 && sell_yes < c.wl_fair + cfg.min_edge - 1e-9) return std::nullopt;
     if (sell_yes < cfg.yes_min) return std::nullopt;
     if (sell_yes <= c.yes_bid + 1e-9) return std::nullopt;
 

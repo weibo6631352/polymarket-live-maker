@@ -53,6 +53,7 @@ constexpr double kCeilTouchOrderUsd = 25.0;    // 单触碰仓 (curator 风险�
 // 卖价带上限硬顶 (2026-07-10 抬顶追流量; env 只能低于此)。yes_exit 硬顶须 > yes_max 硬顶 (卖后不立即退出)。
 constexpr double kCeilYesMax = 0.12;
 constexpr double kCeilYesExit = 0.20;
+constexpr double kCeilMinEdge = 0.05;   // 执行期边际地板上限 (env 可在 [0, 0.05] 内调; 0=关地板回退旧行为)
 
 std::atomic<bool> g_run{true};
 void on_sig(int) { g_run.store(false); }
@@ -229,6 +230,9 @@ int main(int argc, char** argv) {
     // 风险由 Deribit fair 过滤 (BTC/ETH) + regime gate (SOL/XRP) 兜底。yes_exit 必须 > yes_max。
     cfg.yes_max = env_low("TV_YES_MAX", 0.07, kCeilYesMax);
     cfg.yes_exit = env_low("TV_YES_EXIT", 0.10, kCeilYesExit);
+    // 执行期边际地板 (2026-07-15): 卖价 YES ≥ wl_fair + min_edge (镜像 curator 的 0.8c)。默认 ON;
+    // 逃生阀 = TV_MIN_EDGE=0 关闭 (回退旧的"压盘到 yes_min"行为)。仅对带 curator fair 的候选生效。
+    cfg.min_edge = env_low("TV_MIN_EDGE", 0.008, kCeilMinEdge);
     const int scan_s = static_cast<int>(env_low("TV_SCAN_S", 300, 3600));
 
     const char* lv = std::getenv("PM_TRADER_LIVE");
@@ -254,7 +258,7 @@ int main(int argc, char** argv) {
               {"per_coin_usd", cfg.per_coin_usd}, {"per_coin_alt_usd", cfg.per_coin_alt_usd},
               {"per_order_usd", cfg.per_order_usd},
               {"max_orders", cfg.max_orders}, {"scan_s", scan_s},
-              {"yes_max", cfg.yes_max}, {"yes_exit", cfg.yes_exit},
+              {"yes_max", cfg.yes_max}, {"yes_exit", cfg.yes_exit}, {"min_edge", cfg.min_edge},
               {"touch_total_usd", cfg.touch_total_usd},
               {"mode", argc > 1 ? "sheet" : "scan"}});
 
@@ -391,16 +395,21 @@ int main(int argc, char** argv) {
                     // 全程类型守卫: 任何畸形 detail 行只跳过, 绝不抛异常 —— 否则会连累 core 授权 fail-closed
                     // (authorized 停在 false → cands.clear() → core 书被撤)。触碰的 curator 笔误不许拖垮 core。
                     std::map<std::string, double> touch_coll;
+                    std::map<std::string, double> wl_fair;   // slug -> curator fair_hi (执行期边际地板用)
                     if (const auto jd = wj.find("detail"); jd != wj.end() && jd->is_array()) {
                         for (const auto& d : *jd) {
                             if (!d.is_object()) continue;
+                            const auto js = d.find("slug");
+                            if (js == d.end() || !js->is_string()) continue;
+                            const std::string dslug = js->get<std::string>();
+                            // fair_hi: 所有 detail 行都带 (Deribit/比率/触碰锚) -> 执行期边际地板 wl_fair。
+                            if (const auto jf = d.find("fair_hi"); jf != d.end() && jf->is_number())
+                                wl_fair[dslug] = jf->get<double>();
                             const auto ja = d.find("anchor");
                             if (ja == d.end() || !ja->is_string() || ja->get<std::string>() != "touch-model")
                                 continue;
-                            const auto js = d.find("slug");
-                            if (js == d.end() || !js->is_string()) continue;
                             const auto jc = d.find("collateral");
-                            touch_coll[js->get<std::string>()] =
+                            touch_coll[dslug] =
                                 (jc != d.end() && jc->is_number()) ? jc->get<double>() : 0.0;
                         }
                     }
@@ -410,6 +419,8 @@ int main(int argc, char** argv) {
                         for (auto it = cands.begin(); it != cands.end();) {
                             if (allow.count(it->second.slug) == 0) { it = cands.erase(it); continue; }
                             it->second.band_clamp = clamp.count(it->second.slug) != 0;
+                            if (const auto fi = wl_fair.find(it->second.slug); fi != wl_fair.end())
+                                it->second.wl_fair = fi->second;
                             if (const auto tc = touch_coll.find(it->second.slug); tc != touch_coll.end()) {
                                 it->second.is_touch = true;
                                 it->second.wl_collateral = tc->second;

@@ -29,6 +29,9 @@ struct Candidate {
                              // (授权条件在 curator 端: 锚定 fair≤2% 或无锚但 bid≤4c 确认深尾)
     bool is_touch{false};    // curator anchor=touch-model — 触碰/reach 卫星腿, 走独立小预算 + per-row sizing
     double wl_collateral{0}; // 白名单 detail 提供的 per-row 抵押 $ (触碰腿风险平价); 0 = 用 cfg 默认
+    double wl_fair{-1.0};    // 白名单 detail 的 fair_hi (YES 公允, curator 端 Deribit/比率锚)。执行期
+                             // 边际地板用: 卖价 YES 绝不低于 wl_fair + cfg.min_edge。<0 = 名单未带 fair
+                             // (旧格式/异常行) -> 不设地板, 保持旧行为。
 };
 
 // 卖价决策 + 风控参数。编译期硬顶在 app 层 (env 只能调低)。
@@ -37,6 +40,9 @@ struct Config {
     double yes_max{0.07};
     double yes_exit{0.10};      // 持单市场 YES mid ≥ 此值 -> 撤单退出 (行情逼近障碍)
     double floor_yes{0.02};     // 永不把 YES 卖得低于此价 (对公允 ~0.3-1% 保 2-6x 边际)
+    double min_edge{0.008};     // 执行期边际地板: 卖价 YES ≥ wl_fair + min_edge (镜像 curator MIN_ANCHORED_EDGE)。
+                                // curator 只验策展快照价的边际; 活价压缩到 fair 之下时执行器会卖出负边际尾
+                                // -> 此地板令其让位/停止追价。0 = 关 (回退旧行为); 仅对带 wl_fair 的候选生效。
     double days_min{1.0};
     double days_max{6.0};
     double per_order_usd{20};   // 单笔 NO 抵押上限

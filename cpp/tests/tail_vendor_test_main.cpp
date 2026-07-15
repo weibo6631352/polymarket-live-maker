@@ -72,6 +72,23 @@ int main() {
     auto cf = *c; cf.yes_ask = 0.021; cf.yes_bid = 0.010;
     auto qf = decide(cf, cfg, 0.0, 0.0, 0.0);
     assert(qf && std::abs((1.0 - qf->no_price) - 0.02) < 1e-9);
+    // 9b) 执行期边际地板 (wl_fair): 卖价 YES 绝不低于 wl_fair + min_edge。
+    //     base c: yes_ask=0.03 -> undercut sell_yes=0.029; default min_edge=0.008。
+    {
+        auto cflo = *c;                                   // 未带 fair (wl_fair=-1) -> 无地板, 保持旧行为
+        assert(decide(cflo, cfg, 0.0, 0.0, 0.0));
+        cflo.wl_fair = 0.015;                             // 地板 0.023 ≤ 0.029 -> 过
+        assert(decide(cflo, cfg, 0.0, 0.0, 0.0));
+        cflo.wl_fair = 0.025;                             // 地板 0.033 > 0.029 -> 让位 (薄/负边际)
+        assert(!decide(cflo, cfg, 0.0, 0.0, 0.0));
+        // 压缩泄漏场景: fair 0.028, 活价压到 ask 0.03 -> 卖 0.029 < 0.036 地板 -> 不卖负边际尾
+        auto ccomp = *c; ccomp.yes_ask = 0.03; ccomp.yes_bid = 0.01; ccomp.wl_fair = 0.028;
+        assert(!decide(ccomp, cfg, 0.0, 0.0, 0.0));
+        // 逃生阀 TV_MIN_EDGE=0: 地板退化为"不低于 fair" -> 0.029 ≥ 0.025 fair -> 过 (回退旧行为)
+        Config c0 = cfg; c0.min_edge = 0.0;
+        auto ce = *c; ce.wl_fair = 0.025;
+        assert(decide(ce, c0, 0.0, 0.0, 0.0));
+    }
     // 10) 带外拒绝: ask 太高
     auto ch = *c; ch.yes_ask = 0.12; ch.yes_bid = 0.10;
     assert(!decide(ch, cfg, 0.0, 0.0, 0.0));
